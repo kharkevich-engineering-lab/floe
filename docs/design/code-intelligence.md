@@ -1682,7 +1682,7 @@ Lance, arroy.
 
 ---
 
-## 16. Proposed decisions (for `AGENTS.md` §4; not applied by this document)
+## 16. Decisions (applied to `AGENTS.md` §4 by the M0 change; this section keeps the original wording)
 
 - **D52** **Code intelligence is a derived index, in scope as a feature-gated capability.** Git is the content
   truth; the `code.*` Iceberg tables (append-only, keyed by blob sha / chunk hash, format v2) are the durable truth

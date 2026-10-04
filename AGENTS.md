@@ -37,6 +37,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `docs/reference/cursor-git-at-any-scale.md` | The source design, verbatim. Read once before touching WAL/publish/sync/placement. |
 | `docs/patches/README.md` | Git client patches (bundle filter matching) and the gate for advertising filtered bundle families together. |
 | `web/API.md` | UI/SDK authors and anyone changing `web/*.rs`. Wire contract, caching rules, SSE envelope, tasks, prefix-first lanes. |
+| `docs/design/code-intelligence.md` | Anyone touching `crates/floe-codeintel`, the `[codeintel]`/`[mcp]`/`[access]` config, `codeintel.proto` or the MCP endpoints. Design of record for D52–D58 until it moves to `docs/CODEINTEL.md` and `docs/MCP.md`; §13 is the milestone plan, `docs/design/spikes/` the M0 spike outcomes. |
 | `web/sdk/README.md` | Users of `repos.js`. |
 | `web/README.md` | Frontend engineers changing the React SPA, Vite build, SDK adapter, static assets, loading states. |
 | `floe.example.toml` | Every **bootstrap** config key with its default and a comment (runtime sections live in the config store, D60; their schema is `GET /api/v1/admin/config/schema`). Change it with the code. |
@@ -270,7 +271,7 @@ decision in §4 — or the PR is; never "fix later".
 | # | Principle | The tell in a PR | The question to answer |
 |---|---|---|---|
 | **I** | **No state outside the object store.** Disk and memory are caches. | A database, Redis, SQLite, a file that must survive a restart, an env var that encodes data. | "If every instance is wiped now, what is lost?" — must be "warmth". |
-| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, events/cursor, maintainer heartbeats, render cache, the mirror's HTTP cache, and the `tls/acme/*` objects written under the `tls-acme` lease). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
+| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, events/cursor, maintainer heartbeats, render cache, the mirror's HTTP cache, the `tls/acme/*` objects written under the `tls-acme` lease, and the code-intel pointers of D52: `codeintel/head.pb`, `codeintel/dir/head.pb`, `codeintel/tasks/*.json`, `codeintel/tables.json`). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
 | **III** | **Side effects are readers of the WAL, never steps of a write.** Events, mirrors, notifications tail the log from a durable cursor. | A webhook/HTTP call from `receive.rs`, `publish.rs`, `follow.rs`, `smart.rs`. | "If this side effect fails, does the push?" — no. "Is it replayable from the cursor?" — yes. |
 | **IV** | **Every read revalidates; there is no eventually.** | A cache that outlives the manifest's generation, a TTL invented for a repo-scoped answer, a read that skips `sync_*`. | "After `push` returns `ok`, can any instance serve the old state?" (`cargo test -p floe-server --test sim`). |
 | **V** | **Serve from the parts that fit; never a bigger box, never a hard-coded host.** | "Just download the pack", a path that assumes the full pack set is local, a hostname in `crates/` or `web/`. | "What happens to this code on a 20 GiB tmpfs with a 32 GB base pack? Which sync level does it need?" |
@@ -620,6 +621,58 @@ catalog on). Per-repo pause is a config change (exact `owner/name` in `github_mi
 state). `repos.js` maps it as `repos.admin.*` (dogfood rule); the bundled UI's admin area lives at `/_admin` and
 renders the runtime sections from `GET …/config/schema`. TLS is never editable there (D59): the overview shows
 `GET /api/v1/tls` read-only.
+
+**D52 — Code intelligence is a derived index, in scope as a feature-gated capability (2026-10-04).** Git is
+the content truth; the `code.*` Iceberg tables (append-only, keyed by blob sha / chunk hash, format v2) are the
+durable truth of extracted facts and embeddings; everything served is an immutable, content-addressed artifact
+(`codeintel/shards`, `codeintel/vec`, `codeintel/dir`) made visible by a per-repo CAS'd
+`repos/<o>/<r>/codeintel/head.pb`. `head.pb`, `codeintel/dir/head.pb`, `codeintel/tasks/*.json` and
+`codeintel/tables.json` join principle II's Overwrite list; per-generation `commits/<commit>/<generation>.pb`
+records are immutable, and artifact liveness follows generation retirement, never write time. GOAL §4 gains
+"agent-facing code navigation and search over hosted repositories, as derived, rebuildable artifacts". Everything
+is behind cargo features (`codeintel`, `mcp`), off by default; the default build is unchanged, and a
+`[codeintel]`/`[mcp]` key that needs a feature the binary lacks is a fatal config error naming the build flag.
+The extraction core is the pure library `crates/floe-codeintel` (bytes in, records out: no store, no tokio, no
+axum). Design of record: `docs/design/code-intelligence.md`.
+
+**D53 — Indexing is a maintainer unit, not a write step (2026-10-04).** A reader of the WAL's ref state whose
+work set is the diff between the D22 desired state (tracked tips, current extractor, intact artifacts, empty
+requests, catalog caught up) and `head.pb`, the same function the planner uses; placed by D30, one lease per repo;
+no code in receive, publish or follow. Embedding is a separate unit with its own lease and rate limit.
+
+**D54 — Per-repo read authorization is one function (2026-10-04).** `[access] read` per-repo settings (a D24
+extension, with a per-repo subset of `[codeintel]`) evaluated by `policy::authorize_read`, shared by git, the web
+API and MCP; MCP is never more permissive than `git clone`; cross-repo retrieval applies the readable-repo mask
+inside postings and vector scans, never after top-k. Until `authorize_read` ships (M5), `Config::validate` accepts
+only the default `read = ["authenticated"]`: a rule nothing enforces is refused, not silently ignored.
+
+**D55 — `/api/v1/mcp` and `/{o}/{r}/mcp` are stateless MCP 2026-07-28 endpoints; floe is an OAuth resource
+server (2026-10-04).** The global endpoint lives under D15's non-repository prefix so it shadows no owner; both
+are exact routes of one service, and the per-repo route passes its validated repo to the handler as a request
+extension (rmcp hands the request's `http::request::Parts` to the handler in `RequestContext.extensions`; verified
+in the M0 spike, `docs/design/spikes/rmcp-request-parts.md`). rmcp pinned exactly; PRM at the well-known paths,
+the per-repo endpoint advertising and accepting its own resource; audience-bound IdP access tokens, `wgt_` tokens
+of the HMAC kind `mcp` (refused on git and web), and scoped static tokens; ID tokens refused. The edge may route
+`/api/v1/mcp` by `Mcp-Param-Repo` (from `x-mcp-header: "Repo"` on the root-level `repo` property) and by nothing
+else; routing is an optimisation, never a correctness dependency.
+
+**D56 — Freshness before durability, for deterministic facts only (2026-10-04).** A nav shard may be served
+before its Iceberg rows commit, because it is a pure function of git and the extractor version; the rows are then
+owed, tracked per ref as `catalog_commit`, and re-derived from the published shards until the marker commits;
+embeddings must commit to Iceberg before any artifact derived from them is published.
+
+**D57 — Agent state is explicit, signed and re-authorized (2026-10-04).** The snapshot handle pins (repo,
+commit, generation, purge epoch) with an HMAC under a key derived from `mcp.handle_secret` (default
+`server.auth.session_secret`; one of the two, ≥ 32 bytes, is required when MCP is on), lives 24 h, and is
+re-checked against `authorize_read` on every call; continuation cursors are HMAC'd positions; there are no MCP
+sessions; MCP tasks live in the bucket and are durable before `CreateTaskResult` is returned (a `reindex` task is
+durable as a record and as a queued `head.pb` request; queued tasks are judged by their request, running ones by
+heartbeat).
+
+**D58 — SQL visibility is by marker rows (2026-10-04).** `code.blobs` then `code.commits_indexed` are committed
+last; the latter records each table's snapshot id, its generation and its purge epoch; purges hide earlier epochs
+only; `views.sql` (shipped, tested against DuckDB) gives exactly-once, commit-consistent reads; catalog
+credentials are an admin privilege, one table bucket per tenant.
 
 ## 5. Working rules
 

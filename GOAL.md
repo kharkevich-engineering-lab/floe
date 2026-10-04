@@ -31,8 +31,10 @@ anyone can run against a bucket, and predictable enough that tooling can build o
    `<owner>/<repo>` namespaces, per-repo push policy and settings, ref events, a browsing web UI + one JSON API +
    one SDK (`repos.js`), tasks/narration so nothing ever waits silently, upstream mirroring (follow an
    upstream's refs, discover and mirror a forge's repositories, nothing rewritten upstream is ever lost) and
-   derived audit tables of ref history. Not in scope: code review, merge
-   queues, CI, issues — those live elsewhere and build on this.
+   derived audit tables of ref history. Also in scope, behind cargo features and off by default:
+   **agent-facing code navigation and search over hosted repositories, as derived, rebuildable artifacts**
+   (D52, `docs/design/code-intelligence.md`) — git stays the content truth and every index is rebuildable from
+   it. Not in scope: code review, merge queues, CI, issues — those live elsewhere and build on this.
 5. **Works great for developers and their laptops.** One auth story (browser sign-in through your identity
    provider, a token for git), one install script, `git` does the rest; errors tell you the fix; every long
    wait is narrated. The developer on a rebased branch must get *cheaper*, never slower.
