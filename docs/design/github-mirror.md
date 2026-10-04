@@ -1169,6 +1169,43 @@ Against RustFS, `#[ignore]` (`just test-catalog`, needs `podman compose --profil
 with `iceberg`'s reader, and asserts counts/values; and `concurrent_writers_retry_conflicts` (two writers, one
 table).
 
+### C.8 Implementation notes (2026-10-04, §C landed; the code wins)
+
+Where `crates/floe-catalog` differs from or pins down §C.1–§C.7:
+
+- **Feature deps**: `iceberg = ["dep:iceberg", "dep:iceberg-catalog-rest", "dep:iceberg-storage-opendal",
+  "dep:arrow-array", "dep:reqwest"]`. No direct `parquet`/`arrow-schema`: the Parquet writer is built with
+  `ParquetWriterBuilder::from_table_properties`, and schemas go through `iceberg::arrow`.
+  `iceberg-storage-opendal` is built with only `opendal-s3`. `iceberg-catalog-rest` 0.10.1 builds `reqwest`
+  **without a TLS backend**; `dep:reqwest` (workspace, rustls) is there only so feature unification makes an
+  `https://` catalog URI work.
+- **Conflict retry**: iceberg-rust 0.10's `Transaction::commit` already reloads the table and re-applies the
+  append on a retryable conflict. floe does not add its own loop. It sets `commit.retry.num-retries = 5` on the
+  tables it creates instead.
+- **Partitions**: rows are split with `RecordBatchPartitionSplitter` and written through `FanoutWriter`, which
+  gives one data file per partition per flush.
+- **Schema check at connect**: `schema::check_compatible` requires every floe field id to exist in the
+  catalog's current schema with the same name, type and requiredness. A catalog that reassigns field ids on
+  create, or a table someone altered, fails `connect` loudly. The writer then stays down, with lag only.
+- **Buffer** (`buffer.rs`): `max_buffer_rows` counts all tables **and rows in flight**. A failed commit fails
+  its waiters, drops its rows and takes the writer **down until a reconnect succeeds**, so later appends fail
+  fast with `Unavailable` instead of piling up. The flusher bounds a single commit at `2 × commit_timeout`, so
+  the waiters' `Timeout` always fires first. `ingested_at` is stamped by the writer at commit time and is not
+  a row field.
+- **Cursor** (`cursor.rs`): the catch-up itself lives in the catalog core as `cursor::catch_up(store, source,
+  sink, cold_start)`. The server's `CatalogTail` implements `cursor::TailSource` (head, retained start,
+  `committed_at(seq)`, rows of `(from, to]`) over a `RepoHandle` + `events::refs_from_entries`, and serializes
+  catch-ups per repository. Rows are built with `floe_catalog::rows_for_entry(repo, entry, transitions)`
+  (`RefTransition` is the `RefEvent` fields). `cursor::load_epoch` does the `catalog/epoch.json` create-once.
+  While the writer is down, a catch-up returns `Unavailable` **before** the cursor GET, so it costs nothing on
+  the bucket (§D.7's "cursor GET only" becomes "no request").
+- **`parse_follow_archived`** is generic over the map's hasher. It also rejects a line whose
+  `refs/archive/<ts>/<ref>` does not end in its `<original_ref>`, or whose OIDs are not full hex.
+- **Config**: `floe_config::CatalogConfig` (re-exported as `floe_catalog::CatalogConfig`) is validated by
+  `Config::validate` when `enabled`: `uri`, `warehouse` and a non-empty `namespace` are required,
+  `flush_rows > 0` and `max_buffer_rows >= flush_rows` must hold, and `flush_interval`/`commit_timeout` must
+  be non-zero. The `cfg!(feature = "catalog")` startup check stays §D's.
+
 ---
 
 ## D. Wiring
