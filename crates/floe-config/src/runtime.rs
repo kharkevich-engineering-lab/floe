@@ -101,9 +101,9 @@ impl Config {
     /// that alias (`floe_config::secret::set_alias`).
     pub fn with_runtime(&self, rt: &RuntimeConfig) -> Result<Config> {
         let mut cfg = self.clone();
-        cfg.github_mirror = rt.github_mirror.clone();
-        cfg.catalog = rt.catalog.clone();
-        cfg.events = rt.events.clone();
+        cfg.github_mirror.clone_from(&rt.github_mirror);
+        cfg.catalog.clone_from(&rt.catalog);
+        cfg.events.clone_from(&rt.events);
         cfg.github_mirror.token_env = GITHUB_MIRROR_TOKEN_ALIAS.to_string();
         // The alias is always registered on an instance that applied a
         // document; unset resolves to "no token", as an unset variable did.
