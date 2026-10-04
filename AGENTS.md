@@ -39,7 +39,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `web/sdk/README.md` | Users of `repos.js`. |
 | `web/README.md` | Frontend engineers changing the React SPA, Vite build, SDK adapter, static assets, loading states. |
 | `floe.example.toml` | Every config key with its default and a comment. Change it with the code. |
-| `floe.standalone.toml` | The one-machine shape: `floe-server --config floe.standalone.toml` → `https://floe.localhost:8080/`. |
+| `floe.standalone.toml` | The one-machine shape: `floe-server --config floe.standalone.toml` → `http://floe.localhost:8080/` (loopback; TLS modes in D59). |
 | `deploy/nginx.conf.example` | An optional nginx in front; documents the `X-Accel-Redirect` byte-offload contract. |
 | `Containerfile`, `flake.nix` | An OCI image; a Nix package, image and devshell. |
 
@@ -87,7 +87,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
   issuer → `/_auth/callback`. Static `tokens` work in `oidc` mode too (robots). Every path ends in the same
   allowlist and `write_domains`.
 - Open at the application (no credential): `/healthz`, `/readyz`, `/repos.js`, `/repos.mjs`, `/_auth/*` (the
-  sign-in flow itself) and **`/services/public/*`** (data-free; today `install.sh` + `ca.pem`; everything else
+  sign-in flow itself) and **`/services/public/*`** (data-free; today only `install.sh`; everything else
   under it 404; never reads repo data or takes a bearer — test `public_lane_serves_only_the_installer_without_auth`).
 - **The server answers an invalid/expired credential with a real 401** — that is what makes git `erase` it from
   its helpers and ask again; the friendly 200 + in-band ERR is reserved for failures a retry cannot fix (account
@@ -96,8 +96,14 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
   (the client's bearer travels in `X-Floe-Authorization`; `Authorization` is the hop's own credential and is
   never read as the client's) and `accel-redirect` (static bytes by `X-Accel-Redirect`, honoured only when
   `server.accel_redirect = true` **and the TCP peer is loopback**). Hit directly, nothing is assumed.
-- **The installer** (`crates/floe-server/src/setup.rs`, POSIX sh, idempotent): git ≥ 2.46 + curl; pins a
-  self-signed host's CA; takes the token from `$FLOE_TOKEN`, an already stored one, or the terminal (no terminal:
+- **TLS (D59)**: `server.tls.mode = off | files | acme`. Whatever floe presents chains to a CA clients already
+  trust, or there is no TLS — **there is no self-signed mode and nothing for a client to pin**. `validate` fails
+  closed: `acme` needs `domains`, `email`, the Cloudflare token env var name and `storage_key_env`, takes only
+  `challenge = "dns-01"`; keys of another mode are refused; a missing token or storage key is a startup error.
+  Tokens, the account key and private keys are never logged; private keys are sealed (AES-256-GCM) in the
+  bucket. The certificate status (with the last renewal error) is admin-only at `GET /api/v1/tls`.
+- **The installer** (`crates/floe-server/src/setup.rs`, POSIX sh, idempotent): git ≥ 2.46 + curl, TLS always
+  verified (never `-k`, never `sslCAInfo`); takes the token from `$FLOE_TOKEN`, an already stored one, or the terminal (no terminal:
   exit 2 with the two things to do); writes `~/.config/git/<host>-token` (0600) and the credential helper
   `<host>-credential-helper` (`get` → `authtype=Bearer`; `store` keeps what git hands it; `erase` on a 401 deletes
   the token and names `/_auth/tokens`); sets exactly `credential.https://<host>.helper` = `""` then ours,
@@ -149,6 +155,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `refs/archive/<unix-ts>/<ref>` (a ref, not an object) | Old tips that upstream follow kept when upstream rewrote or deleted a followed ref (D48); never overwritten, never followed, immutable to pushers (built-in policy rule `archive-immutable`). |
 | bucket root: `mirror/github/state.json`, `mirror/github/http-cache.json` | The GitHub mirror's state (CAS, generation-guarded) and its disposable ETag cache (`PutMode::Overwrite`), D49. |
 | bucket root: `catalog/epoch.json`, `catalog/inventory.json`, `leases/mirror-github.pb`, `leases/catalog-inventory.pb` | When the catalog was first enabled (create-once), the daily inventory snapshot's schedule (CAS), and the two fleet-wide leases (D49/D50). |
+| bucket root: `tls/acme/<dir>/account.json`, `tls/acme/<set>/cert.json`, `tls/acme/<set>/status.json`, `leases/tls-acme-<set>.pb` | `server.tls.mode = "acme"` (D59): the ACME account (key sealed), the chain + sealed private key every instance revalidates by conditional GET, the shared renewal backoff, and the order lease. `<dir>` = hash of the directory URL, `<set>` = hash of directory + sorted domains. Not WAL. |
 | `lfs/objects/<aa>/<bb>/<oid>` | LFS objects (sha256-addressed, immutable). Missing ones can be read through from `upstream.lfs` and persisted (`docs/LFS.md`). |
 Schema `crates/floe-proto/proto/floe/v1/wal.proto`; GCS over gRPC, S3 (AWS SDK) and in-memory stores share
 one contract suite (`crates/floe-store/tests/contract.rs`, incl. compose).
@@ -262,7 +269,7 @@ decision in §4 — or the PR is; never "fix later".
 | # | Principle | The tell in a PR | The question to answer |
 |---|---|---|---|
 | **I** | **No state outside the object store.** Disk and memory are caches. | A database, Redis, SQLite, a file that must survive a restart, an env var that encodes data. | "If every instance is wiped now, what is lost?" — must be "warmth". |
-| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, events/cursor, maintainer heartbeats, render cache, the mirror's HTTP cache). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
+| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, events/cursor, maintainer heartbeats, render cache, the mirror's HTTP cache, and the `tls/acme/*` objects written under the `tls-acme` lease). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
 | **III** | **Side effects are readers of the WAL, never steps of a write.** Events, mirrors, notifications tail the log from a durable cursor. | A webhook/HTTP call from `receive.rs`, `publish.rs`, `follow.rs`, `smart.rs`. | "If this side effect fails, does the push?" — no. "Is it replayable from the cursor?" — yes. |
 | **IV** | **Every read revalidates; there is no eventually.** | A cache that outlives the manifest's generation, a TTL invented for a repo-scoped answer, a read that skips `sync_*`. | "After `push` returns `ok`, can any instance serve the old state?" (`cargo test -p floe-server --test sim`). |
 | **V** | **Serve from the parts that fit; never a bigger box, never a hard-coded host.** | "Just download the pack", a path that assumes the full pack set is local, a hostname in `crates/` or `web/`. | "What happens to this code on a 20 GiB tmpfs with a 32 GB base pack? Which sync level does it need?" |
@@ -397,9 +404,10 @@ decision in §4 — or the PR is; never "fix later".
   host without the repo local, pushing over HTTP.
 - **D39** **floe is a standalone program; any deployment is packaging.** `floe-server --config x.toml` (a thin
   bin = `floe serve`; `floe` with no subcommand serves too) works on one machine against one bucket with
-  nothing in front of it. (1) **TLS in-process** — `[server.tls] mode = off | self_signed | files`; self-signed
-  certs are generated once under `<cache.dir>/tls/`, published at `/services/public/ca.pem`, pinned for git by the
-  installer. (2) **Everything an upstream might take over is announced by the upstream, per request, in
+  nothing in front of it. (1) **TLS in-process** — `[server.tls]`; the modes are D59's (`off | files | acme`).
+  *(Superseded 2026-10-04 by D59: the original `self_signed` mode — a certificate generated under
+  `<cache.dir>/tls/`, published at `/services/public/ca.pem` and pinned for git by the installer — is gone.)*
+  (2) **Everything an upstream might take over is announced by the upstream, per request, in
   `X-Floe-Capabilities`** — never assumed. (3) `cache.dir` defaults to `/tmp/floe`. (4) A missing `--config`
   file is fatal (exit 2); `--config /dev/null` is the explicit defaults+env form. (5) The credential helper and
   token file are host-derived (`<host>-credential-helper`, `<host>-token`) so two floe hosts coexist on one machine.
@@ -523,6 +531,34 @@ so the rules are on record first: a ref is either followed or pushed, never both
 (`ls-remote` first), never forced unless `push_force`, and `refs/archive/*` is never pushed. Seam:
 `floe_server::push_back`, a per-repo cursor `repos/<o>/<r>/push/<remote>.json`. Design:
 `docs/design/github-mirror.md` §E.
+
+**D59 — TLS: off, provided files, or ACME DNS-01; no self-signed (2026-10-04).** Supersedes D39 (1).
+`[server.tls] mode` is exactly one of: **`off`** (plain HTTP/1.1 + h2c: loopback development or behind an edge
+that terminates TLS, D23), **`files`** (operator chain + key; reloaded on mtime/size change, polled every 5 s, or
+`SIGHUP`; a bad pair keeps the old certificate), **`acme`** (RFC 8555 through **DNS-01 only** — HTTP-01 and
+TLS-ALPN-01 would need every instance behind the name to answer the token, DNS-01 needs one writer and covers
+wildcards; Cloudflare first, behind `floe_tls::dns::DnsProvider` for Route 53 / RFC 2136). The self-signed mode,
+`/services/public/ca.pem` and the installer's CA pinning are removed: a client either sees a certificate from a CA
+it trusts or plain HTTP. TLS stays **bootstrap config** (file + `FLOE__` env), never a bucket-stored config
+document — the listener needs it before anything else. **ACME state is in the bucket** (principle I; §2.1 rows):
+account and certificate under `tls/acme/`, private keys sealed with AES-256-GCM (`ring`, already in the tree;
+random 96-bit nonces are safe at a few seals per renewal and need no nonce state) under a 32-byte key from
+`storage_key_env`, bound to their object key as associated data. **One orderer**: the instance that wins
+`leases/tls-acme-<set>.pb` (the existing CAS lease, heartbeat while ordering) orders or renews; everyone
+revalidates `cert.json` by conditional GET every `poll_interval` (10 min; 10 s while nothing is loaded) and swaps
+the new certificate into a rustls `ResolvesServerCert` — new handshakes get it, established connections keep
+theirs, no restart. The first order is a `tls-acme` task (D13) and `/readyz` is 503 until a certificate is loaded.
+Propagation is checked against the zone's authoritative nameservers (or `resolvers`) with a timeout before the CA
+is asked; challenge records are always deleted. Failures back off 5 min × 2ⁿ up to 6 h (≥ 1 h after
+`rateLimited`), recorded in `tls/acme/<set>/status.json` so restarts and other instances honour it; inside
+`renew_before` a failing renewal logs a warning every pass. Crates: `instant-acme` (maintained, RFC 8555, used
+over our reqwest), `hickory-resolver` (propagation), `x509-parser` (expiry/issuer). Surfaces: `GET /api/v1/tls`
+(admin: domains, expiry, issuer, last renewal and error — the admin UI's overview), `instance.tls` on `/readyz`
+and `/services/api/instance` (public facts only), `floe_tls_cert_not_after_seconds` and
+`floe_tls_acme_orders_total{ok}`. Tests: config validation, seal round trip, resolver swap (with a real
+handshake), file reload, a mocked Cloudflare API, and the whole flow against Pebble + pebble-challtestsrv in CI
+(`acme-pebble`, both arches). Not done: key rotation for `storage_key_env` (rotating it means deleting `tls/acme/`
+and ordering afresh), ARI (`renewalInfo`), EAB, providers other than Cloudflare.
 
 **D63 — The Iceberg catalog client signs SigV4 itself (2026-10-04).** `[catalog] auth = "none" | "bearer" |
 "sigv4"` (with `sigv4_service`, default `"s3"` = RustFS `/iceberg`, `"s3tables"` = AWS; `sigv4_region`, default

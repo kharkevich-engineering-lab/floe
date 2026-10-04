@@ -129,9 +129,9 @@ git push https://git.example.com/acme/app.git main</code></pre>
       <h3>One box</h3>
 <pre><code>just dev-store                    <span class="c"># rustfs in a container (S3-compatible)</span>
 floe-server --config floe.standalone.toml
-open https://floe.localhost:8080/</code></pre>
-      <p>The standalone config terminates its own TLS (a self-signed certificate, pinned for git by the installer),
-      runs every role and streams every byte. Nothing in front.</p>
+open http://floe.localhost:8080/</code></pre>
+      <p>The standalone config runs every role and streams every byte on loopback. Nothing in front; on a real
+      name floe terminates TLS itself with your certificate or one from Let's Encrypt (DNS-01).</p>
     </div>
     <div>
       <h3>Get it</h3>

@@ -30,12 +30,38 @@ accel_redirect = false            # behind an nginx edge that announces `X-Floe-
 # cross-origin lane (no CORS headers).
 # cors_origins = ["https://docs.example.com"]
 
-[server.tls]                      # floe can terminate TLS itself; behind a proxy leave it "off"
-mode = "off"                      # "off" (HTTP/1.1 + h2c) | "self_signed" (generated once under <cache.dir>/tls/, served at
-                                  # /services/public/ca.pem, pinned for git by install.sh) | "files" (cert + key below)
-# cert = "/etc/floe/cert.pem"   # files mode: PEM chain
-# key = "/etc/floe/key.pem"     # files mode: PKCS#8/PKCS#1 key
-# hostnames = ["git.example.com"] # self_signed SANs; empty = localhost, *.localhost, 127.0.0.1, ::1 + public_url's host
+[server.tls]                      # floe can terminate TLS itself (D59); behind an edge that does, leave it "off".
+                                  # TLS is bootstrap config (this file + FLOE__ env), never stored in the bucket.
+mode = "off"                      # "off"   — plain HTTP/1.1 + h2c (local development, or behind a TLS-terminating edge)
+                                  # "files" — cert + key below; reloaded when either file changes or on SIGHUP
+                                  # "acme"  — Let's Encrypt (any RFC 8555 CA) via DNS-01 only, [server.tls.acme] below
+# cert = "/etc/floe/cert.pem"     # files mode: PEM chain, leaf first
+# key = "/etc/floe/key.pem"       # files mode: PKCS#8 / PKCS#1 / SEC1 key
+
+[server.tls.acme]                 # read only in mode = "acme"; any key set here in another mode is refused
+                                  # State lives in the bucket under tls/ (account key, chain, private key — keys sealed
+                                  # with AES-256-GCM); one instance orders/renews at a time under leases/tls-acme-*.pb,
+                                  # every instance hot-swaps the new certificate (conditional GET every poll_interval).
+                                  # /readyz is 503 until a certificate is loaded; the first order is a `tls-acme` task.
+# domains = ["git.example.com", "*.git.example.com"]   # SANs; wildcards are fine (DNS-01). Required.
+# email = "ops@example.com"       # ACME account contact (expiry notices). Required.
+directory = "https://acme-v02.api.letsencrypt.org/directory"   # default: Let's Encrypt production; "staging" =
+                                  # Let's Encrypt staging (try it first); any other https:// RFC 8555 directory works
+renew_before = "30d"              # renew when the certificate expires within this window (1d..60d)
+storage_key_env = "FLOE_TLS_STORAGE_KEY"   # env var with the 32-byte key (base64 or hex) sealing private keys in the
+                                  # bucket — `openssl rand -base64 32`; the same on every instance; startup fails without it
+challenge = "dns-01"              # the only accepted value: HTTP-01 / TLS-ALPN-01 are refused (every instance behind
+                                  # the name would have to answer; DNS-01 needs one writer and covers wildcards)
+dns_provider = "cloudflare"       # the only provider today (Route 53 / RFC 2136 slot in behind floe_tls::dns::DnsProvider)
+propagation_timeout = "5m"        # how long to wait for _acme-challenge TXT to be visible before giving up (backs off)
+resolvers = []                    # "ip:port" to check propagation against; empty = the zone's authoritative nameservers
+poll_interval = "10m"             # how often each instance revalidates tls/…/cert.json and checks whether renewal is due
+
+[server.tls.acme.cloudflare]
+api_token_env = "CLOUDFLARE_API_TOKEN"   # env var with an API token scoped to Zone:DNS:Edit (+ Zone:Read without zone_id).
+                                  # Required in acme mode; never logged.
+# zone_id = "0123456789abcdef"    # optional: skip the zone lookup (then Zone:DNS:Edit alone is enough)
+api_url = "https://api.cloudflare.com/client/v4"
 
 [server.auth]
 mode = "none"                     # "none" | "token" | "oidc"
@@ -89,7 +115,7 @@ bulk_clients = 4                  # separate data channels for pack/idx/side-fil
 bulk_concurrency = 32             # max concurrent bulk requests per process (control plane never queues behind them)
 
 [cache]
-dir = "/tmp/floe"               # local materialized repos (+ tls/ for a self-signed certificate)
+dir = "/tmp/floe"               # local materialized repos (disposable; TLS state lives in the bucket)
 mode = "auto"                     # "budget" (max_bytes caps disk; too-large repos are served remotely) | "disk" (no budget,
                                   # full materialization, watermark eviction — a host with a real SSD) | "auto" = disk when
                                   # maintenance.disk = "ssd"
@@ -299,9 +325,7 @@ lock_wait_warn = "1s"             # WARN "lock wait" (lock, repo, wait_ms, reque
                                   # baseUrl = http://<host>/api/v3 reads and writes the bucket. Local development
                                   # only: auth-free by construction (any bearer, one hardcoded user, admin
                                   # everywhere), so `validate` requires server.auth.mode = "none" and lets that
-                                  # mode bind beyond loopback (the network is the trust boundary). Node will not
-                                  # trust the self-signed cert, so pair it
-                                  # with [server.tls] mode = "off".
+                                  # mode bind beyond loopback (the network is the trust boundary).
 enabled = false
 # Integrations (app ID, callback, shared secret, installations and repo selection)
 # are registered at /api/v3/_dev/integrations/{name} and stored in the bucket.

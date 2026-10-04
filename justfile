@@ -17,7 +17,7 @@ web-build:
     cd web && pnpm install --frozen-lockfile && pnpm run build
 
 # Local dev = standalone: the server with every role (serve, maintain, events) at
-# https://floe.localhost:$PORT (default 8080) against local rustfs. Self-contained: starts rustfs (+ bucket) if
+# http://floe.localhost:$PORT (default 8080) against local rustfs. Self-contained: starts rustfs (+ bucket) if
 # it is not answering on :9000 and builds the SPA if web/dist is missing, then runs the server.
 # `config` defaults to floe.standalone.toml; point it at a real bucket by editing [store] there. The rustfs
 # keys come from the environment (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY; compose.yaml fixes them).
@@ -36,7 +36,7 @@ dev-local config="floe.standalone.toml":
     fi
     cargo build --release --bin floe-server
     port="${PORT:-8080}"
-    echo "→ https://floe.localhost:${port}/  (PORT=${port}, config {{config}}, store rustfs :9000, cache /tmp/floe)"
+    echo "→ http://floe.localhost:${port}/  (PORT=${port}, config {{config}}, store rustfs :9000, cache /tmp/floe)"
     exec ./target/release/floe-server --config {{config}}
 
 # Start rustfs (S3-compatible) for local dev via podman compose (rootless, no daemon group needed;
@@ -82,7 +82,7 @@ dev-store-stop:
 # hung test blocks for the whole timeout. Use `just e2e` / `just ci` below.
 test:
     {{t5}} cargo test --workspace --lib --bins
-    {{t5}} cargo test -p floe-store -p floe-git -p floe-wal -p floe-bundle --tests
+    {{t5}} cargo test -p floe-store -p floe-git -p floe-wal -p floe-bundle -p floe-tls --tests
     {{t5}} cargo test -p floe-server --test web_api --test web_ui --test api_v1 --test static_http --test maintain --test routing_prefix --test lfs_upstream --test drain --test github --test github_webhooks --test follow --test policy
 
 # Editor facade contracts: REST reads, GraphQL saves, PRs and durable webhook delivery.

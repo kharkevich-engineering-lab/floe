@@ -119,13 +119,13 @@ with its reasoning, the invariants, and the cost model (round trips to the bucke
 just web-build && cargo build --release -p floe-cli
 # or: nix build .#floe        or: podman build -t floe -f Containerfile .
 
-# one box, TLS by floe itself, a local S3 store (rustfs in a container)
+# one box on loopback (plain HTTP), a local S3 store (rustfs in a container)
 just dev-store
 ./target/release/floe-server --config floe.standalone.toml
-open https://floe.localhost:8080/
+open http://floe.localhost:8080/
 ```
 
-* `floe.standalone.toml` — the one-machine shape (self-signed TLS, rustfs, every role). Start here.
+* `floe.standalone.toml` — the one-machine shape (loopback, rustfs, every role). Start here.
 * `floe.example.toml` — every key with its default and a comment.
 * `Containerfile`, `flake.nix` — an OCI image and a Nix package/devshell.
 * `deploy/nginx.conf.example` — an optional nginx in front: public TLS, one `auth_request` per credential, and
@@ -169,6 +169,44 @@ private_visible_to_all_readers = true    # or include_private = false
 image and tarballs are) and `[catalog] enabled` writes `ref_events`, `force_push_log`, `sync_runs` and `repo_inventory` to an Iceberg REST catalog (RustFS
 or AWS S3 Tables with `auth = "sigv4"`, or `podman compose --profile catalog up -d` for a local one). The tables are derived copies of the WAL
 plus telemetry. A catalog outage only adds lag, and git, sync and the mirror never wait for it.
+
+### TLS
+
+floe serves the web UI and git over HTTPS itself, or leaves TLS to an edge. `[server.tls] mode` is one of
+three (D59; `floe.example.toml` has every key):
+
+* **`off`** — plain HTTP/1.1 + h2c. For loopback development, or behind an edge (nginx, a load balancer, a
+  serverless front) that terminates TLS.
+* **`files`** — your certificate chain and key (`cert`, `key`). floe re-reads them when either file changes
+  (checked every few seconds; Kubernetes secret volumes and certbot renewals just work) or on `SIGHUP`; a pair
+  that does not parse or does not match keeps the current certificate and logs why.
+* **`acme`** — Let's Encrypt (or any RFC 8555 CA) through the **DNS-01** challenge, Cloudflare as the DNS
+  provider. Names and wildcards in `domains`, a contact `email`, an API token scoped to `Zone:DNS:Edit` in the env
+  var `cloudflare.api_token_env` names (default `CLOUDFLARE_API_TOKEN`), and a 32-byte key in the env var
+  `storage_key_env` names (default `FLOE_TLS_STORAGE_KEY`, `openssl rand -base64 32`, the same on every
+  instance) that seals private keys in the bucket. Try `directory = "staging"` first.
+
+```toml
+[server.tls]
+mode = "acme"
+[server.tls.acme]
+domains = ["git.example.com", "*.git.example.com"]
+email = "ops@example.com"
+```
+
+With `acme`, everything lives in the bucket under `tls/` (principle I: wipe every instance and nothing is lost):
+the ACME account, the chain and its private key — both keys sealed with AES-256-GCM. One instance at a time
+orders or renews, under a store lease; it writes `_acme-challenge` TXT records, waits until the zone's
+authoritative nameservers answer them, lets the CA validate, removes the records and stores the result. Every
+instance revalidates the certificate object with a conditional GET every `poll_interval` and swaps a new one
+in for the next handshake — no restart, no dropped connection. The first order on an empty bucket is a
+`tls-acme` task and `/readyz` stays 503 until a certificate is loaded. Renewal starts `renew_before` (30 days)
+ahead; failures back off exponentially (shared through the bucket, so restarts do not hammer the CA) and log a
+warning while the certificate is inside that window. Admins see domains, expiry, issuer and the last error at
+`GET /api/v1/tls` (`repos.tls()`); `/readyz` shows expiry and issuer.
+
+There is no self-signed mode: a certificate floe presents either chains to a CA your clients already trust
+(`files`, `acme`) or there is no TLS (`off`), so the installer never pins anything.
 
 ### Authentication
 
