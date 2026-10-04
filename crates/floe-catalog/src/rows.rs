@@ -102,7 +102,7 @@ impl RefEventRow {
         let entry_kind = entry_kind_name(entry)?;
         let principal = entry.meta.get("principal").cloned().unwrap_or_default();
         let upstream = if principal == "upstream" {
-            non_empty(entry.meta.get("upstream"))
+            non_empty(entry.meta.get("upstream")).map(|u| redact_url(&u))
         } else {
             None
         };
@@ -178,6 +178,22 @@ fn non_empty(v: Option<&String>) -> Option<String> {
     v.filter(|s| !s.is_empty()).cloned()
 }
 
+/// `url` without userinfo, query or fragment. The `[upstream] git` URL is
+/// copied from the WAL into tables read more widely than the bucket, and a
+/// token belongs in `token_env`, not in the URL: never export one that is.
+/// scp-like `user@host:path` has no secret to strip and is kept as is.
+pub fn redact_url(url: &str) -> String {
+    let url = url.split(['?', '#']).next().unwrap_or(url);
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}://{host}{path}")
+}
+
 /// `force_push_log`: one rewrite or delete follow archived (§A.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForcePushRow {
@@ -203,7 +219,7 @@ impl ForcePushRow {
         if entry_kind_name(entry).is_none() {
             return Vec::new();
         }
-        let upstream = non_empty(entry.meta.get("upstream"));
+        let upstream = non_empty(entry.meta.get("upstream")).map(|u| redact_url(&u));
         let at = committed_at(entry);
         parse_follow_archived(&entry.meta)
             .into_iter()
@@ -570,6 +586,44 @@ mod tests {
         assert_eq!(row.request_id, None);
 
         assert!(RefEventRow::from_entry("o/r", &entry(EntryKind::Compact, &[]), t).is_none());
+    }
+
+    #[test]
+    fn upstream_urls_lose_credentials_before_export() {
+        let clean = "https://github.com/o/r.git";
+        assert_eq!(redact_url("https://x:ghp_secret@github.com/o/r.git"), clean);
+        assert_eq!(
+            redact_url("https://ghp_secret@github.com/o/r.git?t=1#f"),
+            clean
+        );
+        assert_eq!(redact_url(clean), clean);
+        assert_eq!(redact_url("https://github.com"), "https://github.com");
+        assert_eq!(
+            redact_url("git@github.com:o/r.git"),
+            "git@github.com:o/r.git"
+        );
+        let e = entry(
+            EntryKind::Push,
+            &[
+                ("principal", "upstream"),
+                ("upstream", "https://u:tok@github.com/o/r.git"),
+                (
+                    FOLLOW_ARCHIVED_META,
+                    &format!("refs/archive/9/refs/heads/main refs/heads/main {A} {B}"),
+                ),
+            ],
+        );
+        let t = RefTransition {
+            action: "update".into(),
+            ref_type: "branch".into(),
+            ref_name: "refs/heads/main".into(),
+            old_oid: A.into(),
+            new_oid: B.into(),
+        };
+        let row = RefEventRow::from_entry("o/r", &e, t).unwrap();
+        assert_eq!(row.upstream.as_deref(), Some(clean));
+        let rows = ForcePushRow::from_entry("o/r", &e);
+        assert_eq!(rows[0].upstream.as_deref(), Some(clean));
     }
 
     #[test]

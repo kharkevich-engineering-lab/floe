@@ -6,9 +6,11 @@
 //! * [`CatalogWriter::append_durable`] (the catalog tail and the inventory
 //!   snapshot only): enqueue and wait for the commit that holds the rows. It
 //!   fails at once with `Unavailable` while there is no live catalog, with
-//!   `Backpressure` beyond `max_buffer_rows`, and with `Timeout` after
-//!   `commit_timeout`. On any error the caller leaves its cursor where it was,
-//!   so the backlog stays in the WAL and not in memory.
+//!   `Backpressure` beyond `max_buffer_rows`, and with `Timeout` when the
+//!   commit is not confirmed within `flush_interval + commit_timeout` (the age
+//!   wait, then the commit). On any error the caller leaves its cursor where it
+//!   was, so the backlog stays in the WAL and not in memory. One append carries
+//!   at most [`CatalogWriter::max_append_rows`] rows; the tail splits.
 //! * `record_*` ([`Recorder`], follow and the mirror): a non-blocking push
 //!   that is dropped and counted when the catalog is down or the buffer full.
 //!
@@ -16,7 +18,9 @@
 //! row is `flush_interval` old. A failed commit fails its waiters, drops its
 //! rows (durable ones are re-read from a cursor) and takes the writer down
 //! until a reconnect succeeds, so an outage costs lag, never memory. Startup
-//! never waits for the catalog: connecting happens here, with backoff.
+//! never waits for the catalog: connecting happens here, with backoff, and an
+//! attempt that gets no answer within `commit_timeout` counts as a failure.
+//! Shutdown interrupts a connect in progress.
 //!
 //! The [`Committer`] is the seam: the Iceberg implementation is the real one
 //! (`iceberg.rs`, feature `iceberg`), tests use a fake.
@@ -153,6 +157,13 @@ impl CatalogWriter {
         self.shared.up.load(Ordering::Acquire)
     }
 
+    /// The most rows one [`CatalogWriter::append_durable`] should carry: one
+    /// flush's worth, which also always fits an empty buffer.
+    pub fn max_append_rows(&self) -> usize {
+        let p = &self.shared.policy;
+        p.flush_rows.min(p.max_buffer_rows)
+    }
+
     /// Enqueue `rows` and wait for the commit(s) that hold them (one per table
     /// touched). See the module docs for the fail-fast cases.
     pub async fn append_durable(&self, rows: Vec<Row>) -> Result<(), CatalogError> {
@@ -160,7 +171,14 @@ impl CatalogWriter {
             return Ok(());
         }
         let waiters = self.shared.enqueue(rows, true)?;
-        let timeout = self.shared.policy.commit_timeout;
+        // Rows under `flush_rows` wait up to `flush_interval` before their
+        // commit starts; `commit_timeout` bounds the commit itself. Bounding
+        // both with `commit_timeout` alone would time out every small append
+        // whenever `flush_interval >= commit_timeout`, while its rows still
+        // commit later: a duplicate on every retry and a cursor that never
+        // moves.
+        let p = self.shared.policy;
+        let timeout = p.flush_interval.saturating_add(p.commit_timeout);
         let all = async {
             for rx in waiters {
                 rx.await.map_err(|_| CatalogError::Closed)??;
@@ -277,7 +295,11 @@ impl Shared {
                     self.fail_all(&CatalogError::Closed);
                     return;
                 }
-                match self.committer.connect().await {
+                let Some(result) = self.connect_or_close().await else {
+                    self.fail_all(&CatalogError::Closed);
+                    return;
+                };
+                match result {
                     Ok(()) => {
                         tracing::info!("catalog: connected");
                         self.up.store(true, Ordering::Release);
@@ -309,6 +331,31 @@ impl Shared {
             tokio::select! {
                 () = self.wake.notified() => {}
                 () = sleep_until(next) => {}
+            }
+        }
+    }
+
+    /// One connect attempt, bounded by `commit_timeout` (the REST client has
+    /// no request timeout: a catalog that never answers would otherwise keep
+    /// the writer down for good). `None` when shutdown came first.
+    async fn connect_or_close(&self) -> Option<Result<(), String>> {
+        let bound = self.policy.commit_timeout;
+        let connect = tokio::time::timeout(bound, self.committer.connect());
+        tokio::pin!(connect);
+        loop {
+            tokio::select! {
+                r = &mut connect => {
+                    return Some(match r {
+                        Ok(r) => r.map_err(|e| e.to_string()),
+                        Err(_) => Err(format!("no answer within {bound:?}")),
+                    });
+                }
+                // Appends fail fast while down, so only shutdown wakes us.
+                () = self.wake.notified() => {
+                    if self.state.lock().closed {
+                        return None;
+                    }
+                }
             }
         }
     }
@@ -356,9 +403,14 @@ impl Shared {
 
     async fn commit(&self, table: Table, rows: Vec<Row>, waiters: Vec<Waiter>) {
         let started = std::time::Instant::now();
-        // The waiters give up after `commit_timeout`; this bound only keeps a
-        // catalog that never answers from wedging the flusher.
-        let bound = self.policy.commit_timeout.saturating_mul(2);
+        // The waiters give up after `flush_interval + commit_timeout`; this
+        // bound (one `commit_timeout` later) only keeps a catalog that never
+        // answers from wedging the flusher, and lets the waiters' `Timeout`
+        // fire first.
+        let p = self.policy;
+        let bound = p
+            .flush_interval
+            .saturating_add(p.commit_timeout.saturating_mul(2));
         let result = match tokio::time::timeout(
             bound,
             self.committer.commit(table, &rows, chrono::Utc::now()),
@@ -447,6 +499,7 @@ mod tests {
         commits: Mutex<Vec<(Table, Vec<Row>)>>,
         connects: AtomicUsize,
         refuse_connect: AtomicBool,
+        hang_connect: AtomicBool,
         fail_commits: AtomicBool,
         hang: AtomicBool,
     }
@@ -455,6 +508,9 @@ mod tests {
     impl Committer for Fake {
         async fn connect(&self) -> Result<(), CommitError> {
             self.connects.fetch_add(1, Ordering::SeqCst);
+            if self.hang_connect.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
             if self.refuse_connect.load(Ordering::SeqCst) {
                 return Err("catalog down".into());
             }
@@ -597,7 +653,60 @@ mod tests {
         let w = started(&fake, p).await;
         fake.hang.store(true, Ordering::SeqCst);
         let err = w.append_durable(inv(1)).await.unwrap_err();
-        assert_eq!(err, CatalogError::Timeout(Duration::from_secs(5)));
+        // flush_interval (30 s) + commit_timeout.
+        assert_eq!(err, CatalogError::Timeout(Duration::from_secs(35)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_small_append_commits_when_flush_interval_exceeds_commit_timeout() {
+        let fake = Arc::new(Fake::default());
+        let mut p = policy(100, 1000);
+        p.flush_interval = Duration::from_mins(2);
+        let w = started(&fake, p).await;
+        // Under flush_rows: it waits the full 2 min age, then commits.
+        let t0 = Instant::now();
+        w.append_durable(inv(1)).await.unwrap();
+        assert!(t0.elapsed() >= Duration::from_mins(2));
+        assert_eq!(fake.tables(), vec![(Table::RepoInventory, 1)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn max_append_rows_fits_an_empty_buffer() {
+        let fake = Arc::new(Fake::default());
+        assert_eq!(
+            CatalogWriter::start(fake.clone(), policy(10, 100)).max_append_rows(),
+            10
+        );
+        assert_eq!(
+            CatalogWriter::start(fake, policy(10, 4)).max_append_rows(),
+            4
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_connect_that_never_answers_is_retried() {
+        let fake = Arc::new(Fake::default());
+        fake.hang_connect.store(true, Ordering::SeqCst);
+        let w = CatalogWriter::start(fake.clone(), policy(1, 100));
+        // commit_timeout (60 s), then 1 s of backoff: a second attempt.
+        tokio::time::sleep(Duration::from_secs(62)).await;
+        assert!(fake.connects.load(Ordering::SeqCst) >= 2);
+        assert!(!w.is_up());
+        fake.hang_connect.store(false, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(70)).await;
+        assert!(w.is_up());
+        w.append_durable(inv(1)).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_interrupts_a_hanging_connect() {
+        let fake = Arc::new(Fake::default());
+        fake.hang_connect.store(true, Ordering::SeqCst);
+        let w = CatalogWriter::start(fake.clone(), policy(1, 100));
+        wait_for(|| fake.connects.load(Ordering::SeqCst) == 1).await;
+        let t0 = Instant::now();
+        w.shutdown().await;
+        assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
     }
 
     #[tokio::test(start_paused = true)]

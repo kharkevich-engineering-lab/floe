@@ -526,6 +526,41 @@ mod tests {
             names(Table::RepoInventory),
             "observed_at,change,floe_repo,source,source_id,full_name,status,private,archived,fork,default_branch,upstream_url,pushed_at,size_kb,head_seq,snapshot_id"
         );
+        // Types too (s/l/i/b/t = string/long/int/boolean/timestamptz, `!` =
+        // required), read back from the Iceberg schema, not from `columns`.
+        let types = |t: Table| {
+            schema(t)
+                .unwrap()
+                .as_struct()
+                .fields()
+                .iter()
+                .map(|f| {
+                    let ty = match *f.field_type {
+                        Type::Primitive(PrimitiveType::String) => "s",
+                        Type::Primitive(PrimitiveType::Long) => "l",
+                        Type::Primitive(PrimitiveType::Int) => "i",
+                        Type::Primitive(PrimitiveType::Boolean) => "b",
+                        Type::Primitive(PrimitiveType::Timestamptz) => "t",
+                        _ => "?",
+                    };
+                    format!("{ty}{}", if f.required { "!" } else { "" })
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        assert_eq!(
+            types(Table::RefEvents),
+            "s!,l!,s!,s!,s!,s!,s!,s!,s,s!,s,t!,t!,b!,s"
+        );
+        assert_eq!(types(Table::ForcePushLog), "s!,l!,s!,s!,s!,s,s!,s,t!,t!");
+        assert_eq!(
+            types(Table::SyncRuns),
+            "s!,s!,s,s,s!,t!,t!,s!,i,i,l,l,s,i,i,i"
+        );
+        assert_eq!(
+            types(Table::RepoInventory),
+            "t!,s!,s!,s!,s,s,s,b,b,b,s,s,t,l,l,s"
+        );
         for t in Table::ALL {
             // Ids are 1..=n in declaration order.
             for (i, (id, _, _)) in pinned(t).into_iter().enumerate() {

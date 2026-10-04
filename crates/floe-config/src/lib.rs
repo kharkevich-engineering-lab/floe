@@ -839,7 +839,8 @@ pub struct CatalogConfig {
     /// Bound on buffered rows (all tables, in flight included). Beyond it durable
     /// appends fail fast (the lag stays in the WAL) and telemetry is dropped.
     pub max_buffer_rows: usize,
-    /// A durable append not committed within this fails; its cursor stays.
+    /// Bound on one commit and one connect attempt: a durable append not
+    /// committed within `flush_interval` + this fails; its cursor stays.
     #[serde(with = "humantime_serde")]
     pub commit_timeout: Duration,
     /// Cold cursor of a repository that predates the catalog: `false` = start at
