@@ -26,7 +26,7 @@ pub async fn run(action: GithubAction, cfg: &Arc<Config>) -> Result<()> {
             let gm = &cfg.github_mirror;
             // `validate` checks the section only where the mirror is enabled
             // (a maintain host); a bad prefix or glob must not run a pass here.
-            gm.check(cfg)?;
+            gm.check()?;
             // The token check comes before the lease.
             if std::env::var(&gm.token_env).map_or(true, |t| t.trim().is_empty()) {
                 eprintln!(
@@ -55,24 +55,20 @@ pub async fn run(action: GithubAction, cfg: &Arc<Config>) -> Result<()> {
             }
             let telemetry = Arc::new(floe_server::mirror::PassTelemetry::start(&cfg.catalog)?);
             if once {
-                match floe_mirror::run_once_leased(&mirror).await? {
-                    Some(report) => {
-                        print_report(&report);
-                        telemetry.record(&report);
-                        telemetry.flush(cfg.server.drain_timeout).await;
+                let Some(report) = floe_mirror::run_once_leased(&mirror).await? else {
+                    let held = floe_mirror::lease_holder(&store, "github").await;
+                    match held {
+                        Some((holder, until)) => eprintln!(
+                            "floe: the mirror lease is held by {holder} until {}",
+                            humantime::format_rfc3339_seconds(until)
+                        ),
+                        None => eprintln!("floe: the mirror lease is held elsewhere"),
                     }
-                    None => {
-                        let held = floe_mirror::lease_holder(&store, "github").await;
-                        match held {
-                            Some((holder, until)) => eprintln!(
-                                "floe: the mirror lease is held by {holder} until {}",
-                                humantime::format_rfc3339_seconds(until)
-                            ),
-                            None => eprintln!("floe: the mirror lease is held elsewhere"),
-                        }
-                        std::process::exit(3);
-                    }
-                }
+                    std::process::exit(3);
+                };
+                print_report(&report);
+                telemetry.record(&report);
+                telemetry.flush(cfg.server.drain_timeout).await;
                 return Ok(());
             }
             let hook = telemetry.clone();

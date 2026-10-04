@@ -360,7 +360,7 @@ async fn a_held_lease_keeps_a_second_reconciler_out() {
         &lease_key("github"),
         "someone-else",
         "github-mirror",
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     )
     .await
     .unwrap()

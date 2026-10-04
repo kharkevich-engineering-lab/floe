@@ -16,8 +16,8 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// 5xx / transport errors are retried this many times.
 const RETRIES: u32 = 2;
 /// GitHub's guidance for a secondary limit without headers: wait at least a minute.
-const SECONDARY_MIN: Duration = Duration::from_secs(60);
-const SECONDARY_MAX: Duration = Duration::from_secs(15 * 60);
+const SECONDARY_MIN: Duration = Duration::from_mins(1);
+const SECONDARY_MAX: Duration = Duration::from_mins(15);
 
 /// One GET's result.
 #[derive(Debug, Clone, PartialEq)]
@@ -357,9 +357,9 @@ mod tests {
         // secondary without headers and remaining > 0: at least 60 s, doubling, capped.
         let body = br#"{"message":"You have exceeded a secondary rate limit."}"#;
         let h = headers(&[("x-ratelimit-remaining", "4000")]);
-        assert_eq!(rate_limited(f, &h, body, now, 0), Some(now + Duration::from_secs(60)));
-        assert_eq!(rate_limited(f, &h, body, now, 1), Some(now + Duration::from_secs(120)));
-        assert_eq!(rate_limited(f, &h, body, now, 9), Some(now + Duration::from_secs(900)));
+        assert_eq!(rate_limited(f, &h, body, now, 0), Some(now + Duration::from_mins(1)));
+        assert_eq!(rate_limited(f, &h, body, now, 1), Some(now + Duration::from_mins(2)));
+        assert_eq!(rate_limited(f, &h, body, now, 9), Some(now + Duration::from_mins(15)));
         let doc = br#"{"message":"x","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"}"#;
         assert!(rate_limited(f, &h, doc, now, 0).is_some());
         // An access-denied 403 is not a limit.

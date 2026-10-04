@@ -848,6 +848,7 @@ impl Default for GithubConfig {
 /// `[github]` is the facade (D42), hence the name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[allow(clippy::struct_excessive_bools, reason = "independent config switches")]
 pub struct GithubMirrorConfig {
     /// Run the mirror on this host (needs the `maintain` role).
     pub enabled: bool,
@@ -926,7 +927,7 @@ impl Default for GithubMirrorConfig {
             git_url: "https://github.com".into(),
             token_env: "FLOE_GITHUB_TOKEN".into(),
             prefix: "gh".into(),
-            interval: Duration::from_secs(300),
+            interval: Duration::from_mins(5),
             users: Vec::new(),
             orgs: Vec::new(),
             starred: Vec::new(),
@@ -940,13 +941,13 @@ impl Default for GithubMirrorConfig {
             lfs: true,
             follow: vec!["refs/heads/*".into(), "refs/tags/*".into()],
             on_rewrite: OnRewrite::Archive,
-            follow_interval: Duration::from_secs(600),
+            follow_interval: Duration::from_mins(10),
             read_only: true,
             max_repo_size: ByteSize::gib(2),
             max_new_per_pass: 20,
             min_rate_remaining: 200,
-            gone_after: Duration::from_secs(24 * 3600),
-            lease_ttl: Duration::from_secs(120),
+            gone_after: Duration::from_hours(24),
+            lease_ttl: Duration::from_mins(2),
             use_token: false,
         }
     }
@@ -1031,12 +1032,12 @@ impl GithubMirrorConfig {
             cfg.has_role(Role::Maintain),
             "github_mirror.enabled needs the maintain role on this host"
         );
-        self.check(cfg)
+        self.check()
     }
 
     /// The section's own checks, without the role rule: `floe github sync`
     /// runs them on a CLI host, where `enabled` is normally off.
-    pub fn check(&self, cfg: &Config) -> Result<()> {
+    pub fn check(&self) -> Result<()> {
         anyhow::ensure!(
             !self.prefix.is_empty()
                 && self.prefix.len() <= 16
@@ -2387,7 +2388,7 @@ listen = \"0.0.0.0:1\"\n",
         let mut bad = c.clone();
         bad.server.roles = vec![Role::Serve];
         assert!(bad.validate().is_err());
-        bad.github_mirror.check(&bad).unwrap();
+        bad.github_mirror.check().unwrap();
         let edits: [fn(&mut GithubMirrorConfig); 10] = [
             |m: &mut GithubMirrorConfig| m.prefix = "GH".into(),
             |m: &mut GithubMirrorConfig| m.prefix = String::new(),
@@ -2404,7 +2405,7 @@ listen = \"0.0.0.0:1\"\n",
             let mut bad = c.clone();
             edit(&mut bad.github_mirror);
             assert!(bad.validate().is_err(), "{:?}", bad.github_mirror);
-            assert!(bad.github_mirror.check(&bad).is_err(), "{:?}", bad.github_mirror);
+            assert!(bad.github_mirror.check().is_err(), "{:?}", bad.github_mirror);
         }
         let mut local = c.clone();
         local.github_mirror.api_url = "http://127.0.0.1:8080".into();
@@ -2507,7 +2508,7 @@ listen = \"0.0.0.0:1\"\n",
             )
             .unwrap();
         assert_eq!(c.upstream.on_rewrite, OnRewrite::Refuse);
-        assert_eq!(c.upstream.follow_interval, Some(Duration::from_secs(600)));
+        assert_eq!(c.upstream.follow_interval, Some(Duration::from_mins(10)));
         assert_eq!(Config::default().upstream.on_rewrite, OnRewrite::Archive);
         for bad in [
             "[upstream]\ngit = \"https://h/a\"\nfollow = [\"refs/archive/*\"]\n",

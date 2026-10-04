@@ -17,7 +17,7 @@ use crate::AppState;
 const NUDGE_CONCURRENCY: usize = 2;
 /// A nudged follow holds its slot at most this long (a stuck fetch must not
 /// block the others; the follow loop's backstop still covers its repository).
-const NUDGE_HOLD_MAX: Duration = Duration::from_secs(3600);
+const NUDGE_HOLD_MAX: Duration = Duration::from_hours(1);
 
 /// Run a `follow` op now for a repository **this host maintains** (D28/D30);
 /// elsewhere a no-op, and the maintaining host's follow loop picks the change

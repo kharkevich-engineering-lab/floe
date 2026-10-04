@@ -49,7 +49,7 @@ const SAVE_EVERY_STEPS: usize = 10;
 /// hit the forge at once.
 const FIRST_TICK: Duration = Duration::from_secs(10);
 /// The longest a rate limit makes the loop sleep.
-const MAX_RATE_SLEEP: Duration = Duration::from_secs(3600);
+const MAX_RATE_SLEEP: Duration = Duration::from_hours(1);
 
 /// Everything a pass needs.
 pub struct Mirror {

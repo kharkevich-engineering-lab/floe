@@ -58,7 +58,7 @@ pub struct Probe {
 }
 
 /// The longest a [`probe`] may take (one `ls-refs`; normally well under a second).
-pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
 
 /// One `git ls-remote <upstream>` (the same single `ls-refs` round trip a fetch's
 /// advertisement costs; no objects, no scratch), filtered by `patterns` in floe:

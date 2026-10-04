@@ -97,6 +97,7 @@ impl Status {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools, reason = "independent facts the forge reports per repository")]
 pub struct RepoEntry {
     /// `owner/name` as the forge spells it now (renames update it).
     pub full_name: String,

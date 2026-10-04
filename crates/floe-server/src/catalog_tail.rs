@@ -45,12 +45,12 @@ const INVENTORY_LEASE: &str = "leases/catalog-inventory.pb";
 /// Bucket-root schedule of the snapshot: restarts and lease handovers neither
 /// skip nor repeat a day.
 pub const INVENTORY_KEY: &str = "catalog/inventory.json";
-const INVENTORY_EVERY: Duration = Duration::from_secs(24 * 3600);
+const INVENTORY_EVERY: Duration = Duration::from_hours(24);
 /// How often a host checks whether the snapshot is due.
-const INVENTORY_CHECK: Duration = Duration::from_secs(3600);
+const INVENTORY_CHECK: Duration = Duration::from_hours(1);
 /// First check after startup (lets the writer connect first).
-const INVENTORY_FIRST_CHECK: Duration = Duration::from_secs(120);
-const INVENTORY_LEASE_TTL: Duration = Duration::from_secs(300);
+const INVENTORY_FIRST_CHECK: Duration = Duration::from_mins(2);
+const INVENTORY_LEASE_TTL: Duration = Duration::from_mins(5);
 
 /// `catalog/inventory.json`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,7 +147,7 @@ impl CatalogTail {
                 }
                 match tail.snapshot_if_due().await {
                     Ok(Some(n)) => {
-                        tracing::info!(rows = n, "catalog: inventory snapshot committed")
+                        tracing::info!(rows = n, "catalog: inventory snapshot committed");
                     }
                     Ok(None) => {}
                     Err(e) => tracing::warn!(
