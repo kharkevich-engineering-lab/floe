@@ -142,6 +142,31 @@ export interface Me {
   write: boolean;
   anonymous: boolean;
 }
+/** `tls` (admin): the certificate this host presents when it terminates TLS itself (D59). */
+export interface TlsStatus {
+  /** `off` | `files` | `acme`. */
+  mode: "off" | "files" | "acme";
+  /** Configured names (`acme`) or the certificate's SANs (`files`). */
+  domains: string[];
+  loaded: boolean;
+  /** RFC 3339. */
+  not_before: string | null;
+  /** RFC 3339. */
+  not_after: string | null;
+  issuer: string | null;
+  sans: string[];
+  fingerprint: string | null;
+  /** `files:<path>` or `bucket:<object>`. */
+  source: string | null;
+  /** ACME directory URL. */
+  directory: string | null;
+  last_renewal_at: string | null;
+  last_attempt_at: string | null;
+  last_error: string | null;
+  failures: number;
+  next_attempt_at: string | null;
+  renewal_due: boolean;
+}
 export interface TaskProgress {
   label: string;
   done: number;
@@ -336,6 +361,11 @@ export class ReposClient {
   /** Who am I (401 → ReposError). */
   me(opts?: CallOptions) {
     return this.json<Me>("me", opts);
+  }
+
+  /** The host's TLS certificate status (admin; 403 → ReposError). */
+  tls(opts?: CallOptions) {
+    return this.json<TlsStatus>("tls", opts);
   }
 
   /**

@@ -41,8 +41,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(API_V1, get(discovery))
         .route(&format!("{API_V1}/"), get(discovery))
         .route(&format!("{API_V1}/me"), get(me))
+        .route(&format!("{API_V1}/tls"), get(tls_status))
         .route(&format!("{API_V1}/authenticate"), get(authenticate))
         .route(&format!("{API_BROWSER}/v1/me"), get(me))
+        .route(&format!("{API_BROWSER}/v1/tls"), get(tls_status))
         .route(&format!("{API_BROWSER}/v1/authenticate"), get(authenticate))
         .route(&format!("{API_V1}/owners"), get(crate::web::api::owners))
         .route(
@@ -226,6 +228,7 @@ async fn discovery(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         },
         endpoints: vec![
             "GET  /api/v1/me",
+            "GET  /api/v1/tls   (admin: certificate domains, expiry, issuer, last renewal error)",
             "GET  /api/v1/owners",
             "GET  /api/v1/owners/{owner}/repos",
             "GET  /api/v1/authenticate   (also /api-browser/v1/me|authenticate for the browser lane)",
@@ -273,6 +276,27 @@ async fn me(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
         Ok(_) => ApiError::Unauthorized.into_response(),
         Err(e) => crate::web::api::auth_err(e).into_response(),
     }
+}
+
+/// `GET /api/v1/tls` — the in-process TLS certificate (D59): mode, domains, validity, issuer,
+/// source, last renewal / error / next attempt. Admin only (an error message may name DNS
+/// zones or CA problems); `{"mode": "off"}` when this process does not terminate TLS. The
+/// admin UI's overview reads it; `repos.tls()` in the SDK.
+async fn tls_status(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(e) = st.auth.require_admin(&headers).await {
+        return crate::web::api::auth_err(e).into_response();
+    }
+    let body = st.tls.as_ref().map_or_else(
+        || floe_tls::CertStatus {
+            mode: "off",
+            ..floe_tls::CertStatus::default()
+        },
+        |t| t.status(),
+    );
+    let mut r = axum::Json(body).into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    r
 }
 
 /// `GET /api/v1/authenticate`: the popup landing page of the browser lane.

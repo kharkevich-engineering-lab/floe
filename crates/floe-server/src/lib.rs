@@ -75,7 +75,7 @@ pub struct AppState {
     pub bridge: Option<Arc<bridge::Bridge>>,
     /// Last upstream-follow round per repository on this instance (`[upstream] follow`).
     pub follow: follow::FollowStatuses,
-    /// In-process TLS (standalone, D39); `None` behind an edge (h2c).
+    /// In-process TLS (D39, D59: `files` or `acme`); `None` behind an edge (h2c).
     pub tls: Option<Arc<tls::Tls>>,
     /// Lossy catalog telemetry (`sync_runs`/`repo_inventory`, D50): the writer
     /// when the catalog is compiled in and enabled, else a no-op. Follow and
@@ -104,9 +104,10 @@ impl AppState {
             Arc::new(RegistryBundleSource(registry.clone()));
         let bundles = floe_bundle::Bundler::new_with_source(bundle_source, cfg.clone());
         let metrics_handle = metrics::install()?;
-        let tls = tls::load(&cfg)?;
+        let tls = tls::Tls::load(&cfg, store.clone())?;
         if let Some(t) = &tls {
-            tracing::info!(fingerprint = %t.fingerprint, mode = ?cfg.server.tls.mode, "TLS terminated in-process");
+            let s = t.status();
+            tracing::info!(mode = ?cfg.server.tls.mode, loaded = s.loaded, not_after = ?s.not_after, issuer = ?s.issuer, "TLS terminated in-process");
         }
         let catalog = catalog_writer(&cfg.catalog)?;
         let recorder: Arc<dyn floe_catalog::Recorder> = match &catalog {
@@ -615,6 +616,9 @@ pub async fn serve(
     let addr = state.cfg.server.listen;
     let state_for_shutdown = state.clone();
     prewarm::spawn(state.clone());
+    if let Some(t) = &state.tls {
+        t.spawn(Arc::new(tls::TaskNarrator(state.registry.tasks().clone())));
+    }
     bridge::spawn_sweeper(state.clone());
     spawn_runtime_watchdog(state.registry.tasks().clone(), state.inflight.clone());
     let app = router(state);
@@ -664,7 +668,7 @@ pub async fn serve(
             axum::serve(
                 tls::TlsListener {
                     tcp: listener,
-                    acceptor: t.acceptor.clone(),
+                    acceptor: tokio_rustls::TlsAcceptor::from(t.server_config.clone()),
                 },
                 app,
             )

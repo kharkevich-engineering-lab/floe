@@ -2742,6 +2742,7 @@ async fn public_lane_serves_only_the_installer_without_auth() -> TestResult {
     for (path, want) in [
         ("/services/public/nothing-else", 404),
         ("/services/public/", 404),
+        ("/services/public/ca.pem", 404), // self-signed TLS is gone (D59): nothing to pin
         ("/services/install.sh", 401), // the old path: not an alias, not open
         ("/services/setup.json", 401),
         ("/t/r/api/refs", 401),

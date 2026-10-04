@@ -1,148 +1,74 @@
-//! In-process TLS for the standalone shape (D39): `server.tls.mode = "self_signed" | "files"`.
+//! In-process TLS (D39, D59): `server.tls.mode = "off" | "files" | "acme"`.
 //!
-//! A reverse proxy may terminate TLS and run h2c to floe; a
-//! standalone `floe-server` on a laptop or a single VM has no edge, so it
-//! terminates TLS itself. The listener performs the handshake lazily, on the
-//! connection's first read/write, so one slow client never serializes the
-//! accept loop. ALPN offers `h2` and `http/1.1`; hyper's auto builder sniffs
-//! the HTTP/2 preface, so both work over the same port.
+//! A reverse proxy may terminate TLS and run h2c to floe (`off`); a standalone host terminates
+//! TLS itself with the operator's certificate (`files`) or one it obtains over ACME DNS-01
+//! (`acme`). The certificate logic lives in `floe-tls`; this module is the listener and the
+//! glue to the server (task narration, readiness).
 //!
-//! Self-signed certificates are generated with rcgen, written once to
-//! `<cache.dir>/tls/{cert,key}.pem` next to `cert.sans` (the SAN list they
-//! were issued for) and regenerated only when that list changes, so a browser
-//! or git that trusted the certificate keeps trusting it across restarts. The
-//! certificate is public material and is served at `/services/public/ca.pem`.
+//! The listener performs the handshake lazily, on the connection's first read/write, so one
+//! slow client never serializes the accept loop. ALPN offers `h2` and `http/1.1`; hyper's auto
+//! builder sniffs the HTTP/2 preface, so both work over the same port. The rustls config
+//! resolves its certificate per handshake, so a renewal or a reloaded file is presented to
+//! the next connection while established ones continue untouched.
 
 use std::{
     io,
-    path::Path,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
 
-use anyhow::Context as _;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::{Accept, TlsAcceptor, server::TlsStream};
-use floe_config::{Config, TlsMode};
 
 use crate::TcpAccept;
 
-/// The loaded server identity: rustls config plus the PEM chain for `/services/public/ca.pem`.
-pub struct Tls {
-    pub acceptor: TlsAcceptor,
-    pub cert_pem: String,
-    /// `sha256:<hex>` of the leaf certificate (logged at startup, shown on /readyz).
-    pub fingerprint: String,
+pub use floe_tls::Tls;
+
+/// Pseudo-repository the instance-level TLS task is filed under (`tasks` log, metrics).
+pub const TASK_SCOPE: &str = "_instance";
+
+/// ACME orders narrated as tasks (D13): `tls-acme` under [`TASK_SCOPE`], with a log line per
+/// step, so a first boot that waits on the CA is never silent.
+pub struct TaskNarrator(pub Arc<floe_wal::tasks::Tasks>);
+
+struct TaskNarration(parking_lot::Mutex<Option<floe_wal::tasks::TaskHandle>>);
+
+impl floe_tls::Narrator for TaskNarrator {
+    fn begin(&self, kind: &str, summary: &str) -> Box<dyn floe_tls::Narration> {
+        let mut params = std::collections::HashMap::new();
+        params.insert("summary".to_string(), summary.to_string());
+        let handle = match self.0.begin(TASK_SCOPE, kind, params, None) {
+            floe_wal::tasks::Begin::Started(h) => {
+                h.notice(summary);
+                Some(h)
+            }
+            floe_wal::tasks::Begin::AlreadyRunning(_) => None,
+        };
+        Box::new(TaskNarration(parking_lot::Mutex::new(handle)))
+    }
 }
 
-pub fn load(cfg: &Config) -> anyhow::Result<Option<Arc<Tls>>> {
-    let (cert_pem, key_pem) = match cfg.server.tls.mode {
-        TlsMode::Off => return Ok(None),
-        TlsMode::Files => {
-            let cert = cfg
-                .server
-                .tls
-                .cert
-                .as_ref()
-                .context("server.tls.cert is required when server.tls.mode = \"files\"")?;
-            let key = cfg
-                .server
-                .tls
-                .key
-                .as_ref()
-                .context("server.tls.key is required when server.tls.mode = \"files\"")?;
-            (
-                std::fs::read_to_string(cert)
-                    .with_context(|| format!("reading server.tls.cert {}", cert.display()))?,
-                std::fs::read_to_string(key)
-                    .with_context(|| format!("reading server.tls.key {}", key.display()))?,
-            )
+impl floe_tls::Narration for TaskNarration {
+    fn notice(&self, text: &str) {
+        if let Some(h) = self.0.lock().as_ref() {
+            h.notice(text.to_string());
         }
-        TlsMode::SelfSigned => self_signed(&cfg.tls_dir(), &cfg.tls_hostnames())?,
-    };
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
-        .collect::<Result<_, _>>()
-        .context("parsing TLS certificate PEM")?;
-    let leaf = certs
-        .first()
-        .context("TLS certificate PEM holds no certificate")?;
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-        .context("parsing TLS private key PEM")?
-        .ok_or_else(|| anyhow::anyhow!("TLS key PEM holds no private key"))?;
-    let fingerprint = {
-        use sha2::Digest;
-        format!(
-            "sha256:{}",
-            hex::encode(sha2::Sha256::digest(leaf.as_ref()))
-        )
-    };
-    let mut sc = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .context("rustls protocol versions")?
-    .with_no_client_auth()
-    .with_single_cert(certs, key)
-    .context("building rustls server config")?;
-    sc.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    Ok(Some(Arc::new(Tls {
-        acceptor: TlsAcceptor::from(Arc::new(sc)),
-        cert_pem,
-        fingerprint,
-    })))
-}
-
-/// Load or create the self-signed pair under `dir` for exactly `hostnames`.
-fn self_signed(dir: &Path, hostnames: &[String]) -> anyhow::Result<(String, String)> {
-    let cert_p = dir.join("cert.pem");
-    let key_p = dir.join("key.pem");
-    let sans_p = dir.join("cert.sans");
-    let wanted = hostnames.join("\n");
-    if let (Ok(c), Ok(k), Ok(s)) = (
-        std::fs::read_to_string(&cert_p),
-        std::fs::read_to_string(&key_p),
-        std::fs::read_to_string(&sans_p),
-    ) && s.trim() == wanted
-    {
-        return Ok((c, k));
+        tracing::info!(task = "tls-acme", "{text}");
     }
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let key = rcgen::KeyPair::generate().context("generating TLS key")?;
-    let mut params =
-        rcgen::CertificateParams::new(hostnames.to_vec()).context("certificate params")?;
-    params.distinguished_name.push(
-        rcgen::DnType::CommonName,
-        hostnames.first().map_or("floe", String::as_str),
-    );
-    params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-    params.not_after = rcgen::date_time_ymd(2124, 1, 1);
-    let cert = params
-        .self_signed(&key)
-        .context("self-signing TLS certificate")?;
-    let cert_pem = cert.pem();
-    let key_pem = key.serialize_pem();
-    write_private(&key_p, &key_pem)?;
-    std::fs::write(&cert_p, &cert_pem).with_context(|| format!("writing {}", cert_p.display()))?;
-    std::fs::write(&sans_p, &wanted).with_context(|| format!("writing {}", sans_p.display()))?;
-    tracing::info!(dir = %dir.display(), sans = ?hostnames, "generated self-signed TLS certificate");
-    Ok((cert_pem, key_pem))
-}
-
-fn write_private(path: &Path, body: &str) -> anyhow::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new();
-    f.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        f.mode(0o600);
+    fn finish(self: Box<Self>, result: Result<String, String>) {
+        if let Some(h) = self.0.lock().take() {
+            match result {
+                Ok(s) => {
+                    let _record = h.finish_ok(s, None);
+                }
+                Err(e) => {
+                    let _record = h.finish_err(502, e);
+                }
+            }
+        }
     }
-    f.open(path)
-        .and_then(|mut f| f.write_all(body.as_bytes()))
-        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// `axum::serve::Listener` that wraps every accepted TCP connection in a
@@ -249,38 +175,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn self_signed_is_persisted_and_regenerated_only_when_sans_change() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = self_signed(dir.path(), &["localhost".into()]).unwrap();
-        let b = self_signed(dir.path(), &["localhost".into()]).unwrap();
-        assert_eq!(a.0, b.0, "same SANs ⇒ same certificate");
-        let c = self_signed(dir.path(), &["localhost".into(), "floe.localhost".into()]).unwrap();
-        assert_ne!(a.0, c.0, "new SAN ⇒ regenerated");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(dir.path().join("key.pem"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
+    fn off_builds_no_listener_state() {
+        let cfg = floe_config::Config::default();
+        let store: floe_store::DynStore = floe_store::memory::MemoryStore::shared();
+        assert!(Tls::load(&cfg, store).unwrap().is_none());
     }
 
     #[test]
-    fn load_builds_an_acceptor_with_h2_and_h1_alpn() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.cache.dir = dir.path().to_path_buf();
-        cfg.server.tls.mode = TlsMode::SelfSigned;
-        cfg.server.public_url = Some("https://floe.localhost:8888".into());
-        let tls = load(&cfg).unwrap().expect("tls on");
-        assert!(tls.fingerprint.starts_with("sha256:"));
-        assert!(tls.cert_pem.contains("BEGIN CERTIFICATE"));
-        assert_eq!(cfg.tls_hostnames().last().unwrap(), "floe.localhost");
-        assert!(load(&Config::default()).unwrap().is_none());
+    fn acme_without_its_secrets_fails_closed_at_startup() {
+        let mut cfg = floe_config::Config::default();
+        cfg.server.tls.mode = floe_config::TlsMode::Acme;
+        cfg.server.tls.acme.domains = vec!["git.example.com".into()];
+        cfg.server.tls.acme.email = "ops@example.com".into();
+        cfg.server.tls.acme.storage_key_env = "FLOE_TEST_TLS_KEY_THAT_IS_NOT_SET".into();
+        let store: floe_store::DynStore = floe_store::memory::MemoryStore::shared();
+        let e = Tls::load(&cfg, store).unwrap_err().to_string();
+        assert!(e.contains("FLOE_TEST_TLS_KEY_THAT_IS_NOT_SET"), "{e}");
     }
 }
