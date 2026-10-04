@@ -557,7 +557,7 @@ mod tests {
     }
 
     fn suite_time() -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(1_440_938_160) // 2015-08-30T12:36:00Z
+        UNIX_EPOCH + Duration::from_mins(24_015_636) // 2015-08-30T12:36:00Z
     }
 
     fn hdrs(pairs: &[(&'static str, &str)]) -> HeaderMap {
@@ -667,7 +667,7 @@ mod tests {
             body: b"",
             service: "s3",
             region: "us-east-1",
-            time: UNIX_EPOCH + Duration::from_secs(1_369_353_600), // 2013-05-24T00:00:00Z
+            time: UNIX_EPOCH + Duration::from_hours(380_376), // 2013-05-24T00:00:00Z
             payload_header: true,
         };
         sign_headers(&input, &mut h, &creds).unwrap();

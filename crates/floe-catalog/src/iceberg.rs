@@ -446,7 +446,7 @@ mod tests {
             .creds
             .set(Arc::new(CredentialSource::fixed(creds.clone())))
             .unwrap();
-        let err = committer.connect().await.err().expect("create_table fails");
+        let err = committer.connect().await.expect_err("create_table fails");
         assert!(format!("{err:?}").contains("fake"), "{err:?}");
 
         let seen = log.lock().unwrap().clone();
