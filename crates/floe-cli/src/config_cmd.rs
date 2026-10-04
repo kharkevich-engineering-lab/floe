@@ -31,6 +31,7 @@ pub async fn run(action: ConfigAction, cfg: &Arc<Config>) -> Result<()> {
             let ignored = cfg.apply_env_report(vars.clone().into_iter())?;
             cfg.validate()?;
             mirror_and_catalog(&cfg, &vars)?;
+            floe_server::check_build(&cfg)?;
             for (k, why) in &ignored {
                 eprintln!("ignored {k}: {why}");
             }

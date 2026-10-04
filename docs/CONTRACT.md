@@ -19,13 +19,19 @@ Read `AGENTS.md` first (design §1–§2, decisions §3; the original layout/pha
 - `floe-proto`: prost types from `proto/floe/v1/wal.proto` (Manifest, LogSegmentRef, LogEntry, PackRef,
   RefTransaction/RefUpdate, Checkpoint(+Ref), RefSnapshot/Ref, Lease, BundleList/BundleEntry); `keys::*`;
   `frame::{encode_entries,decode_entries}` (uvarint-framed log encoding); `time::*`; `keys::POLICY` / `policy_key` (`policy.json` rule language, `docs/POLICY.md`).
+  Code intelligence (D52): `proto/floe/v1/codeintel.proto` (IndexHead, RefIndex, ArtifactRef, RecentSnapshot,
+  ReindexRequest, CommitIndex, SnapshotClaims, DirHead, McpTask, ShardMeta), same package; its maps are BTreeMaps
+  so encodings are deterministic.
 - `floe-store`: `ObjectStore` trait (`Version` opaque CAS token, `GetOptions{if_none_match,if_match,range}`,
   `GetResult::{NotModified,Object}`, `PutMode::{Overwrite,Create,Update(Version)}`, `PutBody::{Bytes,Stream,File}`,
   `PutOptions`, `StoreError::{NotFound,PreconditionFailed{current},Retryable,InvalidArgument,Other}`,
   `ObjectStoreExt`, `Prefixed`, `memory::MemoryStore`, `util::{collect,once,file_stream,backoff,retry}`),
   placeholder modules `coord.rs`, `gcs.rs`, `s3.rs`.
 - `floe-config`: `Config` for floe.toml (+ `FLOE__` env overrides, `PORT`); `Config::with_settings` accepts
-  only `[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`, and `[integrations]` in repo-scoped settings.
+  only `[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`, and `[integrations]` in repo-scoped settings;
+  plus `[codeintel]` (only `CODEINTEL_REPO_KEYS`) and `[access]` (D54). `[codeintel]`/`[mcp]`/`[access]` parse in
+  every build; `Config::validate_build(BuildFeatures)` refuses keys the binary's features cannot run
+  (`floe_server::BUILD_FEATURES`, `floe_server::check_build`).
   `TlsConfig { mode: TlsMode::{Off,Files,Acme}, cert, key, acme: AcmeConfig }` + `TlsConfig::validate` (D59).
 - `floe-tls` (D59): `Tls::load(&Config, DynStore) -> Option<Arc<Tls>>` (`server_config`, `ready()`, `status()`,
   `spawn(Arc<dyn Narrator>)`), `CertResolver` (rustls `ResolvesServerCert`, hot swap), `FilesCert`,
@@ -326,3 +332,12 @@ where configured. Do not derive scheduling behavior from this interface catalog.
 `repo create|list|info` | `wal ls|show|materialize --at-seq` | `synth --out DIR --size s|m|l [--commits N --files M]`
 | `import --from GITDIR owner/name` | `config check|dump`. Also `Containerfile`, `compose.yaml` (rustfs +
 floe), `justfile`, `floe.example.toml`, `tests/e2e.sh` (real git vs. server on memory store and on rustfs).
+
+## floe-codeintel (code intelligence core, D52)
+A pure library (no store, no tokio, no axum): bytes in, records out. `lang::{Lang, classify, Attributes,
+FileFlags}`; `extract::{Extractor, ExtractOptions}` (feature `extract`, grammars behind `lang-*`):
+`Extractor::extract(path, bytes, &Attributes) -> FileFacts { lang, flags, extractor, defs: Vec<Def>, refs:
+Vec<Ref>, chunks: Vec<Chunk> }`, never failing (unparseable ⇒ `parse_timeout`); `chunk::{chunk_syntax,
+chunk_windows, chunk_hash, header}`; `version::{extractor, extractors, CHUNKER}` (`ShardMeta.extractors`).
+Deterministic: the same (path, bytes, build) gives equal records. `floe-server` depends on it only under
+`--features codeintel`. Design: `docs/design/code-intelligence.md` §2.1, §5.6–§5.7.

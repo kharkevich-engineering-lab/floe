@@ -1,0 +1,20 @@
+file app/models.py lang=python flags= size=442 lines=29
+extractor ts-tags/1;cast/1;python=0.25.0@10c4c4ac
+def #0 const VERSION @4:1-4:8 body=4-4 parent=- in="" flags=1 sig="VERSION = \"1.0\"" doc=""
+def #1 class User @7:7-7:11 body=7-20 parent=- in="" flags=1 sig="class User:" doc=""
+def #2 method __init__ @10:9-10:17 body=10-11 parent=1 in="User" flags=0 sig="def __init__(self, name):" doc=""
+def #3 method to_json @13:9-13:16 body=13-14 parent=1 in="User" flags=1 sig="def to_json(self):" doc=""
+def #4 method _secret @16:9-16:16 body=16-20 parent=1 in="User" flags=0 sig="def _secret(self):" doc=""
+def #5 function inner @17:13-17:18 body=17-18 parent=4 in="User._secret" flags=1 sig="def inner():" doc=""
+def #6 function load @23:5-23:9 body=23-25 parent=- in="" flags=1 sig="def load(text):" doc=""
+def #7 function test_load @28:5-28:14 body=28-29 parent=- in="" flags=3 sig="def test_load():" doc=""
+ref call dumps @14:21-26 in=3
+ref call inner @20:16-21 in=4
+ref call loads @24:17-22 in=6
+ref call User @25:12-16 in=6
+ref call load @29:12-16 in=7
+chunk lines=1-2 bytes=0-35 kind=block def=- symbol="" tokens=11 hash=5f04cb5d885a954386f6b068c6c83b8fce0e5907a886692de72681a601a8738b
+chunk lines=4-4 bytes=37-52 kind=const def=0 symbol="VERSION" tokens=5 hash=b97428b24390d9207e89b3cb67e1a7ff56a261235c81673bd81d1795e206f8f6
+chunk lines=7-20 bytes=55-301 kind=class def=1 symbol="User" tokens=54 hash=d79411939977e819956d5dc37d4ede112085a2e5456e1a92d5e8b7f226c0b89e
+chunk lines=23-25 bytes=304-377 kind=function def=6 symbol="load" tokens=20 hash=20a5a15b183984662117010a8f8958e4cb52568c593c6a7b789491be841c1a3c
+chunk lines=28-29 bytes=380-441 kind=function def=7 symbol="test_load" tokens=17 hash=7c2583863961ebc2a38f467279831a20e06cc8eb82a2fb137d5a32a5b8625ce0

@@ -56,6 +56,11 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 axum.workspace = true
 tempfile.workspace = true
 
+[features]
+# Code intelligence and the MCP endpoints (D52, D55); off by default.
+codeintel = ["floe-server/codeintel"]
+mcp = ["floe-server/mcp"]
+
 [dev-dependencies]
 
 [lints]

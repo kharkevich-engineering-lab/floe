@@ -82,7 +82,7 @@ dev-store-stop:
 # hung test blocks for the whole timeout. Use `just e2e` / `just ci` below.
 test:
     {{t5}} cargo test --workspace --lib --bins
-    {{t5}} cargo test -p floe-store -p floe-git -p floe-wal -p floe-bundle -p floe-tls --tests
+    {{t5}} cargo test -p floe-store -p floe-git -p floe-wal -p floe-bundle -p floe-tls -p floe-codeintel --tests
     {{t5}} cargo test -p floe-server --test web_api --test web_ui --test api_v1 --test static_http --test maintain --test routing_prefix --test lfs_upstream --test drain --test github --test github_webhooks --test follow --test policy --test admin_config
 
 # Editor facade contracts: REST reads, GraphQL saves, PRs and durable webhook delivery.
@@ -134,9 +134,22 @@ fmt-check:
 # lints via clippy.toml (allow-unwrap-in-tests etc.).
 clippy:
     {{t15}} cargo clippy --workspace --all-targets -- -D warnings
+    {{t15}} cargo clippy -p floe-codeintel --no-default-features --all-targets -- -D warnings
+
+# Code intelligence feature build (D52, docs/design/code-intelligence.md): the server and CLI
+# with `--features mcp` (implies codeintel; rmcp and the grammars), linted. Its own CI job: a
+# dependency graph the default build never compiles.
+clippy-codeintel:
+    {{t15}} cargo clippy -p floe-server -p floe-cli --features floe-cli/mcp --all-targets -- -D warnings
+
+# The feature build's tests: the rmcp stateless spike (docs/design/spikes/rmcp-request-parts.md)
+# and the extraction core without grammars (every file is text).
+test-codeintel:
+    {{t5}} cargo test -p floe-server --features mcp --test mcp_spike
+    {{t5}} cargo test -p floe-codeintel --no-default-features
 
 # Everything that must be green before a merge (what CI runs, one job per group of recipes).
-ci: fmt-check warnings clippy test test-editor e2e sim clippy-catalog test-catalog-lib
+ci: fmt-check warnings clippy test test-editor e2e sim clippy-catalog test-catalog-lib clippy-codeintel test-codeintel
 
 # `cargo check` on the workspace's declared MSRV (`rust-version` in Cargo.toml, its one home).
 msrv:

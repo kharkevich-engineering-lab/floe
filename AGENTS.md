@@ -706,7 +706,8 @@ credentials are an admin privilege, one table bucket per tenant.
   change it with the code.
 - Test tiers: `just test` (fast, < 1 min; includes D48 `--test follow` and `--test policy`), `just e2e`, `just fmt-check`, `just warnings`,
   `just clippy` (the `[workspace.lints]` set, `-D warnings`), `just clippy-catalog` + `just test-catalog-lib`
-  (the `--features catalog` build the release ships), `just ci` = all of them, including the **simulation
+  (the `--features catalog` build the release ships), `just clippy-codeintel` + `just test-codeintel` (the `--features mcp` build, D52), `just ci` = all of
+  them, including the **simulation
   suite** `just sim` = `cargo test -p floe-server --test sim` (fault links per instance over one truth store: crash,
   partition, stale, lost response, orphan scenarios + randomized seeds `FLOE_SIM_SEEDS`/`FLOE_SIM_SEED`);
   `just test-slow` (ignored benches); `tests/e2e.sh` against a running server (`FLOE_E2E_BASE_URL`,

@@ -45,7 +45,7 @@ jobs:
     outputs:
       # Anything but docs: the Rust build, tests and contracts (the SPA is embedded, so web/ too).
       code: ${{ github.event_name != 'pull_request' || steps.filter.outputs.code == 'true' }}
-      # The Rust sources and what compiles them: rustfmt, MSRV, the catalog feature build.
+      # The Rust sources and what compiles them: rustfmt, MSRV, the catalog and codeintel feature builds.
       rust: ${{ github.event_name != 'pull_request' || steps.filter.outputs.rust == 'true' }}
       # Everything the Containerfile COPYs (plus the smoke test's inputs): the image is rebuilt and
       # smoke-tested for any change that can reach it.
@@ -212,6 +212,14 @@ jobs:
           cargo test -p floe-store -p floe-git -p floe-wal -p floe-bundle -p floe-tls --tests --no-run --locked
           cargo test -p floe-server --tests --no-run --locked
       - run: just test
+      - name: Upload code-intel golden mismatches
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeintel-golden-actual-${{ matrix.arch }}
+          path: target/tmp/golden/
+          if-no-files-found: ignore
+          retention-days: 7
       - run: just warnings
       - run: just clippy
 
@@ -366,6 +374,68 @@ jobs:
         run: cargo test -p floe-catalog -p floe-server -p floe-cli --lib --features floe-cli/catalog,floe-catalog/iceberg --no-run --locked
       - run: just test-catalog-lib
       - run: just clippy-catalog
+
+  codeintel:
+    name: codeintel features (${{ matrix.arch }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    # The code-intelligence feature build (D52): floe-server and floe-cli with `--features mcp`
+    # (implies codeintel: tree-sitter grammars and rmcp), a dependency graph the default build
+    # never compiles, so its own job and cache, natively per arch. The recipes
+    # (`just clippy-codeintel`, `just test-codeintel`) are the tier definitions.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install the pinned Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            # A fixed rustup-init checked against a hash pinned here, never `curl | sh` of
+            # whatever sh.rustup.rs serves today. Bump RUSTUP and both hashes together.
+            RUSTUP=1.29.1
+            case "$(uname -m)" in
+              aarch64) triple=aarch64-unknown-linux-gnu; sum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;;
+              x86_64) triple=x86_64-unknown-linux-gnu; sum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;;
+              *) echo "::error::no pinned rustup-init for $(uname -m)"; exit 1 ;;
+            esac
+            curl --proto '=https' --tlsv1.2 -sSfo "$RUNNER_TEMP/rustup-init" "https://static.rust-lang.org/rustup/archive/${RUSTUP}/${triple}/rustup-init"
+            echo "${sum}  $RUNNER_TEMP/rustup-init" | sha256sum -c -
+            chmod +x "$RUNNER_TEMP/rustup-init"
+            "$RUNNER_TEMP/rustup-init" -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show && cargo --version && git --version
+          # Only the pinned toolchain stays: rust-cache hashes every installed toolchain into its
+          # key, so the image's preinstalled `stable` would drop the whole cache on each image bump.
+          active="$(rustup show active-toolchain | cut -d' ' -f1)"
+          rustup toolchain list | cut -d' ' -f1 | grep -vxF "$active" | xargs -r -n1 rustup toolchain uninstall
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: codeintel-v1-${{ matrix.arch }}
+          cache-on-failure: true
+          # Written from main only, restored everywhere (see the header).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: just
+      - name: Compile the codeintel feature build before timed checks
+        timeout-minutes: 45
+        run: |
+          cargo test -p floe-server --features mcp --test mcp_spike --no-run --locked
+          cargo test -p floe-codeintel --no-default-features --no-run --locked
+      - run: just test-codeintel
+      - run: just clippy-codeintel
 
   acme-pebble:
     name: ACME against Pebble (${{ matrix.arch }})
@@ -609,7 +679,7 @@ jobs:
   ci-result:
     name: CI result
     if: always()
-    needs: [changes, fmt, build-test, e2e, catalog, acme-pebble, container, msrv, deny, actionlint]
+    needs: [changes, fmt, build-test, e2e, catalog, codeintel, acme-pebble, container, msrv, deny, actionlint]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

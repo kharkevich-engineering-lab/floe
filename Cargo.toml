@@ -12,6 +12,7 @@ members = [
     "crates/floe-mirror",
     "crates/floe-catalog",
     "crates/floe-tls",
+    "crates/floe-codeintel",
 ]
 
 [workspace.package]
@@ -81,6 +82,9 @@ floe-bundle = { path = "crates/floe-bundle" }
 floe-mirror = { path = "crates/floe-mirror" }
 floe-catalog = { path = "crates/floe-catalog" }
 floe-tls = { path = "crates/floe-tls" }
+# Code intelligence core (D52). No default features here: a dependent enables exactly the
+# grammars it wants (floe-server's `codeintel` feature); the crate's own tests build them all.
+floe-codeintel = { path = "crates/floe-codeintel", default-features = false }
 
 anyhow = "1"
 thiserror = "2"
@@ -177,6 +181,10 @@ iceberg-storage-opendal = { version = "=0.10.1", default-features = false, featu
 arrow-array = "58"
 # The credential trait iceberg-storage-opendal's custom S3 loader takes (D63).
 reqsign-core = "3"
+# MCP server (D55; floe-server's `mcp` feature only, never in the default build). Pinned exactly:
+# rmcp moves fast (3.0 → 3.5 in two months) and its stateless 2026-07-28 transport is what the
+# per-repo endpoint relies on (docs/design/spikes/rmcp-request-parts.md).
+rmcp = { version = "=3.5.0", default-features = false, features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
 # TLS (in-process termination)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"

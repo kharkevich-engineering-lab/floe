@@ -92,6 +92,33 @@ pub struct AppState {
     pub config: Arc<config_store::live::Live>,
 }
 
+/// What this binary was built with (D52): the cargo features a config key may need. The
+/// embedders (`embed-local`, `embed-http`) are not features of any build yet (milestone M7).
+pub const BUILD_FEATURES: floe_config::BuildFeatures = floe_config::BuildFeatures {
+    codeintel: cfg!(feature = "codeintel"),
+    mcp: cfg!(feature = "mcp"),
+    embed_local: false,
+    embed_http: false,
+};
+
+/// The extraction core (`crates/floe-codeintel`), linked in by `--features codeintel`.
+#[cfg(feature = "codeintel")]
+pub use floe_codeintel;
+
+/// Refuse a config this binary cannot run, before anything starts (fail closed, D52): a
+/// `[codeintel]`/`[mcp]` key needing a feature the build lacks names the build flag, and with
+/// the feature the indexer (M3) and the MCP routes (M4) are not part of this build yet, so
+/// turning them on is refused rather than accepted and silently ignored.
+pub fn check_build(cfg: &floe_config::Config) -> anyhow::Result<()> {
+    cfg.validate_build(BUILD_FEATURES)?;
+    if cfg.codeintel.enabled || cfg.mcp.enabled {
+        anyhow::bail!(
+            "codeintel.enabled / mcp.enabled: this build parses and validates [codeintel] and [mcp] but has no indexer (milestone M3) or MCP endpoints (M4) yet (docs/design/code-intelligence.md §13)"
+        );
+    }
+    Ok(())
+}
+
 impl AppState {
     /// Build a full `AppState` from a config + store (memory or opened backend).
     #[allow(
@@ -110,6 +137,7 @@ impl AppState {
             Arc::new(Box::pin(config_store::ConfigStore::open(&bootstrap, &store)).await?);
         let config = Box::pin(config_store::live::Live::start(bootstrap, config_store)).await;
         let cfg = config.current().cfg;
+        check_build(&cfg)?;
         let registry = floe_wal::Registry::new(store.clone(), cfg.clone());
         let bridge = bridge::Bridge::new(&cfg, registry.clone());
         let bundle_source: Arc<dyn floe_bundle::BundleSource> =

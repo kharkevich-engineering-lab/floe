@@ -1,0 +1,17 @@
+file src/main/java/com/acme/Store.java lang=java flags= size=539 lines=31
+extractor ts-tags/1;cast/1;java=0.23.5@25c8b1f6
+def #0 class Store @7:14-7:19 body=7-27 parent=- in="" flags=1 sig="public class Store implements Closeable {" doc=""
+def #1 method Store @10:12-10:17 body=10-11 parent=0 in="Store" flags=1 sig="public Store() {" doc=""
+def #2 method get @13:19-13:22 body=13-15 parent=0 in="Store" flags=1 sig="public String get(String key) {" doc=""
+def #3 method put @17:10-17:13 body=17-19 parent=0 in="Store" flags=0 sig="void put(String key, String value) {" doc=""
+def #4 enum Mode @21:17-21:21 body=21-21 parent=0 in="Store" flags=1 sig="public enum Mode { READ, WRITE }" doc=""
+def #5 method close @24:17-24:22 body=23-26 parent=0 in="Store" flags=1 sig="public void close() {" doc=""
+def #6 interface Closeable @29:11-29:20 body=29-31 parent=- in="" flags=0 sig="interface Closeable {" doc=""
+def #7 method close @30:10-30:15 body=30-30 parent=6 in="Closeable" flags=0 sig="void close();" doc=""
+ref implementation Closeable @7:31-40 in=0
+ref call get @14:21-24 in=2
+ref call put @18:14-17 in=3
+ref call clear @25:14-19 in=5
+chunk lines=1-4 bytes=0-66 kind=block def=- symbol="" tokens=20 hash=445e09c316f3bae4c00a9d0a455f56d81b677fadf9f71405844633fc54484e19
+chunk lines=6-27 bytes=68-495 kind=class def=0 symbol="Store" tokens=100 hash=510848eb5413fefcb7863ece717861db8a4aa5bbc92370d30aacc8f5d427d330
+chunk lines=29-31 bytes=497-538 kind=interface def=6 symbol="Closeable" tokens=11 hash=a931f82cd7249ffc35d3fa0afe5be4775360a30c4e2738e13bec6b23117a3851

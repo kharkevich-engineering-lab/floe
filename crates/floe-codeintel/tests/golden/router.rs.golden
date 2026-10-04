@@ -1,0 +1,31 @@
+file src/router.rs lang=rust flags= size=784 lines=47
+extractor ts-tags/1;cast/1;rust=0.24.2@fb314420
+def #0 const MAX_ROUTES @4:11-4:21 body=4-4 parent=- in="" flags=1 sig="pub const MAX_ROUTES: usize = 64;" doc=""
+def #1 struct Router @7:12-7:18 body=7-9 parent=- in="" flags=1 sig="pub struct Router {" doc=""
+def #2 enum Method @11:10-11:16 body=11-14 parent=- in="" flags=1 sig="pub enum Method {" doc=""
+def #3 trait Handler @16:11-16:18 body=16-18 parent=- in="" flags=1 sig="pub trait Handler {" doc=""
+def #4 method handle @17:8-17:14 body=17-17 parent=3 in="Handler" flags=0 sig="fn handle(&self, path: &str) -> String;" doc=""
+def #5 method new @21:12-21:15 body=21-23 parent=- in="Router" flags=1 sig="pub fn new() -> Self {" doc=""
+def #6 method route @25:12-25:17 body=25-28 parent=- in="Router" flags=1 sig="pub fn route(&self, path: &str) -> Option<String> {" doc=""
+def #7 module util @31:5-31:9 body=31-35 parent=- in="" flags=0 sig="mod util {" doc=""
+def #8 function normalize @32:12-32:21 body=32-34 parent=7 in="util" flags=1 sig="pub fn normalize(p: &str) -> String {" doc=""
+def #9 macro route @37:14-37:19 body=37-41 parent=- in="" flags=0 sig="macro_rules! route {" doc=""
+def #10 function routes_nothing @44:4-44:18 body=44-47 parent=- in="" flags=2 sig="fn routes_nothing() {" doc=""
+ref implementation Router @20:6-12 in=-
+ref call new @22:35-38 in=5
+ref call get @26:29-32 in=6
+ref call Some @27:9-13 in=6
+ref call handle @27:16-22 in=6
+ref call trim_end_matches @33:11-27 in=8
+ref call to_string @33:33-42 in=8
+ref call new @45:21-24 in=10
+ref call assert @46:5-11 in=10
+chunk lines=1-2 bytes=0-64 kind=block def=- symbol="" tokens=19 hash=daf3e9a261e969f2bbfd5d3eb7a8c928f30c08c2bc1d1f6eb247c4c37cf1aace
+chunk lines=4-4 bytes=66-99 kind=const def=0 symbol="MAX_ROUTES" tokens=10 hash=a13f9d128748225a888570bace509131bef4074b5d0e88fce871788b24bf88bd
+chunk lines=6-9 bytes=101-188 kind=struct def=1 symbol="Router" tokens=24 hash=db89df8aaef728725f8f947ce1a4b76cd947451c32af885512727e28c072a7fb
+chunk lines=11-14 bytes=190-228 kind=enum def=2 symbol="Method" tokens=8 hash=d61341c87069c5561bade4d85c884a1d0e3770d7126e0f3d6297182f8a8efca5
+chunk lines=16-18 bytes=230-295 kind=trait def=3 symbol="Handler" tokens=17 hash=f94c66fb4b0f7063c3131079644d2a1c69c61c5155e92da562a695a3f989161f
+chunk lines=20-29 bytes=297-519 kind=impl def=- symbol="Router" tokens=51 hash=018629320f03d392ae91d1a81376c2c6c2489f9493cc6f02b6a6f9c273810d67
+chunk lines=31-35 bytes=521-625 kind=module def=7 symbol="util" tokens=26 hash=4521d867c0b63b026008a28e8e5b581f232120a1808b9c1580de3755f062d732
+chunk lines=37-41 bytes=627-686 kind=macro def=9 symbol="route" tokens=12 hash=2c32a0fdcb702de3a7b9ee3d0988d2f3ee5fe769e079609bae0b8b510424ee15
+chunk lines=43-47 bytes=688-783 kind=function def=10 symbol="routes_nothing" tokens=26 hash=48200b2e1ea2b0c659be8567fc39bbdc573401cbd1050cecd27603e23ff6f400
