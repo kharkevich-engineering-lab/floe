@@ -837,3 +837,18 @@ mod listen_tests {
             .expect("::1 twin");
     }
 }
+
+#[cfg(test)]
+mod catalog_tests {
+    /// Off is no writer; without the feature, on is a fatal error (fail closed).
+    #[test]
+    fn catalog_writer_off_and_featureless() {
+        let mut cfg = floe_config::CatalogConfig::default();
+        assert!(super::catalog_writer(&cfg).unwrap().is_none());
+        cfg.enabled = true;
+        if cfg!(not(feature = "catalog")) {
+            let err = super::catalog_writer(&cfg).err().unwrap();
+            assert!(err.to_string().contains("catalog feature"), "{err}");
+        }
+    }
+}

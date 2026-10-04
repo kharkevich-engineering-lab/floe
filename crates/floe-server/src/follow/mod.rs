@@ -128,6 +128,13 @@ impl FollowStatuses {
     fn finished(&self, repo: &str) -> Option<Instant> {
         self.0.lock().get(repo).map(|s| s.finished)
     }
+    /// The last round's outcome and detail.
+    fn last(&self, repo: &str) -> Option<(&'static str, String)> {
+        self.0
+            .lock()
+            .get(repo)
+            .map(|s| (s.outcome, s.detail.clone()))
+    }
     fn refused_rewinds(&self, repo: &str) -> Vec<Change> {
         self.0
             .lock()
@@ -279,17 +286,16 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<FollowReport> {
             } else {
                 ("refused", refused.join("; "))
             };
-            state.follow.set(
-                &repo,
-                Round {
-                    outcome,
-                    detail,
-                    upstream: probe.tips,
-                    ours: have,
-                    archived: Vec::new(),
-                    refused_rewinds: rewinds,
-                },
-            );
+            let round = Round {
+                outcome,
+                detail,
+                upstream: probe.tips,
+                ours: have,
+                archived: Vec::new(),
+                refused_rewinds: rewinds,
+            };
+            record_run(state, &cfg, &repo, started, &round, RunStats::default());
+            state.follow.set(&repo, round);
             continue;
         }
         report.behind += 1;
@@ -415,9 +421,9 @@ struct RunStats {
     seq: Option<u64>,
 }
 
-/// Catalog telemetry for a round that did work or failed (`sync_runs`, D50):
-/// lossy, after the write finished, never awaited — like a metric. In-sync
-/// rounds are not recorded (one row per repository per tick would be noise).
+/// Catalog telemetry for a round that did work, was refused or failed
+/// (`sync_runs`, D50): lossy, after the write finished, never awaited — like a
+/// metric. Call before `state.follow.set` (it compares with the last round).
 fn record_run(
     state: &AppState,
     cfg: &floe_config::Config,
@@ -426,16 +432,12 @@ fn record_run(
     round: &Round,
     stats: RunStats,
 ) {
-    if round.outcome == "in-sync" {
+    let last = state.follow.last(repo);
+    if !worth_recording(last.as_ref().map(|(o, d)| (*o, d.as_str())), round) {
         return;
     }
-    let source = cfg
-        .upstream
-        .source
-        .as_deref()
-        .map(|s| s.split_once(':').map_or(s, |(kind, _)| kind).to_string());
     state.recorder.record_sync_run(floe_catalog::SyncRun {
-        source,
+        source: source_kind(cfg.upstream.source.as_deref()),
         repo: Some(repo.to_string()),
         finished_at: chrono::Utc::now(),
         outcome: round.outcome.to_string(),
@@ -445,6 +447,23 @@ fn record_run(
         detail: Some(round.detail.clone()),
         ..floe_catalog::SyncRun::new("follow", started)
     });
+}
+
+/// Whether a round is a `sync_runs` row, given the repository's last round on
+/// this instance: never an in-sync one, and a refused or failed one only when
+/// it differs from the last (a standing refusal or an unreachable upstream
+/// would otherwise add one identical row per repository per tick).
+fn worth_recording(last: Option<(&str, &str)>, round: &Round) -> bool {
+    match round.outcome {
+        "in-sync" => false,
+        "refused" | "failed" => last != Some((round.outcome, round.detail.as_str())),
+        _ => true,
+    }
+}
+
+/// `upstream.source` (`github:<id>`) → the run's `source` (`github`).
+fn source_kind(source: Option<&str>) -> Option<String> {
+    source.map(|s| s.split_once(':').map_or(s, |(kind, _)| kind).to_string())
 }
 
 /// The op's error when policy `refuse` left nothing to publish (the loop tells it
@@ -779,4 +798,55 @@ fn scratch_dir(state: &AppState, id: &RepoId) -> PathBuf {
 
 fn elapsed_ms(t0: Instant) -> u64 {
     u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round(outcome: &'static str, detail: &str) -> Round {
+        Round {
+            outcome,
+            ..Round::failed(detail.into())
+        }
+    }
+
+    /// In-sync rounds are never rows; work always is; a refusal or failure is
+    /// one row until it changes, not one per tick.
+    #[test]
+    fn rounds_worth_a_sync_run() {
+        assert!(!worth_recording(None, &round("in-sync", "up to date")));
+        assert!(worth_recording(None, &round("published", "1 ref(s)")));
+        assert!(worth_recording(
+            Some(("published", "1 ref(s)")),
+            &round("published", "1 ref(s)")
+        ));
+        let refused = round("refused", "refs/tags/v1: tag moved");
+        assert!(worth_recording(None, &refused));
+        assert!(worth_recording(Some(("in-sync", "x")), &refused));
+        assert!(!worth_recording(
+            Some(("refused", "refs/tags/v1: tag moved")),
+            &refused
+        ));
+        assert!(worth_recording(
+            Some(("refused", "refs/heads/gone: deleted upstream")),
+            &refused
+        ));
+        let failed = round("failed", "probe failed: timeout");
+        assert!(worth_recording(
+            Some(("refused", "probe failed: timeout")),
+            &failed
+        ));
+        assert!(!worth_recording(
+            Some(("failed", "probe failed: timeout")),
+            &failed
+        ));
+    }
+
+    #[test]
+    fn run_source_is_the_kind() {
+        assert_eq!(source_kind(Some("github:1")).as_deref(), Some("github"));
+        assert_eq!(source_kind(Some("github")).as_deref(), Some("github"));
+        assert_eq!(source_kind(None), None);
+    }
 }

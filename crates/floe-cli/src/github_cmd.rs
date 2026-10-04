@@ -79,6 +79,9 @@ fn print_report(r: &PassReport) {
         println!("{line}");
     }
     println_kv("pass", r.summary());
+    if let Some(e) = &r.error {
+        println_kv("error", e);
+    }
     if let Some(until) = r.api.rate_limited_until {
         println_kv("rate_limited_until", humantime::format_rfc3339_seconds(until));
     }

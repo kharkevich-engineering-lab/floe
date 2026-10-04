@@ -85,6 +85,8 @@ pub struct PassReport {
     /// Entries per status after the pass.
     pub statuses: BTreeMap<&'static str, usize>,
     pub api: ApiStats,
+    /// Why a pass failed (`outcome = failed`, from [`run_loop`]); `None` otherwise.
+    pub error: Option<String>,
 }
 
 impl PassReport {
@@ -419,7 +421,8 @@ async fn release(guard: Arc<tokio::sync::Mutex<LeaseGuard>>, hb: tokio::task::Jo
 /// across passes while it can, so exactly one host reconciles; a host without
 /// the lease sleeps `interval` and tries again. `interval = 0` runs one pass at
 /// startup. Returns when draining (D31 phase 1), after releasing the lease.
-/// `on_pass` sees every finished pass (telemetry).
+/// `on_pass` sees every finished pass (telemetry), a failed one as a report
+/// with `outcome = failed` and [`PassReport::error`] set.
 pub async fn run_loop(m: Arc<Mirror>, on_pass: Box<dyn Fn(&PassReport) + Send + Sync>) {
     let gm = &m.cfg.github_mirror;
     let kind = m.source.kind();
@@ -464,6 +467,7 @@ pub async fn run_loop(m: Arc<Mirror>, on_pass: Box<dyn Fn(&PassReport) + Send + 
         let hb = LeaseGuard::spawn_heartbeat(guard.clone(), ttl / 3, ttl);
         loop {
             let t0 = Instant::now();
+            let started = Utc::now();
             let result = reconcile_once(&m, PassOptions::default(), Some(&flag)).await;
             metrics::histogram!("floe_mirror_pass_seconds", "source" => kind)
                 .record(t0.elapsed().as_secs_f64());
@@ -492,6 +496,13 @@ pub async fn run_loop(m: Arc<Mirror>, on_pass: Box<dyn Fn(&PassReport) + Send + 
                             .min(MAX_RATE_SLEEP);
                         wait = wait.max(d);
                     }
+                    on_pass(&PassReport {
+                        started_at: Some(started),
+                        finished_at: Some(Utc::now()),
+                        outcome: "failed",
+                        error: Some(format!("{e:#}")),
+                        ..PassReport::default()
+                    });
                 }
             }
             if interval.is_zero() || flag.load(Ordering::SeqCst) {

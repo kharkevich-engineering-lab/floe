@@ -3,8 +3,9 @@ name = "floe-catalog"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-# iceberg 0.10 declares MSRV 1.94 (the workspace floor is 1.90).
-rust-version = "1.94"
+# No rust-version here: every floe binary depends on this crate's core, which
+# keeps the workspace floor (1.90); iceberg 0.10's own manifest enforces its
+# MSRV 1.94 when the `iceberg` feature is on.
 
 [features]
 default = []

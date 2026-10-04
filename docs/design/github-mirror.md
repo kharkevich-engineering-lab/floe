@@ -971,8 +971,9 @@ crates/floe-catalog/
   **`iceberg-storage-opendal = "0.10.1"`** (default features `opendal-s3`, `opendal-memory`, `opendal-fs`; in
   0.10 the storage backends moved out of `iceberg` into this crate). They pull `arrow-* = "58"` and
   `parquet = "58"`, which `floe-catalog` pins to the same major. `iceberg` 0.10.1 declares **MSRV 1.94**. The
-  toolchain is 1.97.1, but `workspace.package.rust-version = "1.90"`, so set `rust-version = "1.94"` on
-  `floe-catalog` (or raise the workspace's). Pin exact versions (`=0.10.1`): the project is pre-1.0, and its
+  toolchain is 1.97.1, but `workspace.package.rust-version = "1.90"`. `floe-catalog` declares no
+  `rust-version` of its own: the default (featureless) build is a dependency of every `floe` binary and keeps
+  the 1.90 floor, and `iceberg`'s own manifest enforces 1.94 when the `catalog` feature is on. Pin exact versions (`=0.10.1`): the project is pre-1.0, and its
   writer API has changed between minors.
 - Startup: `catalog.enabled = true` in a binary built without the feature is a **fatal config error**
   (`floe-server` checks `cfg!(feature = "catalog")` in `AppState::new`; fail closed, §1.3 style), and the
@@ -1476,12 +1477,16 @@ it neither the mirror nor the catalog has one.
 
 - **Telemetry wiring**: `AppState` carries `recorder` (the writer, or `NoopRecorder`), `catalog` (the writer, for the
   final flush) and `catalog_tail`. The mirror's `on_pass` hook (§B.15) maps a `PassReport` to one `sync_runs` row
-  (`kind = discovery`) and one `repo_inventory` change row per `changes` entry (`floe_server::mirror::record_pass`).
-  Follow records a `sync_runs` row for every round that did work, was refused or failed; `in-sync` rounds are not
-  recorded (one row per repository per tick would be noise).
+  (`kind = discovery`) and one `repo_inventory` change row per `changes` entry (`floe_server::mirror::record_pass`);
+  a failed pass is reported to the hook too (`outcome = failed`, `PassReport::error` as detail).
+  Follow records a `sync_runs` row for every round that did work, and for a refused or failed round whose
+  outcome or detail differs from the repository's last round on this host; `in-sync` rounds and repeats of a
+  standing refusal or failure are not recorded (one row per repository per tick would be noise).
 - **Notify**: `Bridge` is unchanged. `http_notify` wakes the catalog tail itself (the same key parsing,
   `try_send`), and answers `200 []` on an events host that has a catalog tail but no bridge sink.
 - **Inventory snapshot**: hourly due-check, `INVENTORY_LEASE` 5 min TTL, the schedule re-read under the lease.
+  A failure to read the mirror's state fails the attempt (retried within the hour), never an all-`own` snapshot;
+  the schedule is written only while the lease is held and never moves backwards.
   The mirror's state is read as `mirror/github/state.json` (the only `Source` today), not by listing `mirror/*`.
 - **Final flush**: `floe serve` calls `CatalogWriter::shutdown` after `serve` returns, bounded by
   `server.drain_timeout`.
@@ -1526,7 +1531,7 @@ it neither the mirror nor the catalog has one.
 | R4 | Archive refs grow the ref count forever (a repository force-pushed hourly gets about 8.7k archive refs a year), and `ls-refs` advertises them. | Acceptable at these sizes (refs are O(1) on hot paths). Post-MVP: optional `upstream.archive_retention` (still never auto-deletes by default), and hiding `refs/archive/` from v0 advertisement. |
 | R5 | **LFS is read-through, not prefetched**: an LFS object never downloaded before the GitHub repository disappears is lost. | Post-MVP `lfs_prefetch` unit. Call it out in README. |
 | R6 | **RustFS S3 Tables is preview**: exact REST path, warehouse identifier, and auth (SigV4 vs bearer/OAuth). `iceberg-catalog-rest` 0.10 is not known to sign SigV4. | Verify against the pinned RustFS release before §C lands. If SigV4 is mandatory, add a signing `reqwest` middleware or put the Iceberg REST fixture in front. The ignored test runs against either. |
-| R7 | iceberg-rust 0.10 MSRV 1.94 > workspace 1.90; arrow/parquet 58 add compile time and binary size. | Feature-gated; `rust-version` on the crate; decide whether the release image enables `catalog` (recommend: yes for the image, no for `cargo build`). |
+| R7 | iceberg-rust 0.10 MSRV 1.94 > workspace 1.90; arrow/parquet 58 add compile time and binary size. | Feature-gated (iceberg's manifest enforces 1.94 only with the feature; no `rust-version` on `floe-catalog`, which the default build depends on); decide whether the release image enables `catalog` (recommend: yes for the image, no for `cargo build`). |
 | R8 | Tokens: PAT only. GitHub App installation tokens expire hourly, and follow reads an env var. | Post-MVP `TokenProvider` (App JWT → installation token) behind `Source`/`upstream_token_env`; the seam is `Config::upstream_token_env`. |
 | R9 | GitHub `has_wiki` is true for empty wikis → a failing `ls-refs` per `follow_interval`. | `wikis = false` default. Post-MVP: the mirror marks the wiki `absent` after N failed follow rounds (needs follow status in the bucket or the catalog). |
 | R10 | Catalog is at-least-once; duplicates are possible. | Dedup key + views. Post-MVP: per-repo watermarks in table properties, committed in the same transaction as the append. |

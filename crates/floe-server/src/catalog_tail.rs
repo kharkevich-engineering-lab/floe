@@ -33,9 +33,12 @@ use tokio::sync::{Semaphore, mpsc};
 use crate::events;
 
 /// Catch-ups at once, from the sweep and from wake-ups (each one may wait up
-/// to `flush_interval` for its group commit while holding a slot).
+/// to `flush_interval` for its group commit while holding a slot). A slot is
+/// taken only under the repository's serial lock, so catch-ups queued behind
+/// one busy repository never hold slots other repositories need.
 const CONCURRENCY: usize = 8;
-/// Pending wake-ups; beyond it a wake is dropped (the sweep covers it).
+/// Pending wake-ups (one per repository: wakes of a repository already
+/// pending are merged); beyond it a wake is dropped (the sweep covers it).
 const WAKE_QUEUE: usize = 1024;
 /// Bucket-root lease of the daily inventory snapshot (one host fleet-wide).
 const INVENTORY_LEASE: &str = "leases/catalog-inventory.pb";
@@ -64,6 +67,8 @@ pub struct CatalogTail {
     backfill: bool,
     /// Catch-ups serialize per repository (as the bridge's do).
     serial: dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    /// Repositories woken whose catch-up has not yet taken its serial lock.
+    pending: dashmap::DashSet<String>,
     slots: Arc<Semaphore>,
     wake_tx: mpsc::Sender<RepoId>,
     wake_rx: parking_lot::Mutex<Option<mpsc::Receiver<RepoId>>>,
@@ -78,6 +83,7 @@ impl CatalogTail {
             writer,
             backfill,
             serial: dashmap::DashMap::new(),
+            pending: dashmap::DashSet::new(),
             slots: Arc::new(Semaphore::new(CONCURRENCY)),
             wake_tx,
             wake_rx: parking_lot::Mutex::new(Some(wake_rx)),
@@ -86,9 +92,16 @@ impl CatalogTail {
     }
 
     /// `id` committed something (a bucket notification): catch it up soon.
-    /// Never awaits; dropped and counted when the queue is full.
+    /// Never awaits; merged with a wake of `id` that has not started yet (that
+    /// catch-up reads the head when it starts); dropped and counted when the
+    /// queue is full.
     pub fn wake(&self, id: &RepoId) {
+        let key = id.to_string();
+        if !self.pending.insert(key.clone()) {
+            return;
+        }
         if self.wake_tx.try_send(id.clone()).is_err() {
+            self.pending.remove(&key);
             metrics::counter!("floe_catalog_wake_dropped_total").increment(1);
         }
     }
@@ -101,13 +114,11 @@ impl CatalogTail {
         if let Some(mut rx) = rx {
             let tail = self.clone();
             tokio::spawn(async move {
+                // At most two tasks per repository (one running, one pending):
+                // the slot is taken inside `catch_up`, under the serial lock.
                 while let Some(id) = rx.recv().await {
-                    let Ok(slot) = tail.slots.clone().acquire_owned().await else {
-                        return;
-                    };
                     let t = tail.clone();
                     tokio::spawn(async move {
-                        let _slot = slot;
                         t.catch_up_logged(&id, "wake").await;
                     });
                 }
@@ -162,9 +173,6 @@ impl CatalogTail {
             }
         };
         let mut passes = futures::stream::iter(repos.into_iter().map(|id| async move {
-            let Ok(_slot) = self.slots.acquire().await else {
-                return;
-            };
             self.catch_up_logged(&id, "sweep").await;
         }))
         .buffer_unordered(CONCURRENCY);
@@ -191,18 +199,24 @@ impl CatalogTail {
         }
     }
 
-    /// Deliver `(cursor, head]` of `id` to the writer (`floe_catalog::cursor`).
+    /// Deliver `(cursor, head]` of `id` to the writer (`floe_catalog::cursor`):
+    /// the repository's serial lock, then a [`CONCURRENCY`] slot.
     pub async fn catch_up(&self, id: &RepoId) -> anyhow::Result<CatchUp> {
+        let key = id.to_string();
+        let serial = self
+            .serial
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _serial = serial.lock().await;
+        // From here on a new wake queues another catch-up (this one may have
+        // read the head before that commit).
+        self.pending.remove(&key);
         // Cost nothing on the bucket while the catalog is down.
         if !self.writer.is_up() {
             return Err(floe_catalog::CatalogError::Unavailable.into());
         }
-        let serial = self
-            .serial
-            .entry(id.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _serial = serial.lock().await;
+        let _slot = self.slots.acquire().await?;
         let epoch = self.epoch().await?;
         let handle = self.registry.open(id).await?;
         let source = HandleSource {
@@ -277,9 +291,9 @@ impl CatalogTail {
     async fn snapshot(&self, now: Timestamp, lost: &AtomicBool) -> anyhow::Result<usize> {
         let root = self.registry.store().clone();
         let snapshot_id = uuid::Uuid::new_v4().to_string();
-        let mirror = floe_mirror::state::load(root.as_ref(), "github")
-            .await
-            .unwrap_or_default();
+        // A missing state is already the default; an error is a real failure,
+        // and a snapshot without it would label every mirror `own` for a day.
+        let mirror = floe_mirror::state::load(root.as_ref(), "github").await?;
         let by_floe: HashMap<&str, (&String, &floe_mirror::RepoEntry)> = mirror
             .repos
             .iter()
@@ -317,12 +331,17 @@ impl CatalogTail {
             }
             self.writer.append_durable(chunk).await?;
         }
+        // The last append may have outlived the lease: the next holder's
+        // schedule wins.
+        if lost.load(Ordering::SeqCst) {
+            anyhow::bail!("inventory lease lost before the schedule was written");
+        }
         let done = InventorySchedule {
             last_snapshot: Some(now),
             snapshot_id: Some(snapshot_id),
         };
-        coord::cas_update_json::<InventorySchedule, _>(root.as_ref(), INVENTORY_KEY, 5, |_| {
-            Ok(Some(done.clone()))
+        coord::cas_update_json::<InventorySchedule, _>(root.as_ref(), INVENTORY_KEY, 5, |cur| {
+            Ok(advance_schedule(cur, &done))
         })
         .await?;
         Ok(n)
@@ -336,6 +355,18 @@ async fn schedule(root: &floe_store::DynStore) -> anyhow::Result<InventorySchedu
             .map(|(_, s)| s)
             .unwrap_or_default(),
     )
+}
+
+/// The schedule CAS: `done`, unless the stored snapshot is newer (never move
+/// the schedule backwards).
+fn advance_schedule(
+    cur: Option<&InventorySchedule>,
+    done: &InventorySchedule,
+) -> Option<InventorySchedule> {
+    match cur {
+        Some(c) if c.last_snapshot > done.last_snapshot => None,
+        _ => Some(done.clone()),
+    }
 }
 
 fn snapshot_due(s: &InventorySchedule, now: Timestamp) -> bool {
@@ -539,6 +570,28 @@ mod tests {
             snapshot_id: None,
         };
         assert!(!snapshot_due(&future, now));
+    }
+
+    /// A host whose snapshot finished late never moves the schedule back
+    /// over a newer one.
+    #[test]
+    fn schedule_never_moves_backwards() {
+        let now = Utc::now();
+        let done = InventorySchedule {
+            last_snapshot: Some(now),
+            snapshot_id: Some("mine".into()),
+        };
+        assert_eq!(advance_schedule(None, &done), Some(done.clone()));
+        let older = InventorySchedule {
+            last_snapshot: Some(now - chrono::Duration::hours(25)),
+            snapshot_id: Some("old".into()),
+        };
+        assert_eq!(advance_schedule(Some(&older), &done), Some(done.clone()));
+        let newer = InventorySchedule {
+            last_snapshot: Some(now + chrono::Duration::minutes(5)),
+            snapshot_id: Some("theirs".into()),
+        };
+        assert_eq!(advance_schedule(Some(&newer), &done), None);
     }
 
     #[test]

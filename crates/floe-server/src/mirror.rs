@@ -86,9 +86,10 @@ pub async fn run_loop(state: Arc<AppState>) {
     .await;
 }
 
-/// One `sync_runs` row (`kind = discovery`) per finished pass and one
+/// One `sync_runs` row (`kind = discovery`) per finished pass, a failed one
+/// included (`outcome = failed`, the error as detail), and one
 /// `repo_inventory` change row per repository the pass created or whose
-/// status changed. A failed pass is a metric and a log line only.
+/// status changed.
 fn record_pass(recorder: &dyn floe_catalog::Recorder, r: &floe_mirror::PassReport) {
     let now = chrono::Utc::now();
     let finished = r.finished_at.unwrap_or(now);
@@ -96,7 +97,7 @@ fn record_pass(recorder: &dyn floe_catalog::Recorder, r: &floe_mirror::PassRepor
         source: Some("github".into()),
         finished_at: finished,
         outcome: r.outcome.to_string(),
-        detail: Some(r.summary()),
+        detail: Some(r.error.clone().unwrap_or_else(|| r.summary())),
         api_requests: Some(r.api.requests),
         api_not_modified: Some(r.api.not_modified),
         rate_remaining: r.api.rate_remaining,
@@ -160,6 +161,26 @@ mod tests {
         let inv = rec.inventory.lock();
         let changes: Vec<_> = inv.iter().map(|r| (r.floe_repo.as_str(), r.change.as_str(), r.source.as_str())).collect();
         assert_eq!(changes, [("gh-acme/widgets", "created", "github"), ("gh-acme/gadgets", "gone", "github")]);
+    }
+
+    /// A failed pass (GitHub down, a bad token) is a `failed` run carrying
+    /// the error, with no inventory rows.
+    #[test]
+    fn failed_pass_is_a_failed_run() {
+        let rec = Captured::default();
+        let report = floe_mirror::PassReport {
+            started_at: Some(chrono::Utc::now()),
+            finished_at: Some(chrono::Utc::now()),
+            outcome: "failed",
+            error: Some("github: 401 Bad credentials".into()),
+            ..floe_mirror::PassReport::default()
+        };
+        super::record_pass(&rec, &report);
+        let runs = rec.runs.lock();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].outcome, "failed");
+        assert_eq!(runs[0].detail.as_deref(), Some("github: 401 Bad credentials"));
+        assert!(rec.inventory.lock().is_empty());
     }
 
     /// §B.7.2: the mirror's read-only policy parses and refuses every push.
