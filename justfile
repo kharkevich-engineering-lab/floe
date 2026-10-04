@@ -83,7 +83,7 @@ dev-store-stop:
 test:
     {{t5}} cargo test --workspace --lib --bins
     {{t5}} cargo test -p floe-store -p floe-git -p floe-wal -p floe-bundle --tests
-    {{t5}} cargo test -p floe-server --test web_api --test web_ui --test api_v1 --test static_http --test maintain --test routing_prefix --test lfs_upstream --test drain --test github --test github_webhooks
+    {{t5}} cargo test -p floe-server --test web_api --test web_ui --test api_v1 --test static_http --test maintain --test routing_prefix --test lfs_upstream --test drain --test github --test github_webhooks --test follow --test policy
 
 # Editor facade contracts: REST reads, GraphQL saves, PRs and durable webhook delivery.
 test-editor:
