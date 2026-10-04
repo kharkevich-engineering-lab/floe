@@ -168,6 +168,7 @@ pub(crate) fn i64_to_f64(v: i64) -> f64 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// A self-issued pair for tests only (rcgen is a dev-dependency).
     pub(crate) fn pair(names: &[&str]) -> (String, String) {
@@ -234,7 +235,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn handshakes_pick_up_a_swapped_certificate() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let r = CertResolver::new();
         let (c1, k1) = pair(&["floe.test"]);
         r.set(load_pem(&c1, &k1).unwrap());
