@@ -167,7 +167,18 @@ impl Planner<'_, '_> {
             || old
                 .as_ref()
                 .is_some_and(|e| is_explicit(self.cfg(), &e.full_name));
-        let verdict = select(self.cfg(), r, explicit);
+        // §B.9: `skip_archived` only stops a mirror from *starting*. A repository
+        // already mirrored that is archived at the source keeps following (at
+        // 24h), so its selection is judged as if it were not archived.
+        let verdict = if r.archived && old.as_ref().is_some_and(|e| e.floe.is_some()) {
+            let live = RemoteRepo {
+                archived: false,
+                ..r.clone()
+            };
+            select(self.cfg(), &live, explicit)
+        } else {
+            select(self.cfg(), r, explicit)
+        };
         let Some(old) = old else {
             self.new_repo(r, verdict);
             return;
