@@ -24,6 +24,7 @@ tokio-stream.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 parking_lot.workspace = true
 rand.workspace = true
 uuid.workspace = true
@@ -37,7 +38,6 @@ aws-sdk-s3 = { workspace = true, optional = true }
 aws-smithy-types = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 [dev-dependencies]
-serde_json.workspace = true
 axum.workspace = true
 tempfile.workspace = true
 sha1 = { workspace = true }

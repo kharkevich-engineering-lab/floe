@@ -51,6 +51,14 @@ pub async fn run(cfg: &Arc<Config>) -> Result<()> {
         bg_handles.push(tokio::spawn(async move {
             floe_server::follow::run_loop(st).await;
         }));
+        // The GitHub mirror (D49): decides which repositories follow what, under
+        // one bucket lease fleet-wide; follow moves the bytes.
+        if cfg.github_mirror.enabled {
+            let st = state.clone();
+            bg_handles.push(tokio::spawn(async move {
+                floe_server::mirror::run_loop(st).await;
+            }));
+        }
     }
 
     if !maintainer && cfg.has_role(Role::Compact) {

@@ -11,6 +11,7 @@ floe-store.workspace = true
 floe-config.workspace = true
 floe-git.workspace = true
 floe-wal.workspace = true
+floe-mirror.workspace = true
 async-trait.workspace = true
 floe-bundle.workspace = true
 anyhow.workspace = true

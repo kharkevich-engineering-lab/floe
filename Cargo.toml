@@ -9,6 +9,7 @@ members = [
     "crates/floe-server",
     "crates/floe-bundle",
     "crates/floe-cli",
+    "crates/floe-mirror",
 ]
 
 [workspace.package]
@@ -68,6 +69,7 @@ floe-git = { path = "crates/floe-git" }
 floe-wal = { path = "crates/floe-wal" }
 floe-server = { path = "crates/floe-server" }
 floe-bundle = { path = "crates/floe-bundle" }
+floe-mirror = { path = "crates/floe-mirror" }
 
 anyhow = "1"
 thiserror = "2"

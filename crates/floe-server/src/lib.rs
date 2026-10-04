@@ -18,6 +18,7 @@ pub mod lfs_upstream;
 pub mod maintain;
 pub mod metrics;
 pub mod middleware;
+pub mod mirror;
 pub mod ops;
 pub mod pktline;
 pub mod policy;

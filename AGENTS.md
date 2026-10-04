@@ -257,7 +257,7 @@ decision in §4 — or the PR is; never "fix later".
 | # | Principle | The tell in a PR | The question to answer |
 |---|---|---|---|
 | **I** | **No state outside the object store.** Disk and memory are caches. | A database, Redis, SQLite, a file that must survive a restart, an env var that encodes data. | "If every instance is wiped now, what is lost?" — must be "warmth". |
-| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, events/cursor, maintainer heartbeats, render cache). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
+| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, events/cursor, maintainer heartbeats, render cache, the mirror's HTTP cache). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
 | **III** | **Side effects are readers of the WAL, never steps of a write.** Events, mirrors, notifications tail the log from a durable cursor. | A webhook/HTTP call from `receive.rs`, `publish.rs`, `follow.rs`, `smart.rs`. | "If this side effect fails, does the push?" — no. "Is it replayable from the cursor?" — yes. |
 | **IV** | **Every read revalidates; there is no eventually.** | A cache that outlives the manifest's generation, a TTL invented for a repo-scoped answer, a read that skips `sync_*`. | "After `push` returns `ok`, can any instance serve the old state?" (`cargo test -p floe-server --test sim`). |
 | **V** | **Serve from the parts that fit; never a bigger box, never a hard-coded host.** | "Just download the pack", a path that assumes the full pack set is local, a hostname in `crates/` or `web/`. | "What happens to this code on a 20 GiB tmpfs with a 32 GB base pack? Which sync level does it need?" |
@@ -479,6 +479,19 @@ that advertises no refs at all never causes deletions. A round probes refs first
 when something moved. `"refuse"` is D33's behaviour. Follow still bypasses policy. Upstream tokens resolve through
 `Config::upstream_token_env` (`upstream.token_env_by_host`, host-only, then `token_env`). Supersedes D33's
 "fast-forward only" clause; the rest of D33 stands. Design: `docs/design/github-mirror.md` §A.
+
+**D49 — The GitHub mirror decides, follow moves bytes (2026-10-04).** `floe-mirror` runs on a `maintain` host
+(`[github_mirror] enabled`, its own loop next to follow) or as `floe github sync`, under
+`leases/mirror-github.pb`; it keeps `mirror/github/state.json` (CAS, generation-guarded) and a disposable
+`mirror/github/http-cache.json` (`PutMode::Overwrite`, a cache) in the bucket, maps `owner/name` to
+`<prefix>-<owner>/<name>` (identity stays two segments, D5/D26; pending the owner's sign-off, R1), creates
+repositories by the manifest CAS, publishes a read-only `policy.json` (create-only) and owns only the `[upstream]`
+table of repositories marked `upstream.source = "github:<id>"`, written with `publish_settings_if` (a CAS on the
+settings revision). A human edit of that table (settings author not `github-mirror`) detaches the repository. It
+never deletes a floe repository (gone/excluded repositories are frozen with `follow = []`), never stores a token
+(`token_env` + `upstream.token_env_by_host`), and never transfers git objects: a push seen at the forge nudges
+`ops::start(.., "follow")` on the maintaining host only. GitLab/Gitea implement `Source`. Design:
+`docs/design/github-mirror.md` §B.
 
 ## 5. Working rules
 

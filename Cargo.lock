@@ -1703,6 +1703,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "floe-mirror"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "floe-config",
+ "floe-git",
+ "floe-proto",
+ "floe-store",
+ "floe-wal",
+ "hex",
+ "humantime",
+ "metrics",
+ "parking_lot",
+ "rand 0.9.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "floe-proto"
 version = "0.1.0"
 dependencies = [

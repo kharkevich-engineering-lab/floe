@@ -54,15 +54,92 @@ pub async fn cas_update<T, F>(
     store: &dyn ObjectStore,
     key: &str,
     max_retries: u32,
-    mut f: F,
+    f: F,
 ) -> Result<Option<(ObjectMeta, T)>, CoordError>
 where
     T: prost::Message + Default,
     F: FnMut(Option<&T>) -> Result<Option<T>, CoordError>,
 {
+    cas_loop(
+        store,
+        key,
+        max_retries,
+        |bytes| T::decode(bytes).map_err(CoordError::from),
+        |t: &T| Ok(t.encode_to_vec()),
+        f,
+    )
+    .await
+}
+
+/// [`cas_update`] for a JSON document (`serde_json`): the same loop, re-read on
+/// `PreconditionFailed`, jittered backoff on `Retryable`. For small coordination
+/// objects outside the WAL (`mirror/<kind>/state.json`). A body that does not
+/// decode as `T` is an error, never treated as absent.
+pub async fn cas_update_json<T, F>(
+    store: &dyn ObjectStore,
+    key: &str,
+    max_retries: u32,
+    f: F,
+) -> Result<Option<(ObjectMeta, T)>, CoordError>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+    F: FnMut(Option<&T>) -> Result<Option<T>, CoordError>,
+{
+    cas_loop(
+        store,
+        key,
+        max_retries,
+        |bytes| {
+            serde_json::from_slice(&bytes)
+                .map_err(|e| CoordError::Other(anyhow::anyhow!("decoding {key}: {e}")))
+        },
+        |t: &T| {
+            serde_json::to_vec_pretty(t)
+                .map_err(|e| CoordError::Other(anyhow::anyhow!("encoding {key}: {e}")))
+        },
+        f,
+    )
+    .await
+}
+
+/// Read a JSON document with its version. `Ok(None)` if absent.
+pub async fn get_json<T>(
+    store: &dyn ObjectStore,
+    key: &str,
+) -> Result<Option<(ObjectMeta, T)>, CoordError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match store.get_bytes(key).await? {
+        None => Ok(None),
+        Some((meta, bytes)) => {
+            let t = serde_json::from_slice(&bytes)
+                .map_err(|e| CoordError::Other(anyhow::anyhow!("decoding {key}: {e}")))?;
+            Ok(Some((meta, t)))
+        }
+    }
+}
+
+/// The loop behind [`cas_update`] and [`cas_update_json`], over a codec.
+async fn cas_loop<T, F, D, E>(
+    store: &dyn ObjectStore,
+    key: &str,
+    max_retries: u32,
+    decode: D,
+    encode: E,
+    mut f: F,
+) -> Result<Option<(ObjectMeta, T)>, CoordError>
+where
+    D: Fn(bytes::Bytes) -> Result<T, CoordError>,
+    E: Fn(&T) -> Result<Vec<u8>, CoordError>,
+    F: FnMut(Option<&T>) -> Result<Option<T>, CoordError>,
+{
     let mut attempts: u32 = 0;
     loop {
-        let current = get_message::<T>(store, key).await?;
+        let current = match store.get_bytes(key).await? {
+            None => None,
+            Some((meta, bytes)) => Some((meta, decode(bytes)?)),
+        };
         let new = match f(current.as_ref().map(|(_, t)| t)) {
             Ok(None) => return Ok(None),
             Ok(Some(new)) => new,
@@ -72,7 +149,7 @@ where
             Some((meta, _)) => PutMode::Update(meta.version.clone()),
             None => PutMode::Create,
         };
-        let encoded = new.encode_to_vec();
+        let encoded = encode(&new)?;
         match store.put_bytes(key, encoded, mode).await {
             Ok(meta) => return Ok(Some((meta, new))),
             Err(StoreError::PreconditionFailed { .. }) => {
@@ -168,8 +245,10 @@ pub struct LeaseGuard {
     expires_at: SystemTime,
     epoch: u64,
     /// Set by `release` / `Drop` so the other path is a no-op. Also read by the
-    /// heartbeat task to know when to stop.
-    released: AtomicBool,
+    /// heartbeat task to know when to stop, and set by it when the lease is lost.
+    /// Shared ([`LeaseGuard::released_flag`]) so a holder can check it lock-free
+    /// while the heartbeat owns the guard.
+    released: Arc<AtomicBool>,
 }
 
 impl LeaseGuard {
@@ -191,7 +270,7 @@ impl LeaseGuard {
             version,
             expires_at: now + ttl,
             epoch,
-            released: AtomicBool::new(false),
+            released: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -269,6 +348,13 @@ impl LeaseGuard {
 
     pub fn holder(&self) -> &str {
         &self.holder
+    }
+
+    /// The released/lost flag, shared: `true` once the guard was released or its
+    /// heartbeat lost the lease. Take it before [`spawn_heartbeat`](Self::spawn_heartbeat)
+    /// takes the guard; reading it never waits behind a heartbeat PUT in flight.
+    pub fn released_flag(&self) -> Arc<AtomicBool> {
+        self.released.clone()
     }
 
     pub fn expires_at(&self) -> SystemTime {
@@ -665,6 +751,73 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(res.1.repos, vec!["a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn cas_update_json_creates_updates_and_converges() {
+        #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+        struct Doc {
+            n: u32,
+        }
+        let store = dyn_store();
+        let key = "mirror/test/state.json";
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let s = store.clone();
+            handles.push(tokio::spawn(async move {
+                cas_update_json::<Doc, _>(s.as_ref(), key, 500, |cur| {
+                    let mut d = cur.cloned().unwrap_or_default();
+                    d.n += 1;
+                    Ok(Some(d))
+                })
+                .await
+                .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let (_, doc) = get_json::<Doc>(store.as_ref(), key).await.unwrap().unwrap();
+        assert_eq!(doc.n, 16);
+        // An abort writes nothing; an undecodable body is an error, not "absent".
+        assert!(
+            cas_update_json::<Doc, _>(store.as_ref(), key, 3, |_| Ok(None))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        store
+            .put_bytes("bad.json", b"not json".to_vec(), PutMode::Overwrite)
+            .await
+            .unwrap();
+        assert!(
+            cas_update_json::<Doc, _>(store.as_ref(), "bad.json", 3, |_| Ok(None))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn released_flag_reports_a_lost_lease_without_the_guard() {
+        let store = dyn_store();
+        let key = "leases/flag.pb";
+        let ttl = Duration::from_millis(50);
+        let g = try_acquire(store.clone(), key, "h1", "test", ttl)
+            .await
+            .unwrap()
+            .unwrap();
+        let flag = g.released_flag();
+        let g = Arc::new(Mutex::new(g));
+        // Steal it after expiry, then let the heartbeat notice.
+        tokio::time::sleep(LEASE_SKEW_TOLERANCE + Duration::from_millis(100)).await;
+        let _g2 = try_acquire(store.clone(), key, "h2", "test", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!flag.load(Ordering::SeqCst));
+        let hb = LeaseGuard::spawn_heartbeat(g, Duration::from_millis(10), ttl);
+        hb.await.unwrap();
+        assert!(flag.load(Ordering::SeqCst));
     }
 
     #[test]

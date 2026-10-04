@@ -1072,7 +1072,26 @@ impl RepoHandle {
         self.cfg
             .with_settings(toml)
             .map_err(|e| WalError::Invalid(format!("{e:#}")))?;
-        crate::publish::publish_settings_impl(self, toml, author, message).await
+        crate::publish::publish_settings_impl(self, toml, author, message, None).await
+    }
+
+    /// [`publish_settings`](Self::publish_settings) as a compare-and-set on the
+    /// settings revision: after the refs sync, a manifest whose
+    /// `settings.revision` (0 when none) is not `expected_revision` is
+    /// [`WalError::SettingsConflict`], nothing published and no retry. For
+    /// read-modify-write callers (the GitHub mirror) racing a human `PUT`.
+    pub async fn publish_settings_if(
+        &self,
+        toml: &str,
+        author: &str,
+        message: &str,
+        expected_revision: u64,
+    ) -> Result<u64, WalError> {
+        self.cfg
+            .with_settings(toml)
+            .map_err(|e| WalError::Invalid(format!("{e:#}")))?;
+        crate::publish::publish_settings_impl(self, toml, author, message, Some(expected_revision))
+            .await
     }
 
     /// Write checkpoint at current head.

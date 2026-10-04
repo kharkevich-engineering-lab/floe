@@ -1,4 +1,4 @@
-//! `floe` (full CLI: serve | compact | bundle | repo | wal | synth | import | mirror | config)
+//! `floe` (full CLI: serve | compact | bundle | repo | wal | synth | import | mirror | github | config)
 //! and `floe-server` (`floe serve` under the name a standalone deployment expects, D39),
 //! both thin bins over this library.
 //!
@@ -16,6 +16,7 @@ mod synth;
 
 mod bundle_cmd;
 mod compact;
+mod github_cmd;
 mod import;
 mod import_direct;
 mod mirror;
@@ -205,10 +206,34 @@ enum Command {
         #[arg(long, value_enum, default_value_t = mirror::Identity::Token)]
         identity: mirror::Identity,
     },
+    /// The GitHub mirror (`[github_mirror]`, D49): discover, create, keep `[upstream]` current.
+    Github {
+        #[command(subcommand)]
+        action: GithubAction,
+    },
     /// Validate or dump the configuration.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum GithubAction {
+    /// Reconcile: in the foreground forever (the same lease as a server's loop), or once.
+    Sync {
+        /// One pass under the lease (waits up to `lease_ttl`; exit 3 when held elsewhere).
+        #[arg(long)]
+        once: bool,
+        /// Print the plan and change nothing (no lease, no writes).
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Counts per status, the last pass, and every entry that is not active.
+    Status {
+        /// The raw `mirror/github/state.json`.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -507,6 +532,7 @@ async fn dispatch(command: Command, cfg: Config) -> Result<()> {
         Command::Bundle { action } => bundle_cmd::run(action, &cfg).await,
         Command::Repo { action } => repo::run(action, &cfg).await,
         Command::Wal { action } => wal_cmd::run(action, &cfg).await,
+        Command::Github { action } => github_cmd::run(action, &cfg).await,
         Command::Mirror {
             from,
             to,

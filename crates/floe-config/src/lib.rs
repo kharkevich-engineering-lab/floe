@@ -30,6 +30,7 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     pub events: EventsConfig,
     pub github: GithubConfig,
+    pub github_mirror: GithubMirrorConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -834,6 +835,169 @@ impl Default for GithubConfig {
     }
 }
 
+/// D49 — the GitHub mirror (`floe-mirror`, `docs/design/github-mirror.md` §B):
+/// discovers repositories on GitHub, creates `<prefix>-<owner>/<name>` with an
+/// `[upstream]` table, and lets follow (D48) move the bytes. Host-level only (not
+/// a settings section); runs on a `maintain` host under `leases/mirror-github.pb`.
+/// `[github]` is the facade (D42), hence the name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GithubMirrorConfig {
+    /// Run the mirror on this host (needs the `maintain` role).
+    pub enabled: bool,
+    /// REST base (`https://ghe.example.com/api/v3` for GHES).
+    pub api_url: String,
+    /// Base of clone/LFS URLs, and the `upstream.token_env_by_host` key.
+    pub git_url: String,
+    /// Env var holding a PAT (classic `repo`, or fine-grained Contents:read +
+    /// Metadata:read). Read at every pass; never written to the bucket.
+    pub token_env: String,
+    /// floe owner = `<prefix>-<github owner>`, lowercased. `[a-z0-9]{1,16}`.
+    pub prefix: String,
+    /// Discovery/reconcile cadence. `0` = only at startup (and `floe github sync --once`).
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+    /// Owners whose repositories are mirrored; `"@me"` = the token's user, private included.
+    pub users: Vec<String>,
+    /// Organisations (all repository types the token can see).
+    pub orgs: Vec<String>,
+    /// Users whose stars are mirrored (`"@me"` allowed).
+    pub starred: Vec<String>,
+    /// Explicit `"owner/name"`: bypass `include` and the archived/fork skips.
+    pub repos: Vec<String>,
+    /// Globs over `owner/name` (case-insensitive; `*` stops at `/`, so each has one `/`).
+    pub include: Vec<String>,
+    /// Same syntax; wins over everything, explicit `repos` included.
+    pub exclude: Vec<String>,
+    /// Do not start mirroring archived repositories (mirrored ones are kept).
+    pub skip_archived: bool,
+    /// Do not start mirroring forks.
+    pub skip_forks: bool,
+    /// `false` = public repositories only.
+    pub include_private: bool,
+    /// The operator's acknowledgement that floe has no per-repository read ACL:
+    /// every reader of this floe reads every mirrored private repository.
+    /// Required with `include_private` outside `server.auth.mode = "none"`.
+    pub private_visible_to_all_readers: bool,
+    /// Write `upstream.lfs` so LFS objects read through (`docs/LFS.md`).
+    pub lfs: bool,
+    /// Patterns written into each repository's `upstream.follow`.
+    pub follow: Vec<String>,
+    /// Written into `upstream.on_rewrite`.
+    pub on_rewrite: OnRewrite,
+    /// Written into `upstream.follow_interval` (a backstop; pushes are nudged).
+    #[serde(with = "humantime_serde")]
+    pub follow_interval: Duration,
+    /// Publish a deny-all `policy.json` at creation, so only follow moves refs.
+    pub read_only: bool,
+    /// Larger repositories (GitHub `size`) are `too-large`: never auto-created,
+    /// logged with the `floe import` handoff recipe. `0` = no limit.
+    pub max_repo_size: ByteSize,
+    /// Bound on creations per pass.
+    pub max_new_per_pass: usize,
+    /// Stop a pass (incomplete) when `x-ratelimit-remaining` drops below this.
+    pub min_rate_remaining: u32,
+    /// How long a repository must be missing (404/403) before it is `gone`/`forbidden`.
+    #[serde(with = "humantime_serde")]
+    pub gone_after: Duration,
+    /// TTL of `leases/mirror-github.pb`; heartbeat every `lease_ttl / 3`.
+    #[serde(with = "humantime_serde")]
+    pub lease_ttl: Duration,
+}
+
+impl Default for GithubMirrorConfig {
+    fn default() -> Self {
+        GithubMirrorConfig {
+            enabled: false,
+            api_url: "https://api.github.com".into(),
+            git_url: "https://github.com".into(),
+            token_env: "FLOE_GITHUB_TOKEN".into(),
+            prefix: "gh".into(),
+            interval: Duration::from_secs(300),
+            users: Vec::new(),
+            orgs: Vec::new(),
+            starred: Vec::new(),
+            repos: Vec::new(),
+            include: vec!["*/*".into()],
+            exclude: Vec::new(),
+            skip_archived: true,
+            skip_forks: true,
+            include_private: true,
+            private_visible_to_all_readers: false,
+            lfs: true,
+            follow: vec!["refs/heads/*".into(), "refs/tags/*".into()],
+            on_rewrite: OnRewrite::Archive,
+            follow_interval: Duration::from_secs(600),
+            read_only: true,
+            max_repo_size: ByteSize::gib(2),
+            max_new_per_pass: 20,
+            min_rate_remaining: 200,
+            gone_after: Duration::from_secs(24 * 3600),
+            lease_ttl: Duration::from_secs(120),
+        }
+    }
+}
+
+impl GithubMirrorConfig {
+    /// `validate`'s checks for this section (only when `enabled`).
+    fn validate(&self, cfg: &Config) -> Result<()> {
+        anyhow::ensure!(
+            cfg.has_role(Role::Maintain),
+            "github_mirror.enabled needs the maintain role on this host"
+        );
+        anyhow::ensure!(
+            !self.prefix.is_empty()
+                && self.prefix.len() <= 16
+                && self
+                    .prefix
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
+            "github_mirror.prefix must be [a-z0-9]{{1,16}}, got {:?}",
+            self.prefix
+        );
+        for (key, list) in [("include", &self.include), ("exclude", &self.exclude)] {
+            for g in list {
+                anyhow::ensure!(
+                    g.matches('/').count() == 1 && !g.starts_with('/') && !g.ends_with('/'),
+                    "github_mirror.{key} entry {g:?} must be an owner/name glob with exactly one '/' (`*/*`, `acme/*`, `*/name`)"
+                );
+            }
+        }
+        for r in &self.repos {
+            anyhow::ensure!(
+                r.matches('/').count() == 1 && !r.contains('*') && !r.starts_with('/') && !r.ends_with('/'),
+                "github_mirror.repos entry {r:?} must be \"owner/name\""
+            );
+        }
+        for (key, u) in [("api_url", &self.api_url), ("git_url", &self.git_url)] {
+            anyhow::ensure!(
+                (u.starts_with("https://") || u.starts_with("http://")) && !u.ends_with('/'),
+                "github_mirror.{key} must be an http(s) URL without a trailing '/', got {u:?}"
+            );
+        }
+        anyhow::ensure!(
+            !self.token_env.is_empty(),
+            "github_mirror.token_env must name an environment variable"
+        );
+        anyhow::ensure!(
+            !self.follow.is_empty(),
+            "github_mirror.follow must list at least one ref pattern"
+        );
+        refpattern::RefPatterns::parse(&self.follow)?;
+        anyhow::ensure!(
+            !self.lease_ttl.is_zero(),
+            "github_mirror.lease_ttl must be > 0"
+        );
+        if self.include_private && cfg.server.auth.mode != AuthMode::None {
+            anyhow::ensure!(
+                self.private_visible_to_all_readers,
+                "github_mirror.include_private: floe has no per-repository read ACL, so every reader would read every mirrored private repository; set github_mirror.private_visible_to_all_readers = true to accept that, or include_private = false"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct TelemetryConfig {
@@ -1118,6 +1282,7 @@ impl Default for Config {
             telemetry: TelemetryConfig::default(),
             events: EventsConfig::default(),
             github: GithubConfig::default(),
+            github_mirror: GithubMirrorConfig::default(),
         }
     }
 }
@@ -1358,7 +1523,29 @@ impl Config {
     pub fn load(path: &std::path::Path) -> Result<Config> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        Self::parse(&text)
+        let mut cfg = Self::parse(&text)?;
+        cfg.derive_mirror_token_env(|k| std::env::var_os(k).is_some());
+        Ok(cfg)
+    }
+
+    /// D49: follow and LFS read-through on the mirror's repositories authenticate
+    /// with the mirror's token. Unless `upstream.token_env_by_host` already names
+    /// one for `host(github_mirror.git_url)`, map that host to
+    /// `github_mirror.token_env` when the mirror is enabled here **or** the variable
+    /// is set in this process (a serving-only host sharing the fleet's floe.toml).
+    pub fn derive_mirror_token_env(&mut self, is_set: impl Fn(&str) -> bool) {
+        let m = &self.github_mirror;
+        let host = upstream_authority(&m.git_url).to_string();
+        if host.is_empty()
+            || m.token_env.is_empty()
+            || self.upstream.token_env_by_host.contains_key(&host)
+            || !(m.enabled || is_set(&m.token_env))
+        {
+            return;
+        }
+        self.upstream
+            .token_env_by_host
+            .insert(host, m.token_env.clone());
     }
 
     /// Apply `FLOE__a__b=v` overrides (values parsed as TOML values, falling back to string)
@@ -1709,6 +1896,9 @@ impl Config {
                 u.starts_with("http://") || u.starts_with("https://"),
                 "events.webhook_url must be an http(s) URL"
             );
+        }
+        if self.github_mirror.enabled {
+            self.github_mirror.validate(self)?;
         }
         Ok(())
     }
@@ -2061,6 +2251,74 @@ listen = \"0.0.0.0:1\"\n",
         assert!(!pub_toml.contains("session_secret"), "{pub_toml}");
         assert!(!pub_toml.contains("[server]"), "{pub_toml}");
         assert!(!pub_toml.contains("token_env"), "{pub_toml}");
+    }
+
+    #[test]
+    fn github_mirror_validates_and_derives_the_token_host() {
+        let mut c = Config::default();
+        c.github_mirror.enabled = true;
+        c.github_mirror.users = vec!["@me".into()];
+        c.validate().unwrap();
+        // Not a maintainer.
+        let mut bad = c.clone();
+        bad.server.roles = vec![Role::Serve];
+        assert!(bad.validate().is_err());
+        for edit in [
+            |m: &mut GithubMirrorConfig| m.prefix = "GH".into(),
+            |m: &mut GithubMirrorConfig| m.prefix = String::new(),
+            |m: &mut GithubMirrorConfig| m.include = vec!["acme".into()],
+            |m: &mut GithubMirrorConfig| m.exclude = vec!["a/b/c".into()],
+            |m: &mut GithubMirrorConfig| m.repos = vec!["acme/*".into()],
+            |m: &mut GithubMirrorConfig| m.api_url = "ftp://x".into(),
+            |m: &mut GithubMirrorConfig| m.follow = vec![],
+            |m: &mut GithubMirrorConfig| m.follow = vec!["refs/archive/*".into()],
+        ] {
+            let mut bad = c.clone();
+            edit(&mut bad.github_mirror);
+            assert!(bad.validate().is_err(), "{:?}", bad.github_mirror);
+        }
+        // Private repositories outside auth none need the acknowledgement.
+        let mut tok = c.clone();
+        tok.server.auth.mode = AuthMode::Token;
+        tok.server.auth.tokens = vec![StaticToken {
+            principal: "ci".into(),
+            token: "t".into(),
+            token_env: None,
+            write: true,
+            admin: false,
+        }];
+        assert!(tok.validate().is_err());
+        tok.github_mirror.private_visible_to_all_readers = true;
+        tok.validate().unwrap();
+        tok.github_mirror.private_visible_to_all_readers = false;
+        tok.github_mirror.include_private = false;
+        tok.validate().unwrap();
+
+        // Derived token_env_by_host: enabled, or the variable is set here.
+        let mut d = c.clone();
+        d.derive_mirror_token_env(|_| false);
+        assert_eq!(
+            d.upstream_token_env("https://github.com/a/b.git"),
+            Some("FLOE_GITHUB_TOKEN")
+        );
+        let mut off = Config::default();
+        off.derive_mirror_token_env(|_| false);
+        assert!(off.upstream.token_env_by_host.is_empty());
+        off.derive_mirror_token_env(|k| k == "FLOE_GITHUB_TOKEN");
+        assert_eq!(
+            off.upstream.token_env_by_host.get("github.com").map(String::as_str),
+            Some("FLOE_GITHUB_TOKEN")
+        );
+        // An explicit entry wins.
+        let mut ex = c;
+        ex.upstream
+            .token_env_by_host
+            .insert("github.com".into(), "MINE".into());
+        ex.derive_mirror_token_env(|_| true);
+        assert_eq!(
+            ex.upstream_token_env("https://github.com/a/b.git"),
+            Some("MINE")
+        );
     }
 
     #[test]

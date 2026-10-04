@@ -922,6 +922,31 @@ floe --config floe.toml github status [--json]
   (as `tests/follow.rs`); the mirror creates the repository, the nudge runs the follow op, and refs arrive. This
   is the one test that crosses §A and §B.
 
+### B.15 As landed (2026-10-04)
+
+Where the code differs from §B.1–§B.14 (the code wins):
+
+- **Not landed**: wikis (`wikis` key, §B.10) are left out entirely rather than added as a refused key; the
+  `floe-catalog` `Recorder` is not on this branch, so `run_loop` takes an `on_pass: Fn(&PassReport)` hook and
+  `PassReport.changes` carries the inventory changes; `floe_server::mirror::run_loop` passes a no-op until the
+  catalog lands. `floe config check` does not print `[github_mirror]` yet. The end-to-end
+  `crates/floe-server/tests/mirror.rs` (mirror → nudge → follow) is open.
+- **Plan/apply shape**: the planner emits per-repository step lists (`Create { allow_create }`, `PutPolicy`,
+  `Publish { reason }`, `Nudge`) instead of a flat `Vec<Action>` with `MarkStatus`; statuses are bookkeeping on
+  the planned state. `Create { allow_create: false }` is the too-large handoff check (adopt a repository carrying
+  the marker, never create). Ownership rule 2 (an empty, never-written repository is ours) applies only when the
+  mirror may create. A new repository beyond `max_new_per_pass` is not recorded in the state at all.
+- **State CAS**: `state::save` is `cas_update_json` guarded by `generation` (a write whose stored generation is
+  not the pass's aborts), every ≤ 10 applied steps and at the end. `floe_store::coord` also gained `get_json`.
+- **Source**: `Source` has no `wiki_url`; `Discovery` carries `login`; `ApiStats` carries
+  `rate_limited_until` (the loop sleeps until then, capped at 1 h); `SourceError::NoToken(var)` is the missing
+  env var. Lookups are not counted in `ApiStats`. `GithubSource` reads the token at every pass.
+- **Config**: `GithubMirrorConfig::validate` runs only when `enabled`. The `maintenance.follow_interval = 0`
+  warning is logged by `run_loop` at start, not by `validate` (which runs on every settings merge). The derived
+  `token_env_by_host` default is `Config::derive_mirror_token_env`, called from `Config::load`.
+- **CLI**: `floe github sync` without `--once` runs `run_loop` in the foreground (its first pass after the
+  ~10 s jittered first tick); `--once` waits up to `lease_ttl` and exits 3 naming the holder.
+
 ---
 
 ## C. `floe-catalog` (D50)
