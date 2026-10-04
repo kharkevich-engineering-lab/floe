@@ -32,13 +32,14 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `docs/EVENTS.md` | Anyone changing WAL-derived ref events, the webhook bridge, consumer semantics or event cursors. |
 | `docs/GITHUB.md` | Anyone touching `crates/floe-server/src/github/*`, or pointing a GitHub-integrated app at floe for local development. The facade's trust boundary (it has none), URL conventions, the write primitive, known limits. |
 | `docs/design/github-mirror.md` | Anyone touching upstream follow patterns/archive (D48), `floe-mirror` (D49), `floe-catalog` (D50, SigV4 D63) or the push-to-upstream seam (D51). Design of record; dated "as landed" notes where the code won. |
+| `docs/design/admin-ui.md` | Anyone touching the config store (`floe_server::config_store`), `/api/v1/admin/*`, the SPA's `/_admin` area, `floe config show|set|history|rollback|import`, or adding a runtime config section (D60–D62). |
 | `docs/CONTRACT.md` | When you touch a crate boundary. The cross-crate contract; *extend, don't rename*; code wins where they differ. |
 | `docs/reference/cursor-git-at-any-scale.md` | The source design, verbatim. Read once before touching WAL/publish/sync/placement. |
 | `docs/patches/README.md` | Git client patches (bundle filter matching) and the gate for advertising filtered bundle families together. |
 | `web/API.md` | UI/SDK authors and anyone changing `web/*.rs`. Wire contract, caching rules, SSE envelope, tasks, prefix-first lanes. |
 | `web/sdk/README.md` | Users of `repos.js`. |
 | `web/README.md` | Frontend engineers changing the React SPA, Vite build, SDK adapter, static assets, loading states. |
-| `floe.example.toml` | Every config key with its default and a comment. Change it with the code. |
+| `floe.example.toml` | Every **bootstrap** config key with its default and a comment (runtime sections live in the config store, D60; their schema is `GET /api/v1/admin/config/schema`). Change it with the code. |
 | `floe.standalone.toml` | The one-machine shape: `floe-server --config floe.standalone.toml` → `http://floe.localhost:8080/` (loopback; TLS modes in D59). |
 | `deploy/nginx.conf.example` | An optional nginx in front; documents the `X-Accel-Redirect` byte-offload contract. |
 | `Containerfile`, `flake.nix` | An OCI image; a Nix package, image and devshell. |
@@ -296,7 +297,7 @@ decision in §4 — or the PR is; never "fix later".
 - **D4** protobuf on the wire and in the bucket; schema versioned, append-only.
 - **D5** Repo identity `<owner>/<repo>[.git]`, prefix `repos/<o>/<r>/`, creation = CAS create of the manifest.
 - **D6** Manifest CAS is the only commit point. **D7** No node identity, no elections; leases for exclusivity.
-- **D8** `floe.toml` only (+ `FLOE__` env overrides). **D9** One binary, roles by config (`serve`,
+- **D8** `floe.toml` only (+ `FLOE__` env overrides) — for bootstrap keys since D60; runtime keys live in the config store. **D9** One binary, roles by config (`serve`,
   `maintain`, `events`; `maintain` includes compaction and bundles).
 - **D10** One static-serving code path for every immutable byte (ETag/304/If-Range/Range/416/HEAD/immutable;
   UI assets precompressed at build; store objects never compressed at request time).
@@ -580,6 +581,37 @@ dies with the connection, so principle I holds). Credentials follow D43 (static 
 refreshed before expiry) and the same source is the data-file `FileIO`'s only credential provider. The module is
 self-contained for the shared Iceberg crate the code-intelligence design plans; when iceberg-rust's `AuthManager`
 (0.11) lands, it replaces the proxy behind the same config. Design: `docs/design/github-mirror.md` §C.9.
+
+**D60 — Bootstrap file, versioned config document (2026-10-04).** `floe.toml` + `FLOE__` env keep only what an
+instance needs to start and to reach the config store (store, `[config_store]`, server/auth/TLS, cache, wal, git,
+lfs, telemetry, maintenance, placement, compaction, bundles, upstream, the `[github]` facade). Runtime configuration —
+`github_mirror`, `catalog`, `events` (`floe_config::RuntimeConfig`) — is one JSON document at
+`<config_store.prefix>current.json` in `[config_store] bucket` (default: `config/` in the main bucket), written by CAS
+with a monotonic revision; `history/<rev>.json` records every revision (author, message, timestamp, diff) and points
+at the bucket's object version when the bucket is versioned (`history = auto|records|versions`). One home per key:
+the file refuses runtime sections and `FLOE__` overrides of them are ignored; the document cannot carry bootstrap
+keys. Publish validates with the same code as startup and fails closed (400, nothing written); rollback publishes
+an old revision as a new one. Every instance revalidates with a conditional GET every `config_store.ttl`, off every
+request path; the mirror applies changes live at its next pass boundary, `events`/`catalog`/`github_mirror.git_url`
+report *restart required*. A config store outage never blocks git: an instance starts with the built-in runtime
+defaults and keeps revalidating. Design: `docs/design/admin-ui.md`. Supersedes D49's "never stores a token" for
+sealed tokens (D61); the rest of D49 stands.
+
+**D61 — Secrets in the config document are write-only and sealed (2026-10-04).** A secret field is
+`{env = "NAME"}` (read on every instance; nothing in the bucket), or `{sealed = "v1.<kid>.<b64>"}` — AES-256-GCM
+(`ring`) under the 32-byte key in `FLOE_CONFIG_KEY` (`config_store.key_env`), the field path as associated data.
+`{value = …}` is input only (sealed before writing; 400 without a key), `{redacted = true}` is what reads return and
+means "keep" on write (D46's redaction rule). Resolution goes through one process-wide alias per secret field
+(`floe_config::secret::env_var`), refreshed on every apply.
+
+**D62 — The admin API and the SPA's admin area (2026-10-04).** `/api/v1/admin/*` (and `/api-browser/v1/admin/*`):
+config get/put/validate/schema/history/revisions/rollback, overview, mirror status/preview/test/sync/pause/resume,
+catalog status/test. Every route, reads included, needs an admin principal (D24's rule); `GET /api/v1/me` reports
+`admin`. Every publish is audited (history record + log line + a lossy `sync_runs` row `kind = "config"` with the
+catalog on). Per-repo pause is a config change (exact `owner/name` in `github_mirror.exclude`, the mirror's frozen
+state). `repos.js` maps it as `repos.admin.*` (dogfood rule); the bundled UI's admin area lives at `/_admin` and
+renders the runtime sections from `GET …/config/schema`. TLS is never editable there (D59): the overview shows
+`GET /api/v1/tls` read-only.
 
 ## 5. Working rules
 
