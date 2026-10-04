@@ -16,8 +16,8 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// 5xx / transport errors are retried this many times.
 const RETRIES: u32 = 2;
 /// GitHub's guidance for a secondary limit without headers: wait at least a minute.
-const SECONDARY_MIN: Duration = Duration::from_mins(1);
-const SECONDARY_MAX: Duration = Duration::from_mins(15);
+const SECONDARY_MIN: Duration = Duration::from_secs(60);
+const SECONDARY_MAX: Duration = Duration::from_secs(15 * 60);
 
 /// One GET's result.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,7 +75,7 @@ impl GithubHttp {
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .bearer_auth(token);
-            if let Some(c) = &cached {
+            if let Some(c) = cached.as_ref().filter(|c| !may_have_grown(url, c)) {
                 req = req.header("If-None-Match", c.etag.as_str());
             }
             stats.requests += 1;
@@ -115,7 +115,7 @@ impl GithubHttp {
             };
             self.secondary_hits.store(0, Ordering::Relaxed);
             let next = next_link.or(c.next.clone());
-            self.floor(remaining, reset)?;
+            self.floor(remaining, reset, stats)?;
             return Ok(Fetched::Ok {
                 body: c.body,
                 next,
@@ -152,7 +152,7 @@ impl GithubHttp {
                     ),
                     None => cache.remove(url),
                 }
-                self.floor(remaining, reset)?;
+                self.floor(remaining, reset, stats)?;
                 Ok(Fetched::Ok {
                     body: projected,
                     next: next_link,
@@ -168,17 +168,39 @@ impl GithubHttp {
         }
     }
 
-    /// Stop below the configured floor of the primary limit.
-    fn floor(&self, remaining: Option<u32>, reset: Option<i64>) -> Result<(), SourceError> {
+    /// Stop below the configured floor of the primary limit; the loop then
+    /// sleeps until the reset (`stats.rate_limited_until`), like a 403/429.
+    fn floor(
+        &self,
+        remaining: Option<u32>,
+        reset: Option<i64>,
+        stats: &mut ApiStats,
+    ) -> Result<(), SourceError> {
         match remaining {
             Some(r) if r < self.min_rate_remaining => {
                 let until = reset
                     .and_then(|s| u64::try_from(s).ok())
                     .map_or_else(SystemTime::now, |s| SystemTime::UNIX_EPOCH + Duration::from_secs(s));
+                stats.rate_limited_until = Some(until);
                 Err(SourceError::RateLimited { until })
             }
             _ => Ok(()),
         }
+    }
+}
+
+/// A cached last page (no `next`) that is full (`per_page` items) may have
+/// grown a next page that leaves its own body, and so its `ETag`, unchanged; a
+/// 304 without `Link` would then hide it. Such a page is fetched unconditionally
+/// (§B.11: a 304 is never taken as the last page on its own).
+fn may_have_grown(url: &str, c: &CacheEntry) -> bool {
+    let per_page = url
+        .split(['?', '&'])
+        .find_map(|p| p.strip_prefix("per_page="))
+        .and_then(|v| v.parse::<usize>().ok());
+    match (per_page, c.body.as_array()) {
+        (Some(n), Some(items)) => c.next.is_none() && items.len() >= n,
+        _ => false,
     }
 }
 
@@ -293,6 +315,26 @@ mod tests {
     }
 
     #[test]
+    fn a_full_last_page_is_refetched_unconditionally() {
+        let entry = |n: usize, next: Option<&str>| CacheEntry {
+            etag: "\"e\"".into(),
+            next: next.map(str::to_string),
+            body: serde_json::Value::Array(vec![serde_json::Value::Null; n]),
+        };
+        let url = "https://api.github.com/user/repos?affiliation=owner&per_page=100&sort=full_name";
+        assert!(may_have_grown(url, &entry(100, None)));
+        assert!(!may_have_grown(url, &entry(99, None)), "short: really the last page");
+        assert!(!may_have_grown(url, &entry(100, Some("https://api.github.com/x?page=2"))));
+        assert!(!may_have_grown("https://api.github.com/user", &entry(100, None)));
+        let one = CacheEntry {
+            etag: "\"u\"".into(),
+            next: None,
+            body: serde_json::json!({"login": "me"}),
+        };
+        assert!(!may_have_grown(url, &one), "not a listing");
+    }
+
+    #[test]
     fn classifies_rate_limits() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         let f = StatusCode::FORBIDDEN;
@@ -315,9 +357,9 @@ mod tests {
         // secondary without headers and remaining > 0: at least 60 s, doubling, capped.
         let body = br#"{"message":"You have exceeded a secondary rate limit."}"#;
         let h = headers(&[("x-ratelimit-remaining", "4000")]);
-        assert_eq!(rate_limited(f, &h, body, now, 0), Some(now + Duration::from_mins(1)));
-        assert_eq!(rate_limited(f, &h, body, now, 1), Some(now + Duration::from_mins(2)));
-        assert_eq!(rate_limited(f, &h, body, now, 9), Some(now + Duration::from_mins(15)));
+        assert_eq!(rate_limited(f, &h, body, now, 0), Some(now + Duration::from_secs(60)));
+        assert_eq!(rate_limited(f, &h, body, now, 1), Some(now + Duration::from_secs(120)));
+        assert_eq!(rate_limited(f, &h, body, now, 9), Some(now + Duration::from_secs(900)));
         let doc = br#"{"message":"x","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"}"#;
         assert!(rate_limited(f, &h, doc, now, 0).is_some());
         // An access-denied 403 is not a limit.

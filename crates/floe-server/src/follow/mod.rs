@@ -417,7 +417,7 @@ async fn run_op(
         Ok(t) | Err(crate::ops::StartError::AlreadyRunning(t)) => t,
         Err(crate::ops::StartError::UnknownOp) => return Err("follow: unknown op".into()),
     };
-    if !task.wait_done(std::time::Duration::from_hours(1)).await {
+    if !task.wait_done(std::time::Duration::from_secs(3600)).await {
         warn!(repo = %id, "follow: op still running after 1h; moving on");
         return Err("follow: op still running after 1h".into());
     }

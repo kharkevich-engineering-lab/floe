@@ -328,7 +328,7 @@ exclude = []                      # wins over everything, explicit repos include
 skip_archived = true              # do not start mirroring archived repositories
 skip_forks = true
 include_private = true
-private_visible_to_all_readers = false   # must be true when include_private and auth mode != none (no per-repo read ACL)
+private_visible_to_all_readers = false   # must be true when include_private (no per-repo read ACL; any auth mode)
 lfs = true                        # write upstream.lfs (read-through, not prefetched)
 follow = ["refs/heads/*", "refs/tags/*"]
 on_rewrite = "archive"

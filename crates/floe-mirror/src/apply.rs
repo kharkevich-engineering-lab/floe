@@ -3,6 +3,8 @@
 //! re-derivable from the floe side, so a crash between a step and the state CAS
 //! costs nothing but a repeat (the ownership and "who wrote it" rules below).
 
+use std::collections::BTreeSet;
+
 use floe_config::GithubMirrorConfig;
 use floe_git::RepoId;
 
@@ -34,6 +36,9 @@ pub struct Ctx<'a> {
     pub cfg: &'a GithubMirrorConfig,
     pub source: &'a dyn Source,
     pub target: &'a dyn Target,
+    /// Floe repositories other state entries already map to: never claimed
+    /// again, so two forge ids cannot end up on one floe repository.
+    pub taken: BTreeSet<String>,
 }
 
 /// Run one step for entry `id`. An `Err` is the step's failure; the caller marks
@@ -52,6 +57,7 @@ pub async fn step(
             ctx.target
                 .put_policy_if_absent(&rid, READ_ONLY_POLICY.as_bytes())
                 .await?;
+            e.policy = true;
             Ok(Flow::Continue)
         }
         Step::Publish { reason } => publish(ctx, id, e, reason, out).await,
@@ -93,6 +99,9 @@ async fn claim(
     let owner = naming::owner(&ctx.cfg.prefix, &r.owner);
     for name in naming::candidates(&ctx.cfg.prefix, &r.owner, &r.name, id) {
         let rid = RepoId::new(owner.clone(), name)?;
+        if ctx.taken.contains(&rid.to_string()) {
+            continue;
+        }
         let mut existing = ctx.target.exists(&rid).await?;
         if existing.is_none() && allow_create {
             match ctx.target.create(&rid).await? {
@@ -147,8 +156,12 @@ async fn publish(
     let current_hash = settings::hash(&current);
     let marker = settings::marker(ctx.source.kind(), id);
     let unchanged = e.settings_sha.as_deref() == Some(current_hash.as_str());
-    // The mirror wrote it and lost the state record, or it already is what we want.
-    let ours_lost = ex.settings_author == settings::AUTHOR || current_hash == desired_hash;
+    // The mirror wrote it for this id (or with no marker) and lost the state
+    // record, or it already is what we want. A table the mirror wrote for
+    // another id is not ours.
+    let ours_lost = (ex.settings_author == settings::AUTHOR
+        && ex.source.as_deref().is_none_or(|s| s == marker))
+        || current_hash == desired_hash;
     let adoptable = e.settings_sha.is_none()
         && (ex.settings_revision == 0 || ex.source.as_deref() == Some(marker.as_str()));
     if !(unchanged || ours_lost || adoptable) {

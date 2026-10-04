@@ -48,6 +48,12 @@ impl GithubSource {
         }
     }
 
+    /// Whether `url` is under `api_url` (the only place the token is sent).
+    fn on_api(&self, url: &str) -> bool {
+        url.strip_prefix(self.api.as_str())
+            .is_some_and(|rest| rest.starts_with('/'))
+    }
+
     /// The listing URLs a selection names (first pages).
     fn listings(&self, sel: &Selection, login: Option<&str>) -> Vec<String> {
         let api = &self.api;
@@ -140,8 +146,18 @@ impl Source for GithubSource {
                             let r = RemoteRepo::from(r);
                             repos.insert(r.id.clone(), r);
                         }
-                        url = next;
-                        Listing::Whole
+                        match next {
+                            // The token only ever goes to `api_url` (a `Link`
+                            // or a stale cached `next` may name another host).
+                            Some(n) if !self.on_api(&n) => {
+                                tracing::warn!(url = %u, next = %n, "github listing's next page is not under api_url; listing cut short");
+                                Listing::Partial
+                            }
+                            n => {
+                                url = n;
+                                Listing::Whole
+                            }
+                        }
                     }
                     Ok(Fetched::NotFound) => {
                         tracing::warn!(url = %u, "github listing not found (no such user or organisation)");

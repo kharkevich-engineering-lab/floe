@@ -877,7 +877,8 @@ pub struct GithubMirrorConfig {
     pub include_private: bool,
     /// The operator's acknowledgement that floe has no per-repository read ACL:
     /// every reader of this floe reads every mirrored private repository.
-    /// Required with `include_private` outside `server.auth.mode = "none"`.
+    /// Required with `include_private` in every auth mode: the bucket is the
+    /// fleet's, so this host's auth mode does not bound who reads it.
     pub private_visible_to_all_readers: bool,
     /// Write `upstream.lfs` so LFS objects read through (`docs/LFS.md`).
     pub lfs: bool,
@@ -903,6 +904,12 @@ pub struct GithubMirrorConfig {
     /// TTL of `leases/mirror-github.pb`; heartbeat every `lease_ttl / 3`.
     #[serde(with = "humantime_serde")]
     pub lease_ttl: Duration,
+    /// Set at load by [`Config::derive_mirror_token_env`], never from TOML: the
+    /// mirror runs here or `token_env` is set in this process, so follow and LFS
+    /// read-through on mirror-managed repositories (`upstream.source =
+    /// "github:…"` on `git_url`'s host) authenticate with `token_env`.
+    #[serde(skip)]
+    pub use_token: bool,
 }
 
 impl Default for GithubMirrorConfig {
@@ -934,6 +941,7 @@ impl Default for GithubMirrorConfig {
             min_rate_remaining: 200,
             gone_after: Duration::from_secs(24 * 3600),
             lease_ttl: Duration::from_secs(120),
+            use_token: false,
         }
     }
 }
@@ -945,6 +953,12 @@ impl GithubMirrorConfig {
             cfg.has_role(Role::Maintain),
             "github_mirror.enabled needs the maintain role on this host"
         );
+        self.check(cfg)
+    }
+
+    /// The section's own checks, without the role rule: `floe github sync`
+    /// runs them on a CLI host, where `enabled` is normally off.
+    pub fn check(&self, cfg: &Config) -> Result<()> {
         anyhow::ensure!(
             !self.prefix.is_empty()
                 && self.prefix.len() <= 16
@@ -969,10 +983,15 @@ impl GithubMirrorConfig {
                 "github_mirror.repos entry {r:?} must be \"owner/name\""
             );
         }
+        // The token travels to both: https only, as for `upstream.git`
+        // (plain http only to the loopback, for tests).
         for (key, u) in [("api_url", &self.api_url), ("git_url", &self.git_url)] {
             anyhow::ensure!(
-                (u.starts_with("https://") || u.starts_with("http://")) && !u.ends_with('/'),
-                "github_mirror.{key} must be an http(s) URL without a trailing '/', got {u:?}"
+                (u.starts_with("https://")
+                    || u.starts_with("http://localhost")
+                    || u.starts_with("http://127.0.0.1"))
+                    && !u.ends_with('/'),
+                "github_mirror.{key} must be an https:// URL without a trailing '/', got {u:?}"
             );
         }
         anyhow::ensure!(
@@ -988,7 +1007,7 @@ impl GithubMirrorConfig {
             !self.lease_ttl.is_zero(),
             "github_mirror.lease_ttl must be > 0"
         );
-        if self.include_private && cfg.server.auth.mode != AuthMode::None {
+        if self.include_private {
             anyhow::ensure!(
                 self.private_visible_to_all_readers,
                 "github_mirror.include_private: floe has no per-repository read ACL, so every reader would read every mirrored private repository; set github_mirror.private_visible_to_all_readers = true to accept that, or include_private = false"
@@ -1079,7 +1098,9 @@ impl Config {
             }
         }
         merge(&mut doc, &overrides);
-        let cfg: Config = doc.try_into().context("settings: applying")?;
+        let mut cfg: Config = doc.try_into().context("settings: applying")?;
+        // Load-time state, not TOML: carried over the round trip.
+        cfg.github_mirror.use_token = self.github_mirror.use_token;
         cfg.validate()
             .context("settings: validating the effective config")?;
         Ok(cfg)
@@ -1098,8 +1119,9 @@ impl Config {
     }
 
     /// The env var naming the token for an upstream URL: `upstream.token_env_by_host`
-    /// for the URL's host (`host:port` first, then the bare host), else
-    /// `upstream.token_env`, else none (unauthenticated). The one place every
+    /// for the URL's host (`host:port` first, then the bare host), else the
+    /// mirror's token for a mirror-managed repository on the mirror's host
+    /// (D49), else `upstream.token_env`, else none (unauthenticated). The one place every
     /// upstream caller (follow, LFS read-through, `repair`) resolves it.
     ///
     /// The authority ends at the first `/`, `?` or `#`, as git's and curl's URL
@@ -1116,6 +1138,7 @@ impl Config {
         by_host
             .get(authority)
             .or_else(|| by_host.get(host))
+            .or_else(|| self.mirror_token_env(authority, host))
             .or(self.upstream.token_env.as_ref())
             .map(String::as_str)
     }
@@ -1529,23 +1552,33 @@ impl Config {
     }
 
     /// D49: follow and LFS read-through on the mirror's repositories authenticate
-    /// with the mirror's token. Unless `upstream.token_env_by_host` already names
-    /// one for `host(github_mirror.git_url)`, map that host to
-    /// `github_mirror.token_env` when the mirror is enabled here **or** the variable
-    /// is set in this process (a serving-only host sharing the fleet's floe.toml).
+    /// with the mirror's token ([`GithubMirrorConfig::use_token`]) when the mirror
+    /// is enabled here **or** the variable is set in this process (a serving-only
+    /// host sharing the fleet's floe.toml). Only repositories the mirror manages
+    /// (`upstream.source = "github:…"`) get it: every other upstream on that host,
+    /// own repositories included, resolves exactly as before.
     pub fn derive_mirror_token_env(&mut self, is_set: impl Fn(&str) -> bool) {
         let m = &self.github_mirror;
-        let host = upstream_authority(&m.git_url).to_string();
-        if host.is_empty()
-            || m.token_env.is_empty()
-            || self.upstream.token_env_by_host.contains_key(&host)
-            || !(m.enabled || is_set(&m.token_env))
-        {
-            return;
-        }
-        self.upstream
-            .token_env_by_host
-            .insert(host, m.token_env.clone());
+        let on = !m.token_env.is_empty() && (m.enabled || is_set(&m.token_env));
+        self.github_mirror.use_token = on;
+    }
+
+    /// The mirror's token env var for an upstream on `authority` (`host` without
+    /// the port), when this effective config is a mirror-managed repository's.
+    fn mirror_token_env(&self, authority: &str, host: &str) -> Option<&String> {
+        let m = &self.github_mirror;
+        let managed = self
+            .upstream
+            .source
+            .as_deref()
+            .is_some_and(|s| s.starts_with("github:"));
+        let mirror_host = upstream_authority(&m.git_url);
+        (m.use_token
+            && managed
+            && !m.token_env.is_empty()
+            && !mirror_host.is_empty()
+            && (mirror_host == authority || mirror_host == host))
+            .then_some(&m.token_env)
     }
 
     /// Apply `FLOE__a__b=v` overrides (values parsed as TOML values, falling back to string)
@@ -2258,18 +2291,22 @@ listen = \"0.0.0.0:1\"\n",
         let mut c = Config::default();
         c.github_mirror.enabled = true;
         c.github_mirror.users = vec!["@me".into()];
+        c.github_mirror.private_visible_to_all_readers = true;
         c.validate().unwrap();
-        // Not a maintainer.
+        // Not a maintainer: `validate` refuses, the CLI's `check` does not.
         let mut bad = c.clone();
         bad.server.roles = vec![Role::Serve];
         assert!(bad.validate().is_err());
-        let edits: [fn(&mut GithubMirrorConfig); 8] = [
+        bad.github_mirror.check(&bad).unwrap();
+        let edits: [fn(&mut GithubMirrorConfig); 10] = [
             |m: &mut GithubMirrorConfig| m.prefix = "GH".into(),
             |m: &mut GithubMirrorConfig| m.prefix = String::new(),
             |m: &mut GithubMirrorConfig| m.include = vec!["acme".into()],
             |m: &mut GithubMirrorConfig| m.exclude = vec!["a/b/c".into()],
             |m: &mut GithubMirrorConfig| m.repos = vec!["acme/*".into()],
             |m: &mut GithubMirrorConfig| m.api_url = "ftp://x".into(),
+            |m: &mut GithubMirrorConfig| m.api_url = "http://ghe.corp/api/v3".into(),
+            |m: &mut GithubMirrorConfig| m.git_url = "http://ghe.corp".into(),
             |m: &mut GithubMirrorConfig| m.follow = vec![],
             |m: &mut GithubMirrorConfig| m.follow = vec!["refs/archive/*".into()],
         ];
@@ -2277,8 +2314,18 @@ listen = \"0.0.0.0:1\"\n",
             let mut bad = c.clone();
             edit(&mut bad.github_mirror);
             assert!(bad.validate().is_err(), "{:?}", bad.github_mirror);
+            assert!(bad.github_mirror.check(&bad).is_err(), "{:?}", bad.github_mirror);
         }
-        // Private repositories outside auth none need the acknowledgement.
+        let mut local = c.clone();
+        local.github_mirror.api_url = "http://127.0.0.1:8080".into();
+        local.validate().unwrap();
+        // Private repositories need the acknowledgement in every auth mode
+        // (the bucket is the fleet's).
+        let mut none = c.clone();
+        none.github_mirror.private_visible_to_all_readers = false;
+        assert!(none.validate().is_err());
+        none.github_mirror.include_private = false;
+        none.validate().unwrap();
         let mut tok = c.clone();
         tok.server.auth.mode = AuthMode::Token;
         tok.server.auth.tokens = vec![StaticToken {
@@ -2288,36 +2335,67 @@ listen = \"0.0.0.0:1\"\n",
             write: true,
             admin: false,
         }];
-        assert!(tok.validate().is_err());
-        tok.github_mirror.private_visible_to_all_readers = true;
         tok.validate().unwrap();
         tok.github_mirror.private_visible_to_all_readers = false;
+        assert!(tok.validate().is_err());
         tok.github_mirror.include_private = false;
         tok.validate().unwrap();
 
-        // Derived token_env_by_host: enabled, or the variable is set here.
+        // The mirror's token: only for mirror-managed repositories on its host,
+        // when the mirror is enabled here or the variable is set here.
+        let managed = "[upstream]\ngit = \"https://github.com/a/b.git\"\nsource = \"github:1\"\n";
+        let own = "[upstream]\ngit = \"https://github.com/a/b.git\"\n";
         let mut d = c.clone();
+        d.upstream.token_env = Some("OTHER_TOKEN".into());
         d.derive_mirror_token_env(|_| false);
+        assert!(d.upstream.token_env_by_host.is_empty(), "nothing host-wide");
+        let m = d.with_settings(managed).unwrap();
         assert_eq!(
-            d.upstream_token_env("https://github.com/a/b.git"),
+            m.upstream_token_env("https://github.com/a/b.git"),
             Some("FLOE_GITHUB_TOKEN")
+        );
+        assert_eq!(
+            m.upstream_token_env("https://gitlab.com/a/b.git"),
+            Some("OTHER_TOKEN"),
+            "another host"
+        );
+        let o = d.with_settings(own).unwrap();
+        assert_eq!(
+            o.upstream_token_env("https://github.com/a/b.git"),
+            Some("OTHER_TOKEN"),
+            "an own repository is unchanged"
         );
         let mut off = Config::default();
         off.derive_mirror_token_env(|_| false);
-        assert!(off.upstream.token_env_by_host.is_empty());
+        assert_eq!(
+            off.with_settings(managed)
+                .unwrap()
+                .upstream_token_env("https://github.com/a/b.git"),
+            None
+        );
         off.derive_mirror_token_env(|k| k == "FLOE_GITHUB_TOKEN");
         assert_eq!(
-            off.upstream.token_env_by_host.get("github.com").map(String::as_str),
+            off.with_settings(managed)
+                .unwrap()
+                .upstream_token_env("https://github.com/a/b.git"),
             Some("FLOE_GITHUB_TOKEN")
         );
-        // An explicit entry wins.
+        assert_eq!(
+            off.with_settings(own)
+                .unwrap()
+                .upstream_token_env("https://github.com/a/b.git"),
+            None
+        );
+        // An explicit host entry wins.
         let mut ex = c;
         ex.upstream
             .token_env_by_host
             .insert("github.com".into(), "MINE".into());
         ex.derive_mirror_token_env(|_| true);
         assert_eq!(
-            ex.upstream_token_env("https://github.com/a/b.git"),
+            ex.with_settings(managed)
+                .unwrap()
+                .upstream_token_env("https://github.com/a/b.git"),
             Some("MINE")
         );
     }
@@ -2339,7 +2417,7 @@ listen = \"0.0.0.0:1\"\n",
             )
             .unwrap();
         assert_eq!(c.upstream.on_rewrite, OnRewrite::Refuse);
-        assert_eq!(c.upstream.follow_interval, Some(Duration::from_mins(10)));
+        assert_eq!(c.upstream.follow_interval, Some(Duration::from_secs(600)));
         assert_eq!(Config::default().upstream.on_rewrite, OnRewrite::Archive);
         for bad in [
             "[upstream]\ngit = \"https://h/a\"\nfollow = [\"refs/archive/*\"]\n",

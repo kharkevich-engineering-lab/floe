@@ -49,7 +49,7 @@ const SAVE_EVERY_STEPS: usize = 10;
 /// hit the forge at once.
 const FIRST_TICK: Duration = Duration::from_secs(10);
 /// The longest a rate limit makes the loop sleep.
-const MAX_RATE_SLEEP: Duration = Duration::from_hours(1);
+const MAX_RATE_SLEEP: Duration = Duration::from_secs(3600);
 
 /// Everything a pass needs.
 pub struct Mirror {
@@ -207,16 +207,19 @@ pub async fn reconcile_once(
 
     let holder = coord::instance_id();
     let mut st = p.state;
-    let ctx = apply::Ctx {
+    let mut ctx = apply::Ctx {
         cfg: gm,
         source: m.source.as_ref(),
         target: m.target.as_ref(),
+        taken: st.repos.values().filter_map(|e| e.floe.clone()).collect(),
     };
+    let mut changes = p.changes.clone();
     let mut since_save = 0usize;
     for action in &p.actions {
         let Some(mut e) = st.repos.get(&action.id).cloned() else {
             continue;
         };
+        let (had_floe, was) = (e.floe.is_some(), e.status);
         let mut finished = true;
         for s in &action.steps {
             if lost.is_some_and(|f| f.load(Ordering::SeqCst)) {
@@ -254,6 +257,13 @@ pub async fn reconcile_once(
         if finished {
             e.last_error = None;
         }
+        // Creation outcomes come from what happened, not from the plan.
+        if let (false, Some(f)) = (had_floe, &e.floe) {
+            ctx.taken.insert(f.clone());
+            changes.push((action.id.clone(), "created".into()));
+        } else if e.status == Status::Conflict && was != Status::Conflict {
+            changes.push((action.id.clone(), "conflict".into()));
+        }
         st.repos.insert(action.id.clone(), e);
         if since_save >= SAVE_EVERY_STEPS {
             save(m, &mut st, holder).await?;
@@ -261,8 +271,7 @@ pub async fn reconcile_once(
         }
     }
 
-    report.changes = p
-        .changes
+    report.changes = changes
         .iter()
         .map(|(id, c)| {
             let name = st.repos.get(id).map_or_else(

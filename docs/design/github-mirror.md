@@ -145,13 +145,14 @@ Changes in the same file:
   `fields` of `/api/settings/describe`. Test next to the existing `token_env` redaction test (lib.rs ~1957).
 - `Config::validate`: the same pattern validation for host-level `[upstream]`. `token_env_by_host` keys are
   bare hostnames (no scheme, no path), and values are non-empty.
-- **Derived default** (in `Config::load`, not `validate`): when `token_env_by_host` has no entry for
-  `host(github_mirror.git_url)`, insert `host(github_mirror.git_url) → github_mirror.token_env` if
-  **either** `github_mirror.enabled` **or** the variable `github_mirror.token_env` names is set in this
+- **Mirror token, scoped** (in `Config::load`, not `validate`): set `github_mirror.use_token` (not TOML)
+  when **either** `github_mirror.enabled` **or** the variable `github_mirror.token_env` names is set in this
   process's environment. The second clause covers serving-only hosts (LFS read-through runs in the serving
   request path, not only on the maintainer), which do not run the mirror but share the fleet's `floe.toml`
-  (D45) and environment. A host without the variable stays unauthenticated for that host, as today. An operator
-  who wants something else sets `[upstream.token_env_by_host]` explicitly on every host.
+  (D45) and environment. `upstream_token_env` then resolves `token_env_by_host`, else — **only for a
+  mirror-managed repository** (`upstream.source = "github:…"`) on `host(github_mirror.git_url)` — the
+  mirror's `token_env`, else `upstream.token_env`. Own repositories and every other upstream resolve exactly
+  as before (requirement 3); nothing is inserted into `token_env_by_host`.
 - `floe.example.toml` documents every new key (§D.3).
 
 Token resolution moves to one function, `floe_config::Config::upstream_token_env(&self, url: &str) ->
@@ -540,7 +541,7 @@ a settings section (D24) because it is not per repository.
 | `skip_archived` | `true` | Do not *start* mirroring archived repositories (already mirrored ones are kept, §B.9). |
 | `skip_forks` | `true` | Same for forks. |
 | `include_private` | `true` | `false` = public only. `true` is refused by `validate` on a host where floe readers are not all trusted with every mirrored repository, unless `private_visible_to_all_readers = true` (below; R2). |
-| `private_visible_to_all_readers` | `false` | The operator's explicit acknowledgement that floe has no per-repository read ACL, so every principal with read on this floe can read every mirrored private repository. Required when `include_private = true` and `server.auth.mode` is not `none` (`none` is loopback-only already, §1.3). |
+| `private_visible_to_all_readers` | `false` | The operator's explicit acknowledgement that floe has no per-repository read ACL, so every principal with read on this floe can read every mirrored private repository. Required whenever `include_private = true`, in every auth mode: the bucket is the fleet's, so the mirror host's auth mode does not bound who reads it. |
 | `wikis` | `false` | Also mirror `<repo>.wiki.git` as `<prefix>-<owner>/<name>.wiki` (§B.10). |
 | `lfs` | `true` | Write `upstream.lfs` so LFS objects read through (`docs/LFS.md`). |
 | `follow` | `["refs/heads/*", "refs/tags/*"]` | Patterns written into each repository's `upstream.follow`. |
@@ -1302,7 +1303,7 @@ exclude = []
 skip_archived = true
 skip_forks = true
 include_private = true
-private_visible_to_all_readers = false   # must be true when include_private and auth mode != none (no per-repo read ACL)
+private_visible_to_all_readers = false   # must be true when include_private (no per-repo read ACL; any auth mode)
 wikis = false
 lfs = true
 follow = ["refs/heads/*", "refs/tags/*"]
@@ -1359,7 +1360,7 @@ create_tables = true
 A new section, **"Mirroring GitHub"**, after "Running it": five lines on what it does (discover → create →
 follow → archive on rewrite), the minimal config (`[github_mirror] enabled, users = ["@me"]` +
 `FLOE_GITHUB_TOKEN` + a `maintain` host, and `private_visible_to_all_readers = true` or `include_private =
-false` outside `auth.mode = none`), the naming rule (`gh-acme/widgets`), `floe github sync --once
+false`), the naming rule (`gh-acme/widgets`), `floe github sync --once
 --dry-run`, the archive ref convention, the no-per-repo-ACL warning (R2), and one line on `--features catalog` +
 `[catalog]`. Update the code map (`floe-mirror`, `floe-catalog`) and the `floe-cli` subcommand list.
 `docs/LFS.md`: correct the `token_env`-in-settings example (`token_env` is host-only in the code), and mention
@@ -1447,7 +1448,7 @@ it neither the mirror nor the catalog has one.
 | # | Risk / question | Mitigation / owner decision needed |
 |---|---|---|
 | R1 | **Naming deviates** from the requested `<prefix>/<owner>/<repo>`: floe ids are two segments (D5, D26), so we propose `<prefix>-<owner>/<repo>`. **Open: needs the owner's sign-off before §B starts** (status line, §B.5, D49). | Accept (recommended), or open a separate decision to allow nested owners, which touches `RepoId`, routing, the edge contract and the UI. Only `naming.rs` changes if the answer differs. |
-| R2 | **No per-repository read ACL**: a mirrored private GitHub repository is readable by every principal with read on floe. | `validate` refuses `include_private = true` outside `auth.mode = none` unless `private_visible_to_all_readers = true` (§B.4), so the exposure is an explicit operator decision; README says it loudly; per-repo read ACL is a separate feature. |
+| R2 | **No per-repository read ACL**: a mirrored private GitHub repository is readable by every principal with read on floe. | `validate` refuses `include_private = true` unless `private_visible_to_all_readers = true` (§B.4), so the exposure is an explicit operator decision; README says it loudly; per-repo read ACL is a separate feature. |
 | R3 | **Follow does not scale linearly**: one sequential loop (an `ls-refs` probe per repo per round; Serve-level sync and `packs_fit()` only for repos that moved), the whole object set local while a round publishes. Hundreds of repos are fine; thousands, or one huge repo, are not. | `max_repo_size` + `max_new_per_pass`; refs-first rounds (§A.4); nudges instead of tight polling; huge repos go through the too-large handoff (`floe import` on an SSD host, then the source marker, §B.7.1). A post-MVP item is a concurrency limit for follow ops. |
 | R4 | Archive refs grow the ref count forever (a repository force-pushed hourly gets about 8.7k archive refs a year), and `ls-refs` advertises them. | Acceptable at these sizes (refs are O(1) on hot paths). Post-MVP: optional `upstream.archive_retention` (still never auto-deletes by default), and hiding `refs/archive/` from v0 advertisement. |
 | R5 | **LFS is read-through, not prefetched**: an LFS object never downloaded before the GitHub repository disappears is lost. | Post-MVP `lfs_prefetch` unit. Call it out in README. |

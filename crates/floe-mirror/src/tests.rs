@@ -226,6 +226,7 @@ async fn freeze_publishes_empty_follow_and_resume_restores_it() {
     assert_eq!(st.repos.get("42").unwrap().status, Status::Gone);
     let up = r.upstream("gh-acme/widgets").await;
     assert_eq!(up.get("follow"), Some(&toml::Value::Array(vec![])));
+    assert!(up.get("lfs").is_none(), "no read-through for a frozen repository");
     assert!(r.registry.open(&RepoId::new("gh-acme", "widgets").unwrap()).await.is_ok());
     // Restored.
     r.nudged.lock().clear();
@@ -234,6 +235,7 @@ async fn freeze_publishes_empty_follow_and_resume_restores_it() {
     assert_eq!(rep.published, 1);
     let up = r.upstream("gh-acme/widgets").await;
     assert_eq!(up.get("follow").and_then(|v| v.as_array()).map(Vec::len), Some(2));
+    assert_eq!(s(&up, "lfs"), "https://github.com/Acme/Widgets.git/info/lfs");
     assert_eq!(r.nudged.lock().as_slice(), ["gh-acme/widgets"]);
 }
 
@@ -358,7 +360,7 @@ async fn a_held_lease_keeps_a_second_reconciler_out() {
         &lease_key("github"),
         "someone-else",
         "github-mirror",
-        Duration::from_mins(1),
+        Duration::from_secs(60),
     )
     .await
     .unwrap()

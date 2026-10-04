@@ -4,25 +4,49 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use floe_git::RepoId;
+use tokio::sync::Semaphore;
 
 use crate::AppState;
+
+/// Nudged follows running at once on this host: a pass can nudge every new
+/// repository (initial clones) and every pushed one, and git serving must not
+/// compete with all of them (the follow loop itself is sequential).
+const NUDGE_CONCURRENCY: usize = 2;
+/// A nudged follow holds its slot at most this long (a stuck fetch must not
+/// block the others; the follow loop's backstop still covers its repository).
+const NUDGE_HOLD_MAX: Duration = Duration::from_secs(3600);
 
 /// Run a `follow` op now for a repository **this host maintains** (D28/D30);
 /// elsewhere a no-op, and the maintaining host's follow loop picks the change
 /// up within `upstream.follow_interval`. A running `follow` task is joined (the
-/// task lock), so a nudge never runs a second fetch against the scratch.
+/// task lock), so a nudge never runs a second fetch against the scratch. At
+/// most [`NUDGE_CONCURRENCY`] nudged follows run at once; the rest queue.
 pub fn nudge(state: Arc<AppState>) -> floe_mirror::Nudge {
+    let slots = Arc::new(Semaphore::new(NUDGE_CONCURRENCY));
     Box::new(move |id: &RepoId| {
         if !state.cfg.placement.maintains(id.owner(), id.name()) {
             return;
         }
         let st = state.clone();
         let id = id.clone();
+        let slots = slots.clone();
         tokio::spawn(async move {
+            let Ok(_slot) = slots.acquire_owned().await else {
+                return;
+            };
+            if floe_wal::tasks::draining() {
+                return;
+            }
             match crate::ops::start(st, id.clone(), "follow", HashMap::new()).await {
-                Ok(_) | Err(crate::ops::StartError::AlreadyRunning(_)) => {}
+                Ok(task) => {
+                    if !task.wait_done(NUDGE_HOLD_MAX).await {
+                        tracing::warn!(repo = %id, "nudged follow still running; releasing its slot");
+                    }
+                }
+                Err(crate::ops::StartError::AlreadyRunning(_)) => {}
                 Err(crate::ops::StartError::UnknownOp) => {
                     tracing::debug!(repo = %id, "follow nudge: repository not openable here");
                 }

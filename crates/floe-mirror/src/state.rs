@@ -117,6 +117,10 @@ pub struct RepoEntry {
     /// sha256 of the canonical `[upstream]` table the mirror last published.
     pub settings_sha: Option<String>,
     pub settings_revision: u64,
+    /// The read-only `policy.json` is known to be in place (set only after a
+    /// successful write; until then every pass plans it again when `read_only`).
+    #[serde(default)]
+    pub policy: bool,
     pub last_error: Option<String>,
 }
 

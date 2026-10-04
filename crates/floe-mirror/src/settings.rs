@@ -19,8 +19,10 @@ pub fn marker(kind: &str, id: &str) -> String {
     format!("{kind}:{id}")
 }
 
-/// The table for one repository in one status: frozen statuses follow nothing;
-/// archived repositories keep following at a long interval.
+/// The table for one repository in one status: frozen statuses follow nothing
+/// and drop `lfs` (no authenticated read-through for a repository the mirror
+/// no longer selects or reaches); archived repositories keep following at a
+/// long interval.
 pub fn render(
     source: &dyn Source,
     cfg: &GithubMirrorConfig,
@@ -31,6 +33,7 @@ pub fn render(
     t.insert("source".into(), marker(source.kind(), &r.id).into());
     t.insert("git".into(), source.git_url(r).into());
     if cfg.lfs
+        && !status.frozen()
         && let Some(lfs) = source.lfs_url(r)
     {
         t.insert("lfs".into(), lfs.into());

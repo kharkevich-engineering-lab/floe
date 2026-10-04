@@ -22,6 +22,9 @@ pub async fn run(action: GithubAction, cfg: &Arc<Config>) -> Result<()> {
         GithubAction::Status { json } => status(&store, json).await,
         GithubAction::Sync { once, dry_run } => {
             let gm = &cfg.github_mirror;
+            // `validate` checks the section only where the mirror is enabled
+            // (a maintain host); a bad prefix or glob must not run a pass here.
+            gm.check(cfg)?;
             // The token check comes before the lease.
             if std::env::var(&gm.token_env).map_or(true, |t| t.trim().is_empty()) {
                 eprintln!(

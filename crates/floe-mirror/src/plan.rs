@@ -58,8 +58,9 @@ pub struct Plan {
     /// `missing_since`, `last_lookup`) applied; the applier records outcomes on it.
     pub state: MirrorState,
     pub actions: Vec<Action>,
-    /// `(id, change)` for inventory telemetry: `created`, `renamed`, `archived`,
-    /// `excluded`, `gone`, `forbidden`, `resumed`, `too-large`, `updated`.
+    /// `(id, change)` for inventory telemetry: `renamed`, `archived`, `excluded`,
+    /// `gone`, `forbidden`, `resumed`, `too-large`, `updated`. `created` and
+    /// `conflict` are outcomes, added by the applier.
     pub changes: Vec<(String, String)>,
 }
 
@@ -75,7 +76,8 @@ pub struct PlanInput<'a> {
 /// Ids in the state that discovery did not report, in lookup order: never
 /// looked up first, then oldest `last_lookup`, then oldest `missing_since`. Only
 /// ids already missing, or about to be (a complete discovery lacks them).
-/// Detached entries are never looked up (the mirror leaves them alone).
+/// Detached entries are never looked up (the mirror leaves them alone);
+/// excluded ones come last (frozen already, a lookup only relabels them).
 pub fn lookup_candidates(state: &MirrorState, discovery: &Discovery, now: DateTime<Utc>) -> Vec<String> {
     let seen: BTreeSet<&str> = discovery.repos.iter().map(|r| r.id.as_str()).collect();
     let mut c: Vec<(&String, &RepoEntry)> = state
@@ -87,7 +89,14 @@ pub fn lookup_candidates(state: &MirrorState, discovery: &Discovery, now: DateTi
                 && (e.missing_since.is_some() || discovery.complete)
         })
         .collect();
-    c.sort_by_key(|(id, e)| (e.last_lookup, e.missing_since.unwrap_or(now), (*id).clone()));
+    c.sort_by_key(|(id, e)| {
+        (
+            e.status == Status::Excluded,
+            e.last_lookup,
+            e.missing_since.unwrap_or(now),
+            (*id).clone(),
+        )
+    });
     c.into_iter()
         .take(MAX_LOOKUPS)
         .map(|(id, _)| id.clone())
@@ -165,7 +174,10 @@ impl Planner<'_, '_> {
         };
         let mut e = old.clone();
         e.observe(r, now);
-        e.missing_since = None;
+        // Found but not selected stays missing (§B.6: cleared when seen selected).
+        if verdict != Verdict::Out {
+            e.missing_since = None;
+        }
         if e.status == Status::Detached {
             self.state.repos.insert(r.id.clone(), e);
             return;
@@ -201,7 +213,13 @@ impl Planner<'_, '_> {
         } else {
             "settings".to_string()
         };
-        let mut steps = self.publish_if_changed(&r.id, &e, &reason);
+        let mut steps = Vec::new();
+        // Convergent: a policy write that failed (or never ran: a crash after
+        // the create, `read_only` turned on later) is retried every pass.
+        if self.cfg().read_only && !e.policy {
+            steps.push(Step::PutPolicy);
+        }
+        steps.extend(self.publish_if_changed(&r.id, &e, &reason));
         if resumed {
             self.change(&r.id, "resumed");
         } else if old.full_name != e.full_name {
@@ -211,7 +229,9 @@ impl Planner<'_, '_> {
         } else if !steps.is_empty() || old.private != e.private {
             self.change(&r.id, "updated");
         }
-        if resumed || old.pushed_at != e.pushed_at {
+        // Never published yet (the first publish failed): the creation's nudge
+        // is still owed.
+        if resumed || old.pushed_at != e.pushed_at || old.settings_sha.is_none() {
             steps.push(Step::Nudge);
         }
         self.state.repos.insert(r.id.clone(), e);
@@ -230,9 +250,17 @@ impl Planner<'_, '_> {
 
     /// Plan the creation (or the too-large handoff check) of an entry without a
     /// floe repository. A new entry beyond `max_new_per_pass` is not recorded
-    /// at all: the next discovery finds it again.
+    /// at all: the next discovery finds it again. A `conflict` retry costs an
+    /// `exists` check per candidate name, not a creation, so it is not counted
+    /// (stuck conflicts must not starve new repositories).
     fn create(&mut self, r: &RemoteRepo, verdict: Verdict, is_new: bool) {
         let read_only = self.cfg().read_only;
+        let conflict_retry = !is_new
+            && self
+                .state
+                .repos
+                .get(&r.id)
+                .is_some_and(|e| e.status == Status::Conflict);
         let mut steps = Vec::new();
         let status = if verdict == Verdict::TooLarge {
             if self.state.repos.get(&r.id).is_none_or(|e| e.status != Status::TooLarge) {
@@ -244,16 +272,23 @@ impl Planner<'_, '_> {
             });
             Status::TooLarge
         } else {
-            if self.creations >= self.cfg().max_new_per_pass {
-                if is_new {
-                    self.state.repos.remove(&r.id);
+            if !conflict_retry {
+                if self.creations >= self.cfg().max_new_per_pass {
+                    if is_new {
+                        self.state.repos.remove(&r.id);
+                    }
+                    return;
                 }
-                return;
+                self.creations += 1;
             }
-            self.creations += 1;
-            self.change(&r.id, "created");
             steps.push(Step::Create { allow_create: true });
-            Status::Active
+            // A conflict stays one until the claim succeeds (the applier
+            // reports `conflict` only on the transition).
+            if conflict_retry {
+                Status::Conflict
+            } else {
+                Status::Active
+            }
         };
         if read_only {
             steps.push(Step::PutPolicy);
@@ -382,6 +417,7 @@ mod tests {
         e.floe = Some(format!("gh-{}/{}", r.owner.to_lowercase(), r.name.to_lowercase()));
         e.settings_sha = Some(settings::hash(&settings::render(&src, cfg, r, Status::Active)));
         e.settings_revision = 1;
+        e.policy = true;
         state.repos.insert(r.id.clone(), e);
     }
 
@@ -575,6 +611,67 @@ mod tests {
             p.actions.iter().find(|a| a.id == "9").and_then(|a| a.steps.first()),
             Some(&Step::Create { allow_create: false })
         );
+    }
+
+    #[test]
+    fn a_missing_policy_and_first_publish_are_retried() {
+        let c = cfg();
+        let r = remote("1", "Acme", "Widgets");
+        // The create landed; the policy write (and so the publish) failed.
+        let mut s = MirrorState::default();
+        let mut e = RepoEntry::default();
+        e.observe(&r, t(0));
+        e.floe = Some("gh-acme/widgets".into());
+        e.status = Status::Error;
+        s.repos.insert("1".into(), e);
+        let p = run(&s, &c, &disc(vec![r.clone()], true), &BTreeMap::new(), t(1));
+        assert_eq!(steps(&p, "1"), ["policy", "publish", "nudge"]);
+        assert_eq!(p.state.repos.get("1").unwrap().status, Status::Active);
+        // `read_only` off: no policy, the owed publish and nudge only.
+        let mut rw = c.clone();
+        rw.read_only = false;
+        let p = run(&s, &rw, &disc(vec![r], true), &BTreeMap::new(), t(1));
+        assert_eq!(steps(&p, "1"), ["publish", "nudge"]);
+    }
+
+    #[test]
+    fn conflicts_do_not_use_the_creation_budget() {
+        let mut c = cfg();
+        c.max_new_per_pass = 2;
+        let mut s = MirrorState::default();
+        let mut repos = Vec::new();
+        for id in ["1", "2", "3"] {
+            let r = remote(id, "a", &format!("r{id}"));
+            let mut e = RepoEntry::default();
+            e.observe(&r, t(0));
+            e.status = Status::Conflict;
+            s.repos.insert(id.into(), e);
+            repos.push(r);
+        }
+        repos.push(remote("9", "a", "new"));
+        let p = run(&s, &c, &disc(repos, true), &BTreeMap::new(), t(1));
+        assert_eq!(steps(&p, "9").first(), Some(&"create"), "{:?}", p.actions);
+        assert_eq!(steps(&p, "1").first(), Some(&"create"), "still retried");
+        assert_eq!(p.state.repos.get("1").unwrap().status, Status::Conflict);
+        assert!(p.changes.iter().all(|(_, what)| what != "created"), "{:?}", p.changes);
+    }
+
+    #[test]
+    fn found_but_unselected_stays_missing() {
+        let c = cfg();
+        let r = remote("1", "Acme", "Widgets");
+        let mut s = MirrorState::default();
+        mirrored(&mut s, &c, &r);
+        if let Some(e) = s.repos.get_mut("1") {
+            e.missing_since = Some(t(0));
+        }
+        let mut excl = c.clone();
+        excl.exclude = vec!["acme/*".into()];
+        let lookups = BTreeMap::from([("1".to_string(), Lookup::Found(r))]);
+        let p = run(&s, &excl, &disc(vec![], true), &lookups, t(1));
+        let e = p.state.repos.get("1").unwrap();
+        assert_eq!(e.status, Status::Excluded);
+        assert_eq!(e.missing_since, Some(t(0)));
     }
 
     #[test]

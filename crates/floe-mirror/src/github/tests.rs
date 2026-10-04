@@ -183,6 +183,18 @@ async fn rate_limits_end_the_discovery_incomplete() {
     stub.remaining.store(100, Ordering::SeqCst);
     let d = source(&api, 200).discover(&me(), &mut cache).await.unwrap();
     assert!(!d.complete);
+    assert!(
+        d.stats.rate_limited_until.is_some(),
+        "the loop sleeps until the reset"
+    );
+}
+
+#[test]
+fn only_api_url_gets_the_token() {
+    let src = source("https://api.github.com", 0);
+    assert!(src.on_api("https://api.github.com/user/repos?page=2"));
+    assert!(!src.on_api("https://api.github.com.evil.example/user/repos"));
+    assert!(!src.on_api("https://evil.example/user/repos"));
 }
 
 #[tokio::test]
