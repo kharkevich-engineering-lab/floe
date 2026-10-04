@@ -1,7 +1,8 @@
 //! Generated protobuf types for floe's on-store formats.
 //!
-//! Schema lives in `proto/floe/v1/wal.proto`; it is the contract between
-//! every floe instance and must only evolve backward-compatibly.
+//! Schema lives in `proto/floe/v1/wal.proto` (the WAL) and `proto/floe/v1/codeintel.proto`
+//! (code intelligence, D52); it is the contract between every floe instance and must only
+//! evolve backward-compatibly.
 
 // prost-generated code: not ours to restyle, so the workspace lint set stops at this module.
 #[allow(
@@ -201,6 +202,63 @@ mod tests {
         assert!(keys::lfs_oid_ok(&"a".repeat(64)));
         assert_eq!(keys::lfs_key("ab"), "lfs/objects///ab");
     }
+    /// Code-intel objects round-trip, and a shard's META encodes the same bytes whatever
+    /// order its per-language extractors were inserted in (content addressing, D52).
+    #[test]
+    fn codeintel_messages_roundtrip_deterministically() {
+        let mut a = v1::ShardMeta {
+            repo: "acme/app".into(),
+            commit: "c".repeat(40),
+            extractor: "ts-tags/1;cast/1".into(),
+            ..Default::default()
+        };
+        let mut b = a.clone();
+        for (k, v) in [("rust", "r"), ("go", "g"), ("python", "p")] {
+            a.extractors.insert(k.into(), v.into());
+        }
+        for (k, v) in [("python", "p"), ("rust", "r"), ("go", "g")] {
+            b.extractors.insert(k.into(), v.into());
+        }
+        assert_eq!(a.encode_to_vec(), b.encode_to_vec());
+        assert_eq!(v1::ShardMeta::decode(a.encode_to_vec().as_slice()).unwrap(), a);
+
+        let mut head = v1::IndexHead {
+            purge_epoch: 2,
+            next_generation: 7,
+            ..Default::default()
+        };
+        head.refs.insert(
+            "HEAD".into(),
+            v1::RefIndex {
+                commit: "a".repeat(40),
+                generation: 6,
+                base: vec![v1::ArtifactRef {
+                    key: "codeintel/shards/x.fsh".into(),
+                    sha256: "x".into(),
+                    size: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        head.requests.push(v1::ReindexRequest {
+            scope: v1::ReindexScope::Full as i32,
+            ref_name: "HEAD".into(),
+            ..Default::default()
+        });
+        let back = v1::IndexHead::decode(head.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(back, head);
+        let rec = v1::CommitIndex {
+            generation: 7,
+            supersedes: Some(6),
+            ..Default::default()
+        };
+        assert_eq!(
+            v1::CommitIndex::decode(rec.encode_to_vec().as_slice()).unwrap(),
+            rec
+        );
+    }
+
     #[test]
     fn frames_roundtrip_and_partial() {
         let e1 = v1::LogEntry {
