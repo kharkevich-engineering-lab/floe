@@ -3,6 +3,16 @@
 //! ref delete, tags, partial clone + lazy fetch, ls-remote, and the two-instance
 //! consistency test (push on A, immediate clone on B). LFS is exercised when
 //! `git lfs` is present.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 mod harness;
 
 type TestResult = anyhow::Result<()>;
@@ -712,7 +722,7 @@ async fn many_refs_impl(n: usize) -> TestResult {
     let push_start = Instant::now();
     git_in(&src, &["push", "--mirror", "origin"])?;
     println!("{n}-ref mirror push took {:?}", push_start.elapsed());
-    assert!(push_start.elapsed() < std::time::Duration::from_secs(240));
+    assert!(push_start.elapsed() < std::time::Duration::from_mins(4));
     let start = Instant::now();
     let output = Command::new("git")
         .args(["ls-remote", &server.repo_url("t", "many-refs")])
@@ -981,8 +991,7 @@ fn git_lfs_present() -> bool {
     Command::new("git")
         .args(["lfs", "version"])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn git_supports_sha256() -> bool {
@@ -997,8 +1006,7 @@ fn git_supports_sha256() -> bool {
             dir.path().to_str().unwrap(),
         ])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// A front whose `cache.max_bytes` cannot hold a repository's pack set must
@@ -1814,6 +1822,10 @@ async fn partial_clone_tree_zero_and_depth_with_filter() -> TestResult {
 /// unrelated refs request answers in < 1 s meanwhile (prod: every request on
 /// the instance stalled for minutes, timers included).
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[allow(
+    unsafe_code,
+    reason = "test mutates process env vars; see the SAFETY comments"
+)]
 async fn history_pack_install_does_not_stall_the_runtime() -> TestResult {
     // git shim: slow only for multi-pack-index.
     let shim = tempfile::tempdir()?;
@@ -1883,7 +1895,7 @@ async fn history_pack_install_does_not_stall_the_runtime() -> TestResult {
     let small = big
         .start_sibling_with(|c| {
             c.cache.prewarm = vec!["t/hist".into()];
-            c.cache.prewarm_ready_timeout = std::time::Duration::from_secs(600);
+            c.cache.prewarm_ready_timeout = std::time::Duration::from_mins(10);
         })
         .await?;
     floe_server::prewarm::spawn(small.state.clone());
@@ -1963,15 +1975,20 @@ async fn history_pack_install_does_not_stall_the_runtime() -> TestResult {
         took.as_secs_f64() >= 3.0,
         "the shim should have slowed the install: {took:?}"
     );
+    // SAFETY: test process; restores the PATH saved above once the git spawns are done.
     unsafe { std::env::set_var("PATH", old_path) };
     Ok(())
 }
 
 /// Materialization runs on its own runtime: even an unknown *blocking* call
 /// inside the install path (simulated by `FLOE_TEST_BLOCK_INSTALL_MS`, a
-/// synchronous sleep in reconcile_packs) must not stall request workers —
+/// synchronous sleep in `reconcile_packs`) must not stall request workers —
 /// refs answer in milliseconds on a single-worker server meanwhile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[allow(
+    unsafe_code,
+    reason = "test mutates process env vars; see the SAFETY comments"
+)]
 async fn blocking_work_in_the_install_path_does_not_stall_requests() -> TestResult {
     // SAFETY: test process; read by the sibling's sync below.
     unsafe { std::env::set_var("FLOE_TEST_BLOCK_INSTALL_MS", "2500") };
@@ -2015,6 +2032,7 @@ async fn blocking_work_in_the_install_path_does_not_stall_requests() -> TestResu
         worst = worst.max(t.elapsed().as_millis());
         probes += 1;
     }
+    // SAFETY: test process; the sibling's sync has read the var by now.
     unsafe { std::env::remove_var("FLOE_TEST_BLOCK_INSTALL_MS") };
     let took = install.await?;
     assert!(took.as_millis() >= 2500, "{took:?}");
@@ -2106,6 +2124,10 @@ async fn signed_url_failure_falls_back_to_proxy_uris_and_bundles_are_narrated() 
 /// the host config ⊕ settings, a sibling instance sees it on its next refs
 /// sync, history lists the SETTINGS entries, DELETE clears.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::many_single_char_names,
+    reason = "short names for the two servers, client and closures"
+)]
 async fn repo_settings_api_roundtrip() -> TestResult {
     let (a, b) = Server::start_pair().await?;
     a.put_repo("t", "cfg").await?;
@@ -2188,6 +2210,10 @@ async fn repo_settings_api_roundtrip() -> TestResult {
 // multi_thread: the synchronous `git push` below must not block the runtime
 // the server runs on (a current-thread test hangs forever on the first push).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::many_single_char_names,
+    reason = "short names for the two servers, client and closures"
+)]
 async fn settings_describe_validate_and_policy_dry_run() -> TestResult {
     let s = Server::start().await?;
     let c = reqwest::Client::builder()
@@ -2905,6 +2931,10 @@ async fn stale_cached_credential_is_erased_by_the_401_and_replaced_on_the_next_c
 /// new version before applying the refs locally let a reader cache the OLD refs under the NEW
 /// version (reproduced roughly once in six rounds). 12 rounds × 6 pushers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[allow(
+    unsafe_code,
+    reason = "test mutates process env vars; see the SAFETY comments"
+)]
 async fn reads_after_an_acknowledged_push_never_show_the_previous_tip() -> TestResult {
     // Widen the gap between the publish's two local-commit steps (refs applied; version advertised)
     // to 150 ms so the reader reliably lands in it: harmless in the right order, the poison window

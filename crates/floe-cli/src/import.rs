@@ -58,14 +58,12 @@ pub fn glob_match(pattern: &str, s: &str) -> bool {
             }
             pos = part.len();
         } else if i == parts.len() - 1 {
-            return s.len() >= pos && s[pos..].ends_with(part);
-        } else if part.is_empty() {
-            continue;
-        } else {
-            match s[pos..].find(part) {
-                Some(at) => pos += at + part.len(),
-                None => return false,
-            }
+            return s.get(pos..).is_some_and(|rest| rest.ends_with(part));
+        } else if !part.is_empty() {
+            let Some(at) = s.get(pos..).and_then(|rest| rest.find(part)) else {
+                return false;
+            };
+            pos += at + part.len();
         }
     }
     true
@@ -223,7 +221,7 @@ pub async fn run(
         .await
         .context("waiting for git pack-objects")?;
     if !status.success() {
-        bail!("git pack-objects failed (exit {})", status);
+        bail!("git pack-objects failed (exit {status})");
     }
     let pack_elapsed_ms = pack_started.elapsed().as_secs_f64() * 1_000.0;
 
@@ -294,7 +292,7 @@ pub async fn run(
                 pack = %new_pack.checksum,
                 pack_size = new_pack.pack_size,
                 has_bitmap = new_pack.has_bitmap,
-                elapsed_ms = repack_started.elapsed().as_millis() as u64,
+                elapsed_ms = u64::try_from(repack_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 "base pack published"
             );
             println!(
@@ -446,7 +444,7 @@ async fn import_reusing_packs(
             f.seek(SeekFrom::Start(8 + 255 * 4))?;
             let mut b = [0u8; 4];
             f.read_exact(&mut b)?;
-            u32::from_be_bytes(b) as u64
+            u64::from(u32::from_be_bytes(b))
         };
         // Copy (not move) into a staging dir with the FINAL file names, then let
         // install_pack rename them into objects/pack (it keeps file names).

@@ -106,7 +106,11 @@ fn with_topics(repository: &mut Value, topics: &[String]) {
 pub fn spawn(st: &Arc<AppState>, event: &'static str, payload: Value) {
     let st = st.clone();
     tokio::spawn(async move {
-        let Some(full_name) = payload["repository"]["full_name"].as_str() else {
+        let Some(full_name) = payload
+            .get("repository")
+            .and_then(|r| r.get("full_name"))
+            .and_then(Value::as_str)
+        else {
             return;
         };
         let Ok(id) = full_name.parse::<RepoId>() else {
@@ -125,24 +129,23 @@ pub fn spawn(st: &Arc<AppState>, event: &'static str, payload: Value) {
                 "could not load repository topics for a GitHub webhook"
             );
         }
-        let registry = match super::integrations::read(st.registry.store()).await {
-            Ok(r) => r,
-            Err(_) => {
-                tracing::warn!(event, "could not load GitHub webhook integrations");
-                return;
-            }
+        let Ok(registry) = super::integrations::read(st.registry.store()).await else {
+            tracing::warn!(event, "could not load GitHub webhook integrations");
+            return;
         };
-        let subscriptions = match registry.subscriptions(&id) {
-            Ok(s) => s,
-            Err(_) => {
-                tracing::warn!(event, "invalid GitHub webhook subscriptions");
-                return;
-            }
+        let Ok(subscriptions) = registry.subscriptions(&id) else {
+            tracing::warn!(event, "invalid GitHub webhook subscriptions");
+            return;
         };
         let deliveries: Vec<_> = subscriptions.into_iter().map(|subscription| {
             let sender = Sender::new(subscription.integration);
             let mut payload = payload.clone();
-            payload["installation"] = json!({ "id": subscription.installation.id });
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "installation".to_string(),
+                    json!({ "id": subscription.installation.id }),
+                );
+            }
             async move {
                 for attempt in 1..=PR_ATTEMPTS {
                     match sender.deliver(event, &payload).await {

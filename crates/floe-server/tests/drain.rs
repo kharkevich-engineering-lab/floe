@@ -5,6 +5,16 @@
 //! `/readyz` is 503 + Retry-After (the edge stops routing here), new pushes
 //! and fetches are refused with 503 + Retry-After before any work, in-flight
 //! requests get `server.drain_timeout`.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 mod harness;
 
@@ -46,7 +56,7 @@ async fn after_sigterm_new_object_work_is_refused_and_no_unit_starts() -> anyhow
         .registry
         .open(&floe_git::RepoId::new("o", "r")?)
         .await?;
-    let unit = match h0.begin_task("compact", Default::default()) {
+    let unit = match h0.begin_task("compact", std::collections::HashMap::default()) {
         floe_wal::Begin::Started(t) => t,
         floe_wal::Begin::AlreadyRunning(_) => anyhow::bail!("compact already running"),
     };

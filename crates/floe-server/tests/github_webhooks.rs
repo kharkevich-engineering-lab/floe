@@ -2,6 +2,16 @@
 //! facade produces a signed `push` delivery out of the WAL within a second,
 //! branch create/delete produce `create`/`delete`, and the PR handlers produce
 //! `pull_request`.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 mod harness;
 
@@ -21,7 +31,7 @@ const INSTALLATION: u64 = 55_555_555;
 struct Delivery {
     event: String,
     signature: String,
-    delivery: String,
+    guid: String,
     content_type: String,
     body: Vec<u8>,
     payload: Value,
@@ -69,7 +79,7 @@ async fn receiver_control(control: Option<Control>) -> (String, Captured) {
                     captured.lock().expect("lock").push(Delivery {
                         event: header("x-github-event"),
                         signature: header("x-hub-signature-256"),
-                        delivery: header("x-github-delivery"),
+                        guid: header("x-github-delivery"),
                         content_type: header("content-type"),
                         body: body.to_vec(),
                         payload: serde_json::from_slice(&body).unwrap_or(Value::Null),
@@ -215,7 +225,7 @@ async fn a_push_delivers_a_signed_push_event_from_the_wal() -> TestResult {
         sign(SECRET.as_bytes(), &d.body),
         "signature must verify over the raw body"
     );
-    assert_eq!(uuid::Uuid::parse_str(&d.delivery)?.get_version_num(), 4);
+    assert_eq!(uuid::Uuid::parse_str(&d.guid)?.get_version_num(), 4);
 
     let p = &d.payload;
     assert_eq!(p["ref"], "refs/heads/main");
@@ -429,7 +439,7 @@ async fn integrations_route_pushes_and_prs_with_distinct_secrets_and_survive_res
     assert_eq!(da.signature, sign(SECRET.as_bytes(), &da.body));
     assert_eq!(db.signature, sign(b"secret-b", &db.body));
     assert_eq!(db.payload["installation"]["id"], 200);
-    assert_ne!(da.delivery, db.delivery);
+    assert_ne!(da.guid, db.guid);
     assert!(c.lock().unwrap().is_empty());
 
     git_in(&dir, &["checkout", "-q", "-b", "feature"])?;
@@ -446,7 +456,7 @@ async fn integrations_route_pushes_and_prs_with_distinct_secrets_and_survive_res
     assert_eq!(pa.payload["installation"]["id"], INSTALLATION);
     assert_eq!(pb.payload["installation"]["id"], 200);
     assert_eq!(pb.signature, sign(b"secret-b", &pb.body));
-    assert_ne!(pa.delivery, pb.delivery);
+    assert_ne!(pa.guid, pb.guid);
     assert!(c.lock().unwrap().is_empty());
     let id = "acme/docs".parse()?;
     s.state.bridge.as_ref().unwrap().catch_up(&id).await?;

@@ -1,6 +1,16 @@
 #![allow(dead_code)]
 //! Test harness: spin up floe-server on a random port backed by the in-memory
 //! store + a tempdir cache, and drive real upstream `git` against it.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -76,7 +86,7 @@ impl Server {
         cfg.cache.max_bytes = ByteSize::gib(2);
         cfg.server.listen = "127.0.0.1:0".parse().unwrap();
         cfg.server.max_concurrent_per_repo = 8;
-        cfg.server.request_timeout = std::time::Duration::from_secs(600);
+        cfg.server.request_timeout = std::time::Duration::from_mins(10);
         cfg.server.max_push_bytes = ByteSize::gib(2);
         cfg.wal.fsck_objects = true;
         cfg.wal.check_connectivity = true;
@@ -96,12 +106,11 @@ impl Server {
             "auto" => cfg.git.upload_pack_engine = floe_config::UploadPackEngine::Auto,
             _ => cfg.git.upload_pack_engine = floe_config::UploadPackEngine::Git,
         }
-        if let Ok(ms) = std::env::var("FLOE_TEST_MEMORY_LATENCY_MS") {
-            if let Ok(ms) = ms.parse::<u64>() {
-                if let Some(s) = Arc::get_mut(&mut store) {
-                    s.latency = Some(std::time::Duration::from_millis(ms));
-                }
-            }
+        if let Ok(ms) = std::env::var("FLOE_TEST_MEMORY_LATENCY_MS")
+            && let Ok(ms) = ms.parse::<u64>()
+            && let Some(s) = Arc::get_mut(&mut store)
+        {
+            s.latency = Some(std::time::Duration::from_millis(ms));
         }
 
         tweak(&mut cfg);
@@ -144,15 +153,14 @@ impl Server {
         })
     }
 
-    /// Two instances sharing one MemoryStore, different cache dirs.
+    /// Two instances sharing one `MemoryStore`, different cache dirs.
     pub async fn start_pair() -> Result<(Self, Self)> {
         let mut store = MemoryStore::shared();
-        if let Ok(ms) = std::env::var("FLOE_TEST_MEMORY_LATENCY_MS") {
-            if let Ok(ms) = ms.parse::<u64>() {
-                if let Some(s) = Arc::get_mut(&mut store) {
-                    s.latency = Some(std::time::Duration::from_millis(ms));
-                }
-            }
+        if let Ok(ms) = std::env::var("FLOE_TEST_MEMORY_LATENCY_MS")
+            && let Ok(ms) = ms.parse::<u64>()
+            && let Some(s) = Arc::get_mut(&mut store)
+        {
+            s.latency = Some(std::time::Duration::from_millis(ms));
         }
         let a = Self::start_with(store.clone(), tempfile::tempdir()?).await?;
         let b = Self::start_with(store.clone(), tempfile::tempdir()?).await?;
@@ -204,7 +212,7 @@ impl Server {
     pub async fn registry_has_packs(&self, owner: &str, repo: &str) -> bool {
         let id = floe_git::RepoId::new(owner, repo).unwrap();
         match self.registry.open(&id).await {
-            Ok(h) => h.packs_ready() && !h.local().packs().map(|p| p.is_empty()).unwrap_or(true),
+            Ok(h) => h.packs_ready() && h.local().packs().is_ok_and(|p| !p.is_empty()),
             Err(_) => false,
         }
     }
@@ -215,6 +223,10 @@ impl Server {
         Ok(())
     }
 
+    #[allow(
+        clippy::unused_async,
+        reason = "callers await it, some through a timeout macro that needs a future"
+    )]
     pub async fn ls_remote(&self, owner: &str, repo: &str) -> Result<String> {
         let out = Command::new("git")
             .args(["ls-remote", &self.repo_url(owner, repo)])

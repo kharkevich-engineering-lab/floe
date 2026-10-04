@@ -6,6 +6,7 @@
 //! * `/{o}/{r}/api/…` — a bearer token or the same-origin session cookie for the same-origin bundled UI;
 //! * `/{o}/{r}/api-browser/…` — the browser lane for other origins (`credentials:
 //!   "include"`), authenticated by the same session cookie (`SameSite=None`).
+//!
 //! Same handlers; lanes differ by credential handling and CORS, never by a
 //! rewrite. Non-repo: `/api/v1` (discovery), `/api/v1/me`, `/api/v1/authenticate`
 //! (+ the `/api-browser/v1/me|authenticate` pair the SDK's popup uses),
@@ -80,7 +81,7 @@ fn origin_allowed(cfg: &floe_config::Config, origin: &str) -> bool {
                 .is_some_and(|o| {
                     o.ends_with(host)
                         && o.len() > host.len()
-                        && o.as_bytes()[o.len() - host.len() - 1] == b'.'
+                        && o.as_bytes().get(o.len() - host.len() - 1) == Some(&b'.')
                         && !o.contains('/')
                 })
         } else {
@@ -329,7 +330,7 @@ struct RepoSummary {
 }
 
 /// `GET /{owner}/{repo}/api[-browser]` — one cheap, ref-level summary (SWR +
-/// ETag on the head sha). Counts are O(1) from the ref index.
+/// `ETag` on the head sha). Counts are O(1) from the ref index.
 async fn repo_summary(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -346,7 +347,7 @@ async fn repo_summary(
         None,
         move |r| async move {
             let head = r.index.head().map(|(name, sha)| RefInfo { name, sha });
-            let etag = etag_for(head.as_ref().map(|h| h.sha.as_str()).unwrap_or("unborn"));
+            let etag = etag_for(head.as_ref().map_or("unborn", |h| h.sha.as_str()));
             let full = format!("{o}/{n}");
             Ok(json_swr(
                 &RepoSummary {
@@ -394,7 +395,11 @@ async fn repo_admin(
         for lane in ["api-browser", "api"] {
             let marker = format!("/{owner}/{name}/{lane}");
             if let Some(i) = path.find(&marker) {
-                sub = path[i + marker.len()..].trim_start_matches('/').to_string();
+                sub = path
+                    .get(i + marker.len()..)
+                    .unwrap_or_default()
+                    .trim_start_matches('/')
+                    .to_string();
                 break;
             }
         }

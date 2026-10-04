@@ -2,6 +2,16 @@
 //! host brings followed refs up to an upstream git host's through the WAL — the
 //! same PUSH entry a push produces — fast-forward only. The upstream here is a
 //! second floe instance (smart HTTP v2 over 127.0.0.1, real `git fetch`).
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 mod harness;
 
@@ -9,7 +19,7 @@ use harness::{Server, git, git_in};
 
 macro_rules! step {
     ($name:literal, $e:expr) => {
-        tokio::time::timeout(std::time::Duration::from_secs(60), $e)
+        tokio::time::timeout(std::time::Duration::from_mins(1), $e)
             .await
             .unwrap_or_else(|_| panic!("step timed out: {}", $name))
     };
@@ -206,8 +216,7 @@ async fn start_op(
     )
     .await
     {
-        Ok(t) => Ok(t),
-        Err(floe_server::ops::StartError::AlreadyRunning(t)) => Ok(t),
+        Ok(t) | Err(floe_server::ops::StartError::AlreadyRunning(t)) => Ok(t),
         Err(floe_server::ops::StartError::UnknownOp) => Err("unknown op".into()),
     }
 }

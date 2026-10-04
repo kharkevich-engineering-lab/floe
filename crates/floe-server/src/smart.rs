@@ -1,8 +1,8 @@
 //! Git smart HTTP protocol (v0/v2): info/refs, upload-pack, receive-pack.
 //!
 //! References:
-//! * https://git-scm.com/docs/http-protocol
-//! * https://git-scm.com/docs/protocol-v2
+//! * <https://git-scm.com/docs/http-protocol>
+//! * <https://git-scm.com/docs/protocol-v2>
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -66,10 +66,8 @@ pub async fn info_refs(
         }
         return Err(auth_err(e));
     }
-    if is_receive {
-        if let Some(msg) = push_url_must_be_git(st, route, headers) {
-            return Ok(git_err_response("git-receive-pack", &msg));
-        }
+    if is_receive && let Some(msg) = push_url_must_be_git(st, route, headers) {
+        return Ok(git_err_response("git-receive-pack", &msg));
     }
 
     let service = match service_param.as_str() {
@@ -92,31 +90,29 @@ pub async fn info_refs(
     pktline::encode_text(&mut buf, &svc_line);
     pktline::encode_flush(&mut buf);
 
-    match (protocol, service) {
-        (floe_git::pkt::Protocol::V2, floe_git::Service::UploadPack) => {
-            v2_capability_advert(st, &route.id, &handle, &mut buf).await?;
-        }
-        _ => {
-            // v0 (and receive-pack always).
-            let repo_key = route.id.to_string();
-            let ver = handle.manifest_version();
-            if let Some(cached) = st
-                .caches
+    if let (floe_git::pkt::Protocol::V2, floe_git::Service::UploadPack) = (protocol, service) {
+        v2_capability_advert(st, &route.id, &handle, &mut buf).await?;
+    } else {
+        // v0 (and receive-pack always).
+        let repo_key = route.id.to_string();
+        let ver = handle.manifest_version();
+        if let Some(cached) = st
+            .caches
+            .ref_advert
+            .get_v0(&repo_key, ver.as_ref(), service)
+        {
+            buf.extend_from_slice(&cached);
+        } else {
+            let start = buf.len();
+            handle
+                .local()
+                .advertise_refs_v0(service, &mut buf)
+                .map_err(git_err)?;
+            // `start` is the length before the advertisement was appended.
+            let advert_bytes = buf.get(start..).unwrap_or_default().to_vec();
+            st.caches
                 .ref_advert
-                .get_v0(&repo_key, ver.as_ref(), service)
-            {
-                buf.extend_from_slice(&cached);
-            } else {
-                let start = buf.len();
-                handle
-                    .local()
-                    .advertise_refs_v0(service, &mut buf)
-                    .map_err(git_err)?;
-                let advert_bytes = buf[start..].to_vec();
-                st.caches
-                    .ref_advert
-                    .insert_v0(&repo_key, ver.as_ref(), service, advert_bytes);
-            }
+                .insert_v0(&repo_key, ver.as_ref(), service, advert_bytes);
         }
     }
 
@@ -126,10 +122,10 @@ pub async fn info_refs(
 
 fn parse_query(query: &str, key: &str) -> Option<String> {
     for pair in query.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                return Some(v.to_string());
-            }
+        if let Some((k, v)) = pair.split_once('=')
+            && k == key
+        {
+            return Some(v.to_string());
         }
     }
     None
@@ -162,10 +158,10 @@ async fn v2_capability_advert(
         floe_git::ObjectFormat::Sha256 => "sha256",
     };
     pktline::encode_text(buf, &format!("object-format={fmt}\n"));
-    if st.cfg.bundles.advertise {
-        if let Ok(Some(_list)) = st.bundles.list(id).await {
-            pktline::encode_text(buf, "bundle-uri\n");
-        }
+    if st.cfg.bundles.advertise
+        && let Ok(Some(_list)) = st.bundles.list(id).await
+    {
+        pktline::encode_text(buf, "bundle-uri\n");
     }
     pktline::encode_flush(buf);
     Ok(())
@@ -224,24 +220,22 @@ async fn upload_pack_v2(
             };
             let repo_key = route.id.to_string();
             let version = handle.manifest_version();
-            let lines =
-                match st
-                    .caches
+            let lines = if let Some(lines) =
+                st.caches
                     .ref_advert
                     .get_v2_ls_refs(&repo_key, version.as_ref(), &args)
-                {
-                    Some(lines) => lines,
-                    None => {
-                        let lines = handle.local().ls_refs(&args).map_err(git_err)?;
-                        st.caches.ref_advert.insert_v2_ls_refs(
-                            &repo_key,
-                            version.as_ref(),
-                            &args,
-                            lines.clone(),
-                        );
-                        lines
-                    }
-                };
+            {
+                lines
+            } else {
+                let lines = handle.local().ls_refs(&args).map_err(git_err)?;
+                st.caches.ref_advert.insert_v2_ls_refs(
+                    &repo_key,
+                    version.as_ref(),
+                    &args,
+                    lines.clone(),
+                );
+                lines
+            };
             let mut buf = Vec::with_capacity(1024);
             for line in &lines {
                 pktline::encode_text(&mut buf, &line.render(&args));
@@ -297,35 +291,32 @@ async fn upload_pack_v2(
                 // list within the hour TRIED bundle-uri — its zero-have fetch is a
                 // bundle download that failed (git never retries one). Let that
                 // clone succeed through upload-pack, once per 6 h, loudly.
-                match bundle_fallback_allowed(st, headers, route).await {
-                    Some(who) => {
-                        tracing::warn!(repo = %route.id, principal = %who, "bundles.require: one-shot upload-pack fallback for a client whose bundle download failed");
-                        metrics::counter!("floe_bundle_fallback_total", "repo" => route.id.to_string()).increment(1);
-                        fallback_warning = Some(format!(
-                            "floe: WARNING — your git fetched the bundle list but could not apply the bundles \
-                             (a bundle download failed or was cut; see the warnings above). Serving this clone's \
-                             full history through upload-pack ONCE (≈ 32 GB for acme/monorepo, minutes of server \
-                             time); the next such clone within 6 h is refused. Faster next time: retry the clone \
-                             (bundle downloads are cached at the edge), or the blobless form: \
-                             git clone --filter=blob:none --bundle-uri={base}/{repo}.git/bundles/list?filter=blob:none {base}/{repo}.git",
-                            base = request_base_url(st, headers),
-                            repo = route.id
-                        ));
-                    }
-                    None => {
-                        let msg = bundles_required_message(st, headers, route);
-                        return Ok(if req.sideband_all {
-                            let mut buf = sideband_pkt(3, &msg);
-                            pktline::encode_flush(&mut buf);
-                            text_response(
-                                "application/x-git-upload-pack-result",
-                                no_cache_headers(),
-                                buf,
-                            )
-                        } else {
-                            git_err_response("git-upload-pack", &msg)
-                        });
-                    }
+                if let Some(who) = bundle_fallback_allowed(st, headers, route).await {
+                    tracing::warn!(repo = %route.id, principal = %who, "bundles.require: one-shot upload-pack fallback for a client whose bundle download failed");
+                    metrics::counter!("floe_bundle_fallback_total", "repo" => route.id.to_string()).increment(1);
+                    fallback_warning = Some(format!(
+                        "floe: WARNING — your git fetched the bundle list but could not apply the bundles \
+                         (a bundle download failed or was cut; see the warnings above). Serving this clone's \
+                         full history through upload-pack ONCE (≈ 32 GB for acme/monorepo, minutes of server \
+                         time); the next such clone within 6 h is refused. Faster next time: retry the clone \
+                         (bundle downloads are cached at the edge), or the blobless form: \
+                         git clone --filter=blob:none --bundle-uri={base}/{repo}.git/bundles/list?filter=blob:none {base}/{repo}.git",
+                        base = request_base_url(st, headers),
+                        repo = route.id
+                    ));
+                } else {
+                    let msg = bundles_required_message(st, headers, route);
+                    return Ok(if req.sideband_all {
+                        let mut buf = sideband_pkt(3, &msg);
+                        pktline::encode_flush(&mut buf);
+                        text_response(
+                            "application/x-git-upload-pack-result",
+                            no_cache_headers(),
+                            buf,
+                        )
+                    } else {
+                        git_err_response("git-upload-pack", &msg)
+                    });
                 }
             }
             // Narrated fetch: the client accepted sideband-all and wants
@@ -381,8 +372,7 @@ async fn upload_pack_v2(
                 let size = gix_hash::ObjectId::from_hex(hex.as_bytes())
                     .ok()
                     .and_then(|oid| repo.find_object(oid).ok())
-                    .map(|o| o.data.len() as i64)
-                    .unwrap_or(-1);
+                    .map_or(-1, |o| i64::try_from(o.data.len()).unwrap_or(i64::MAX));
                 pktline::encode_text(&mut sizes_buf, &format!("size {size}\n"));
             }
             pktline::encode_flush(&mut sizes_buf);
@@ -394,7 +384,7 @@ async fn upload_pack_v2(
         }
         "bundle-uri" => {
             let _guard = handle.sync_refs().await.map_err(wal_err)?;
-            let _ = floe_git::pkt::parse_bundle_uri(&cmd);
+            floe_git::pkt::parse_bundle_uri(&cmd);
             let base = request_base_url(st, headers);
             let lines = st
                 .bundles
@@ -478,8 +468,8 @@ fn bundle_narration(
         out.push("bundle-uri: none of your haves is a bundle tip — your git did not use the bundles (clone with the recipe from the Clone menu, or check transfer.bundleURI)".into());
     } else {
         let bytes: u64 = applied.iter().map(|b| b.size).sum();
-        let newest = applied.last().map(|b| b.creation_token).unwrap_or(0);
-        let when = chrono::DateTime::from_timestamp(newest as i64, 0)
+        let newest = applied.last().map_or(0, |b| b.creation_token);
+        let when = chrono::DateTime::from_timestamp(newest.cast_signed(), 0)
             .map(|d| d.format("%Y-%m-%d %H:%MZ").to_string())
             .unwrap_or_default();
         let names: Vec<String> = applied.iter().map(|b| b.strategy.clone()).collect();
@@ -527,7 +517,7 @@ async fn run_fetch<W: tokio::io::AsyncWrite + Unpin + Send>(
             bytes = stats.bytes,
             faulted,
             rounds,
-            ms = t0.elapsed().as_millis() as u64,
+            ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX),
             "gix fetch over remote-served base"
         );
         return Ok(());
@@ -583,7 +573,9 @@ async fn sync_narrated<'h, W: tokio::io::AsyncWrite + Unpin>(
     }
     let sync = handle.sync();
     tokio::pin!(sync);
-    let mut last_bar = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let mut last_bar = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or_else(std::time::Instant::now);
     loop {
         tokio::select! {
             biased;
@@ -591,7 +583,7 @@ async fn sync_narrated<'h, W: tokio::io::AsyncWrite + Unpin>(
             p = rx.recv() => match p {
                 Ok(floe_wal::Progress::Notice { text }) => { let _ = say(writer, &text).await; }
                 Ok(floe_wal::Progress::Progress { label, done, total, unit, percent }) => {
-                    if last_bar.elapsed() >= std::time::Duration::from_secs(1) || total.map(|t| done >= t).unwrap_or(false) {
+                    if last_bar.elapsed() >= std::time::Duration::from_secs(1) || total.is_some_and(|t| done >= t) {
                         last_bar = std::time::Instant::now();
                         let line = match (total, percent) {
                             (Some(t), Some(pc)) if unit == "bytes" => format!("{label}: {pc:.0}% ({} / {})", human(done), human(t)),
@@ -613,7 +605,7 @@ async fn sync_narrated<'h, W: tokio::io::AsyncWrite + Unpin>(
                     break (&mut sync).await;
                 }
             },
-            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
                 let _ = say(writer, &format!("still syncing ({}s)…", t0.elapsed().as_secs())).await;
             }
         }
@@ -640,8 +632,7 @@ async fn narrated_fetch(
         .require_read(headers)
         .await
         .ok()
-        .map(|p| p.name)
-        .unwrap_or_else(|| "anonymous".into());
+        .map_or_else(|| "anonymous".into(), |p| p.name);
     // Nothing that can wait (store reads, syncs) happens before the stream
     // is open and the first band-2 line is out: the bundle facts are read
     // inside the task, after the greeting.
@@ -742,7 +733,7 @@ async fn narrated_fetch(
             }
         };
         let local = guard.local().clone();
-        let packs = local.packs().map(|p| p.len()).unwrap_or(0);
+        let packs = local.packs().map_or(0, |p| p.len());
         let remote = handle.remote_served();
         let _ = say(
             &mut writer,
@@ -790,7 +781,10 @@ async fn upload_pack_v0(
             if n == 0 {
                 break;
             }
-            buf.extend_from_slice(&chunk[..n]);
+            let read = chunk
+                .get(..n)
+                .ok_or_else(|| ApiError::BadRequest("body read: short buffer".into()))?;
+            buf.extend_from_slice(read);
             if buf.len() > MAX {
                 return Err(ApiError::BadRequest("upload-pack request too large".into()));
             }
@@ -799,9 +793,8 @@ async fn upload_pack_v0(
         // `filter`) — capability words on the first want line also say
         // "deepen-since", so look at line starts, not substrings.
         let (mut has_have, mut bounded, mut pos) = (false, false, 0usize);
-        while pos + 4 <= buf.len() {
-            let Ok(len) =
-                usize::from_str_radix(std::str::from_utf8(&buf[pos..pos + 4]).unwrap_or("zz"), 16)
+        while let Some(hdr) = buf.get(pos..pos + 4) {
+            let Ok(len) = usize::from_str_radix(std::str::from_utf8(hdr).unwrap_or("zz"), 16)
             else {
                 break;
             };
@@ -809,7 +802,9 @@ async fn upload_pack_v0(
                 pos += 4; // flush / delim
                 continue;
             }
-            let line = &buf[(pos + 4).min(buf.len())..(pos + len).min(buf.len())];
+            let line = buf
+                .get((pos + 4).min(buf.len())..(pos + len).min(buf.len()))
+                .unwrap_or_default();
             if line.starts_with(b"have ") {
                 has_have = true;
             }
@@ -1070,7 +1065,7 @@ pub async fn receive_pack(
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
-        .map(|v| v.to_string());
+        .map(ToString::to_string);
 
     if !caps.side_band_64k {
         // No sideband: the response is the report alone, after the work.
@@ -1158,12 +1153,16 @@ pub async fn receive_pack(
     ))
 }
 
+/// Per-ref publish outcome: ref name and `Err(reason)` when it was rejected.
+type PerRefResults = Vec<(String, Result<(), String>)>;
+
 /// Everything after the sync: unpack, connectivity, policy, publish → the
 /// report-status bytes (already sideband-framed when the client asked).
+#[allow(clippy::too_many_arguments, reason = "one call site per sideband mode; a params struct adds nothing")]
 async fn receive_pack_process(
     st: &AppState,
     handle: &Arc<floe_wal::RepoHandle>,
-    _guard: floe_wal::ReadGuard<'_>,
+    guard: floe_wal::ReadGuard<'_>,
     txn: floe_proto::v1::RefTransaction,
     caps: floe_git::receive::ReceiveCaps,
     pack_reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
@@ -1269,11 +1268,11 @@ async fn receive_pack_process(
     // Release the sync read guard before publishing. `publish_push_synced`
     // reuses this request's freshness check while still syncing after CAS
     // conflicts.
-    drop(_guard);
+    drop(guard);
 
     // Writer-side peel: replicas advertise annotated tags without objects.
     local.fill_peeled(&mut txn);
-    let meta = push_meta(&caps, principal, &txn, &request_id);
+    let meta = push_meta(&caps, principal, &txn, request_id.as_ref());
     let pack_ref = match ingest {
         Ok(Some(p)) => Some(p),
         _ => None,
@@ -1282,7 +1281,7 @@ async fn receive_pack_process(
         .publish_push_synced(pack_ref, txn, meta)
         .instrument(tracing::info_span!("receive.publish"))
         .await;
-    let (seq, per_ref_pub): (u64, Vec<(String, Result<(), String>)>) = match publish {
+    let (seq, per_ref_pub): (u64, PerRefResults) = match publish {
         Ok(r) => (
             r.seq,
             r.per_ref
@@ -1383,7 +1382,7 @@ fn receive_response(report: Vec<u8>) -> Response {
     let mut resp = (StatusCode::OK, report).into_response();
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        "application/x-git-receive-pack-result".parse().unwrap(),
+        HeaderValue::from_static("application/x-git-receive-pack-result"),
     );
     resp
 }
@@ -1392,7 +1391,7 @@ fn push_meta(
     caps: &floe_git::receive::ReceiveCaps,
     principal: &crate::auth::Principal,
     txn: &floe_proto::v1::RefTransaction,
-    request_id: &Option<String>,
+    request_id: Option<&String>,
 ) -> HashMap<String, String> {
     let mut m = HashMap::new();
     m.insert("agent".to_string(), caps.agent.clone().unwrap_or_default());
@@ -1437,9 +1436,11 @@ async fn parse_fetch_request(
             .map_err(git_err)?;
         match line {
             None
-            | Some(floe_git::pkt::PktLine::Flush)
-            | Some(floe_git::pkt::PktLine::Delim) => break,
-            Some(floe_git::pkt::PktLine::ResponseEnd) => break,
+            | Some(
+                floe_git::pkt::PktLine::Flush
+                | floe_git::pkt::PktLine::Delim
+                | floe_git::pkt::PktLine::ResponseEnd,
+            ) => break,
             Some(floe_git::pkt::PktLine::Data(b)) => {
                 let s = String::from_utf8_lossy(&b);
                 let s = s.trim_end_matches('\n');
@@ -1535,9 +1536,11 @@ pub(crate) fn build_response<B: axum::response::IntoResponse>(
 ) -> Response {
     let mut resp = (status, body).into_response();
     let h = resp.headers_mut();
-    h.insert(axum::http::header::CONTENT_TYPE, ct.parse().unwrap());
+    if let Ok(v) = HeaderValue::from_str(ct) {
+        h.insert(axum::http::header::CONTENT_TYPE, v);
+    }
     for (k, v) in extra {
-        h.insert(k, v.parse().unwrap());
+        h.insert(k, HeaderValue::from_static(v));
     }
     resp
 }
@@ -1642,9 +1645,9 @@ fn too_large_message(
 
 /// How often one principal may fall back to an upload-pack full clone of a
 /// `bundles.require` repository.
-const FALLBACK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+const FALLBACK_EVERY: std::time::Duration = std::time::Duration::from_hours(6);
 /// How recent the principal's `bundles/list` fetch must be to count as "tried".
-const ATTEMPT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
+const ATTEMPT_WINDOW: std::time::Duration = std::time::Duration::from_hours(1);
 
 /// D17 amendment: `Some(principal)` when this zero-have full fetch may go to
 /// upload-pack — the principal fetched the repo's bundle list within the hour
@@ -1773,6 +1776,7 @@ fn git_err_response(service: &str, msg: &str) -> Response {
     )
 }
 
+#[allow(clippy::needless_pass_by_value, reason = "map_err adapter: takes the error by value")]
 fn auth_err(e: crate::auth::AuthError) -> ApiError {
     match e {
         crate::auth::AuthError::Invalid | crate::auth::AuthError::Unauthorized => {
@@ -1784,9 +1788,11 @@ fn auth_err(e: crate::auth::AuthError) -> ApiError {
         }
     }
 }
+#[allow(clippy::needless_pass_by_value, reason = "map_err adapter: takes the error by value")]
 fn git_err(e: floe_git::GitError) -> ApiError {
     ApiError::Internal(format!("git: {e}"))
 }
+#[allow(clippy::needless_pass_by_value, reason = "map_err adapter: takes the error by value")]
 pub(crate) fn wal_err(e: floe_wal::WalError) -> ApiError {
     match &e {
         floe_wal::WalError::NotFound => ApiError::NotFound(e.to_string()),
@@ -1799,6 +1805,7 @@ pub(crate) fn wal_err(e: floe_wal::WalError) -> ApiError {
         _ => ApiError::Internal(format!("wal: {e}")),
     }
 }
+#[allow(clippy::needless_pass_by_value, reason = "map_err adapter: takes the error by value")]
 fn bundle_err(e: floe_bundle::BundleError) -> ApiError {
     ApiError::Internal(format!("bundle: {e}"))
 }

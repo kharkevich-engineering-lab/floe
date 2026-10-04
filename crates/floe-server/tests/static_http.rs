@@ -1,6 +1,16 @@
 //! HTTP contract of immutable store objects (LFS here; bundles share the same
-//! `static_object` path) and of the embedded UI assets: strong ETags, 304,
+//! `static_object` path) and of the embedded UI assets: strong `ETag`s, 304,
 //! Range/If-Range, HEAD, Content-Length, precompressed encodings.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 mod harness;
 
@@ -206,7 +216,12 @@ async fn ui_assets_etag_304_and_precompressed() -> Result<()> {
     // same ETag across encodings (the encoding is negotiated, not a new entity).
     let asset = html
         .split('"')
-        .find(|p| p.starts_with("/_ui/assets/") && p.ends_with(".js"))
+        .find(|p| {
+            p.starts_with("/_ui/assets/")
+                && std::path::Path::new(p)
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("js"))
+        })
         .expect("asset reference")
         .to_string();
     let url = format!("{}{}", server.base_url, asset);

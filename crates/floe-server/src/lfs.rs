@@ -109,7 +109,7 @@ pub async fn batch(
                 .batch(upstream, cfg.upstream.token_env.as_deref(), &missing)
                 .await
         }
-        _ => Default::default(),
+        _ => std::collections::HashMap::default(),
     };
 
     let mut objs = Vec::with_capacity(body.objects.len());
@@ -166,7 +166,7 @@ pub async fn batch(
                     .ok()
                     .flatten()
                     .unwrap_or_else(|| format!("{base}/info/lfs/objects/{}", o.oid)),
-                _ => format!("{base}/info/lfs/objects/{}", o.oid),
+                floe_config::BundleServe::Proxy => format!("{base}/info/lfs/objects/{}", o.oid),
             };
             actions.download = Some(Action {
                 href,
@@ -203,13 +203,13 @@ pub async fn batch(
     let mut resp = (StatusCode::OK, json).into_response();
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        "application/vnd.git-lfs+json".parse().unwrap(),
+        axum::http::HeaderValue::from_static("application/vnd.git-lfs+json"),
     );
     Ok(resp)
 }
 
 /// `GET|HEAD /{repo}/info/lfs/objects/{oid}` — stream the object with the full
-/// immutable-object contract (strong ETag, 304, Range/If-Range, HEAD,
+/// immutable-object contract (strong `ETag`, 304, Range/If-Range, HEAD,
 /// Content-Length); see `static_object`. LFS objects are sha256-addressed.
 pub async fn get_object(
     st: &AppState,
@@ -267,6 +267,7 @@ pub async fn get_object(
 /// is `put` into the store (never on a short or mismatching read). No Range on
 /// this path: the object is served whole once, then by `static_object`. `size`
 /// comes from the href's `?size=` (GitHub's batch rejects a wrong size).
+#[allow(clippy::too_many_arguments, reason = "one call site; the arguments are the resolved request")]
 async fn read_through(
     st: &AppState,
     cfg: &floe_config::Config,
@@ -289,12 +290,12 @@ async fn read_through(
         return Err(ApiError::NotFound("object not found".into()));
     };
     if *method == axum::http::Method::HEAD {
-        return Ok(Response::builder()
+        return Response::builder()
             .status(StatusCode::OK)
             .header(axum::http::header::CONTENT_LENGTH, obj.size)
             .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
             .body(Body::empty())
-            .unwrap());
+            .map_err(|e| ApiError::Internal(e.to_string()));
     }
     let (len, mut upstream_body) = st
         .lfs_upstream
@@ -371,13 +372,13 @@ async fn read_through(
         let _ = tokio::fs::remove_file(&spool_path).await;
     });
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(axum::http::header::CONTENT_LENGTH, len)
         .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
         .header(axum::http::header::CACHE_CONTROL, "no-store")
         .body(Body::from_stream(stream))
-        .unwrap())
+        .map_err(|e| ApiError::Internal(e.to_string()))
 }
 
 /// `PUT /{repo}/info/lfs/objects/{oid}` — stream upload, verify size + sha256.
@@ -387,6 +388,8 @@ pub async fn put_object(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     if !st.cfg.lfs.enabled {
         return Err(ApiError::NotFound("lfs disabled".into()));
     }
@@ -405,8 +408,6 @@ pub async fn put_object(
             .map_err(|e| ApiError::Internal(e.to_string()))?,
     );
     let mut reader = body_to_async_read(body);
-    use sha2::{Digest, Sha256};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut hasher = Sha256::new();
     let mut n = 0u64;
     let mut buf = vec![0u8; 64 * 1024];
@@ -422,8 +423,11 @@ pub async fn put_object(
         if n > max {
             return Err(ApiError::PayloadTooLarge);
         }
-        hasher.update(&buf[..k]);
-        file.write_all(&buf[..k])
+        let chunk = buf
+            .get(..k)
+            .ok_or_else(|| ApiError::Internal("read overran its buffer".into()))?;
+        hasher.update(chunk);
+        file.write_all(chunk)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
@@ -507,6 +511,7 @@ fn base_url(st: &AppState, route: &RepoRoute, headers: &HeaderMap) -> String {
     )
 }
 
+#[allow(clippy::needless_pass_by_value, reason = "used as a `map_err` adapter")]
 fn auth_err(e: crate::auth::AuthError) -> ApiError {
     match e {
         crate::auth::AuthError::Invalid | crate::auth::AuthError::Unauthorized => {

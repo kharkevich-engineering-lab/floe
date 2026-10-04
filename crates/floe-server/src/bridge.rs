@@ -235,8 +235,12 @@ impl Bridge {
                 Err(e) => return Err(e.into()),
             }
         };
-        metrics::gauge!("events_bridge_lag_entries", "repo" => id.to_string())
-            .set(head.saturating_sub(from) as f64);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "metrics value; precision loss above 2^52 is irrelevant"
+        )]
+        let lag = head.saturating_sub(from) as f64;
+        metrics::gauge!("events_bridge_lag_entries", "repo" => id.to_string()).set(lag);
         let mut report = CatchUp {
             repo: id.to_string(),
             from_seq: from,
@@ -271,7 +275,7 @@ impl Bridge {
                 // Another bridge instance advanced it: our emission was a
                 // duplicate (dedup key), theirs stands.
                 Err(StoreError::PreconditionFailed { .. }) => {
-                    tracing::warn!(repo = %id, "events bridge: cursor CAS lost (two bridges?)")
+                    tracing::warn!(repo = %id, "events bridge: cursor CAS lost (two bridges?)");
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -315,7 +319,7 @@ impl Bridge {
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::warn!(repo = %id, error = format!("{e:#}"), "events bridge: sweep catch-up failed")
+                    tracing::warn!(repo = %id, error = format!("{e:#}"), "events bridge: sweep catch-up failed");
                 }
             }
         }
@@ -382,6 +386,10 @@ impl Bridge {
 }
 
 /// The object keys (or repository ids) a notification body names. Store-agnostic.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "`serde_json::Value` indexing yields `Null` for missing keys and never panics"
+)]
 fn notified_keys(v: &serde_json::Value) -> Vec<String> {
     let mut keys = Vec::new();
     // GCS → Pub/Sub push envelope.
@@ -408,8 +416,9 @@ fn notified_keys(v: &serde_json::Value) -> Vec<String> {
                             if i == 0 {
                                 return part.to_string();
                             }
-                            match u8::from_str_radix(part.get(..2).unwrap_or(""), 16) {
-                                Ok(b) => format!("{}{}", b as char, &part[2..]),
+                            let (hex, rest) = part.split_at_checked(2).unwrap_or(("", part));
+                            match u8::from_str_radix(hex, 16) {
+                                Ok(b) => format!("{}{rest}", b as char),
                                 Err(_) => format!("%{part}"),
                             }
                         })
@@ -464,6 +473,7 @@ pub async fn http_notify(
     Ok(axum::Json(reports).into_response())
 }
 
+#[allow(clippy::needless_pass_by_value, reason = "used as a `map_err` adapter")]
 fn auth_err(e: crate::auth::AuthError) -> crate::error::ApiError {
     use crate::error::ApiError;
     match e {
@@ -480,6 +490,10 @@ fn auth_err(e: crate::auth::AuthError) -> crate::error::ApiError {
 /// The sweep timer: `events.sweep_interval`, shortened to
 /// `github.webhook_poll_interval` when the GitHub sink is on (a dev bucket has
 /// no notifications, and the editor suite waits seconds, not minutes). 0 = off.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "public API called from lib.rs; callers hand over their Arc"
+)]
 pub fn spawn_sweeper(state: Arc<crate::AppState>) {
     let Some(bridge) = state.bridge.clone() else {
         return;

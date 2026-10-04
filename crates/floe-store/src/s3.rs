@@ -7,29 +7,29 @@
 //!
 //! ## Version tokens
 //!
-//! S3 ETags are used as opaque `Version` strings. Quotes are stripped
+//! S3 `ETags` are used as opaque `Version` strings. Quotes are stripped
 //! consistently on read and never stored. For non-multipart uploads the
-//! ETag is the MD5 of the content; for multipart uploads it is a compound
+//! `ETag` is the MD5 of the content; for multipart uploads it is a compound
 //! hash. Callers never parse the token — equality comparison suffices.
 //!
 //! ## Conditional PUT
 //!
 //! `PutMode::Create`    → `If-None-Match: *`  (object must not exist).
-//! `PutMode::Update(v)` → `If-Match: <etag>`  (CAS on current ETag).
+//! `PutMode::Update(v)` → `If-Match: <etag>`  (CAS on current `ETag`).
 //! On failure the SDK returns a `PreconditionFailed` service error; we fill
 //! `current` via a follow-up HEAD when the SDK doesn't include it.
 //!
 //! ## Conditional DELETE
 //!
-//! S3 has no native conditional delete. We emulate via HEAD (read ETag) +
+//! S3 has no native conditional delete. We emulate via HEAD (read `ETag`) +
 //! compare + DELETE, documenting the inherent check-then-act race: a
 //! concurrent writer could replace the object between HEAD and DELETE.
 //! Acceptable for floe's lease-guarded semantics.
 //!
 //! ## Multipart upload
 //!
-//! Objects above `cfg.multipart_threshold` use CreateMultipartUpload +
-//! UploadPart + CompleteMultipartUpload. CreateMultipartUpload does NOT
+//! Objects above `cfg.multipart_threshold` use `CreateMultipartUpload` +
+//! `UploadPart` + `CompleteMultipartUpload`. `CreateMultipartUpload` does NOT
 //! support `If-None-Match`/`If-Match` in the S3 API, so multipart is only
 //! used for `PutMode::Overwrite`. For floe's immutable pack objects
 //! (`PutMode::Create`) we use single-shot PUT when the object is large,
@@ -110,7 +110,7 @@ impl S3Store {
     // ---- GET via presigned URL + reqwest (true streaming) ---------------
 
     async fn presigned_get(&self, key: &str, opts: &GetOptions) -> Result<reqwest::Response> {
-        let presigning = PresigningConfig::expires_in(Duration::from_secs(60))
+        let presigning = PresigningConfig::expires_in(Duration::from_mins(1))
             .map_err(|e| StoreError::other(anyhow::anyhow!("presigning config: {e}")))?;
 
         let mut builder = self.client.get_object().bucket(&self.bucket).key(key);
@@ -182,7 +182,7 @@ impl S3Store {
             404 => Err(StoreError::NotFound { key: key.into() }),
             412 => Err(StoreError::PreconditionFailed {
                 key: key.into(),
-                current: etag.map(|e| Version::new(e)),
+                current: etag.map(Version::new),
             }),
             s if s >= 500 || s == 429 => {
                 Err(StoreError::Retryable(anyhow::anyhow!("s3 get status {s}")))
@@ -204,7 +204,7 @@ async fn body_to_s3(body: PutBody) -> Result<(S3ByteStream, u64)> {
             // Collect into Bytes: floe's Stream bodies are small objects
             // (manifests, leases). Large packs use PutBody::File which
             // streams via ByteStream::read_from().
-            let collected = util::collect(stream, len as usize).await?;
+            let collected = util::collect(stream, usize::try_from(len).unwrap_or(0)).await?;
             (S3ByteStream::from(collected), len)
         }
         PutBody::File(path) => {
@@ -225,12 +225,12 @@ async fn body_to_s3(body: PutBody) -> Result<(S3ByteStream, u64)> {
 
 // ---- error classification ----------------------------------------------
 
-/// Extract the error code string from an SdkError's service error metadata.
+/// Extract the error code string from an `SdkError`'s service error metadata.
 fn err_code<E>(err: &aws_sdk_s3::error::SdkError<E>) -> Option<&str>
 where
     E: aws_sdk_s3::error::ProvideErrorMetadata,
 {
-    err.as_service_error().map(|e| e.meta().code()).flatten()
+    err.as_service_error().and_then(|e| e.meta().code())
 }
 
 /// S3 error codes that mean "the service could not serve this request now",
@@ -284,11 +284,11 @@ where
 
 /// Wrap an SDK failure, keeping the retryable/permanent distinction that
 /// `StoreError::is_retryable` is read for.
-fn classify_error<E>(context: &str, err: aws_sdk_s3::error::SdkError<E>) -> StoreError
+fn classify_error<E>(context: &str, err: &aws_sdk_s3::error::SdkError<E>) -> StoreError
 where
     E: aws_sdk_s3::error::ProvideErrorMetadata + std::error::Error + Send + Sync + 'static,
 {
-    if is_retryable(&err) {
+    if is_retryable(err) {
         StoreError::Retryable(anyhow::anyhow!("{context}: {err}"))
     } else {
         StoreError::Other(anyhow::anyhow!("{context}: {err}"))
@@ -297,9 +297,9 @@ where
 
 fn classify_put_error(
     key: &str,
-    err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
+    err: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
 ) -> StoreError {
-    let code = err_code(&err).unwrap_or("");
+    let code = err_code(err).unwrap_or("");
     match code {
         "PreconditionFailed" | "ConditionalRequestConflict" => StoreError::PreconditionFailed {
             key: key.into(),
@@ -310,7 +310,7 @@ fn classify_put_error(
 }
 
 fn classify_list_error(
-    err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error>,
+    err: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error>,
 ) -> StoreError {
     classify_error("s3 list error", err)
 }
@@ -338,7 +338,7 @@ impl ObjectStore for S3Store {
         match resp {
             Ok(out) => {
                 let etag = out.e_tag().map(|s| s.trim_matches('"').to_owned());
-                let size = out.content_length().unwrap_or(0) as u64;
+                let size = u64::try_from(out.content_length().unwrap_or(0)).unwrap_or(0);
                 Ok(Some(ObjectMeta {
                     key: key.into(),
                     size,
@@ -351,7 +351,7 @@ impl ObjectStore for S3Store {
                 {
                     return Ok(None);
                 }
-                Err(classify_error("s3 head error", err))
+                Err(classify_error("s3 head error", &err))
             }
         }
     }
@@ -375,7 +375,7 @@ impl ObjectStore for S3Store {
             .bucket(&self.bucket)
             .key(key)
             .body(s3_body)
-            .content_length(len as i64);
+            .content_length(i64::try_from(len).unwrap_or(i64::MAX));
 
         match &opts.mode {
             PutMode::Overwrite => {}
@@ -402,12 +402,12 @@ impl ObjectStore for S3Store {
                 })
             }
             Err(e) => {
-                let mut err = classify_put_error(key, e);
+                let mut err = classify_put_error(key, &e);
                 // Fill `current` via HEAD if we got a PreconditionFailed.
-                if let StoreError::PreconditionFailed { current: c, .. } = &mut err {
-                    if c.is_none() {
-                        *c = self.head(key).await.ok().flatten().map(|m| m.version);
-                    }
+                if let StoreError::PreconditionFailed { current: c, .. } = &mut err
+                    && c.is_none()
+                {
+                    *c = self.head(key).await.ok().flatten().map(|m| m.version);
                 }
                 Err(err)
             }
@@ -456,7 +456,7 @@ impl ObjectStore for S3Store {
                         return Ok(());
                     }
                 }
-                Err(classify_error("s3 delete error", err))
+                Err(classify_error("s3 delete error", &err))
             }
         }
     }
@@ -469,7 +469,7 @@ impl ObjectStore for S3Store {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         let prefix = prefix.to_owned();
-        let start_after = start_after.map(|s| s.to_owned());
+        let start_after = start_after.map(ToOwned::to_owned);
 
         Box::pin(futures::stream::unfold(
             ListState {
@@ -515,7 +515,7 @@ impl ObjectStore for S3Store {
                                 let etag = obj.e_tag().map(|s| s.trim_matches('"').to_owned());
                                 Ok(ObjectMeta {
                                     key: obj.key().unwrap_or("").to_owned(),
-                                    size: obj.size().unwrap_or(0) as u64,
+                                    size: u64::try_from(obj.size().unwrap_or(0)).unwrap_or(0),
                                     version: Version::new(etag.as_deref().unwrap_or("")),
                                 })
                             })
@@ -524,14 +524,14 @@ impl ObjectStore for S3Store {
                         state.continuation_token = resp
                             .is_truncated()
                             .unwrap_or(false)
-                            .then(|| resp.next_continuation_token().map(|s| s.to_owned()))
+                            .then(|| resp.next_continuation_token().map(ToOwned::to_owned))
                             .flatten();
                         state.buffer = items.into_iter();
 
                         let item = state.buffer.next();
                         item.map(|i| (i, state))
                     }
-                    Err(err) => Some((Err(classify_list_error(err)), state)),
+                    Err(err) => Some((Err(classify_list_error(&err)), state)),
                 }
             },
         ))
@@ -551,7 +551,7 @@ impl ObjectStore for S3Store {
             if let Some(ct) = &continuation_token {
                 builder = builder.continuation_token(ct);
             }
-            let resp = builder.send().await.map_err(classify_list_error)?;
+            let resp = builder.send().await.map_err(|e| classify_list_error(&e))?;
             out.extend(
                 resp.common_prefixes()
                     .iter()
@@ -560,7 +560,7 @@ impl ObjectStore for S3Store {
             continuation_token = resp
                 .is_truncated()
                 .unwrap_or(false)
-                .then(|| resp.next_continuation_token().map(|s| s.to_owned()))
+                .then(|| resp.next_continuation_token().map(ToOwned::to_owned))
                 .flatten();
             if continuation_token.is_none() {
                 break;
@@ -574,7 +574,7 @@ impl ObjectStore for S3Store {
     /// A presigned GET (1 h): the edge needs no credentials and `Range` stays free (unsigned).
     async fn accel_target(&self, key: &str) -> Option<crate::AccelTarget> {
         let url = self
-            .signed_get_url(key, Duration::from_secs(3600))
+            .signed_get_url(key, Duration::from_hours(1))
             .await
             .ok()
             .flatten()?;
@@ -641,7 +641,7 @@ impl ObjectStore for S3Store {
         let upload = create
             .send()
             .await
-            .map_err(|e| classify_error("s3 create multipart", e))?;
+            .map_err(|e| classify_error("s3 create multipart", &e))?;
         let upload_id = upload
             .upload_id()
             .ok_or_else(|| {
@@ -651,20 +651,30 @@ impl ObjectStore for S3Store {
         let mut parts: Vec<aws_sdk_s3::types::CompletedPart> = Vec::new();
         let mut part_number = 1i32;
         let mut pos: u64 = 0; // absolute offset into the concatenation
-        let offset_of = |i: usize| -> u64 { sizes[..i].iter().sum() };
+        // The source byte `p` of the concatenation falls in: (key, start offset, size).
+        let locate = |p: u64| {
+            let mut start = 0u64;
+            for (src, &size) in sources.iter().zip(&sizes) {
+                if p < start + size {
+                    return Ok((src, start, size));
+                }
+                start += size;
+            }
+            Err(StoreError::other(anyhow::anyhow!(
+                "compose: offset {p} is past the end of the sources"
+            )))
+        };
         let result: Result<()> = async {
             while pos < total {
                 // Which source does `pos` fall in, and how far does it run?
-                let i = (0..sources.len())
-                    .find(|&i| pos < offset_of(i) + sizes[i])
-                    .unwrap();
-                let src_end = offset_of(i) + sizes[i];
+                let (src, src_start, src_size) = locate(pos)?;
+                let src_end = src_start + src_size;
                 let run = src_end - pos;
                 let last_part = src_end == total;
                 if run >= MIN_PART || last_part {
                     // Copy a range of this one source.
                     let len = run.min(COPY_PART);
-                    let from = pos - offset_of(i);
+                    let from = pos - src_start;
                     let part = self
                         .client
                         .upload_part_copy()
@@ -675,12 +685,12 @@ impl ObjectStore for S3Store {
                         .copy_source(format!(
                             "{}/{}",
                             self.bucket,
-                            crate::util::encode_path(&sources[i])
+                            crate::util::encode_path(src)
                         ))
                         .copy_source_range(format!("bytes={from}-{}", from + len - 1))
                         .send()
                         .await
-                        .map_err(|e| classify_error("s3 upload part copy", e))?;
+                        .map_err(|e| classify_error("s3 upload part copy", &e))?;
                     let etag = part
                         .copy_part_result()
                         .and_then(|r| r.e_tag())
@@ -696,17 +706,16 @@ impl ObjectStore for S3Store {
                 } else {
                     // Too small to copy on its own: read MIN_PART bytes across source boundaries.
                     let want = MIN_PART.min(total - pos);
-                    let mut buf = Vec::with_capacity(want as usize);
+                    // want <= MIN_PART, so the capacity hint always converts.
+                    let mut buf = Vec::with_capacity(usize::try_from(want).unwrap_or(0));
                     let mut p = pos;
                     while (buf.len() as u64) < want {
-                        let j = (0..sources.len())
-                            .find(|&j| p < offset_of(j) + sizes[j])
-                            .unwrap();
-                        let from = p - offset_of(j);
-                        let take = (sizes[j] - from).min(want - buf.len() as u64);
+                        let (src, src_start, src_size) = locate(p)?;
+                        let from = p - src_start;
+                        let take = (src_size - from).min(want - buf.len() as u64);
                         let (_, bytes) = self
                             .get(
-                                &sources[j],
+                                src,
                                 GetOptions {
                                     range: Some(from..from + take),
                                     ..GetOptions::default()
@@ -715,9 +724,7 @@ impl ObjectStore for S3Store {
                             .await?
                             .bytes()
                             .await?
-                            .ok_or_else(|| StoreError::NotFound {
-                                key: sources[j].clone(),
-                            })?;
+                            .ok_or_else(|| StoreError::NotFound { key: src.clone() })?;
                         buf.extend_from_slice(&bytes);
                         p += take;
                     }
@@ -730,10 +737,10 @@ impl ObjectStore for S3Store {
                         .upload_id(&upload_id)
                         .part_number(part_number)
                         .body(S3ByteStream::from(Bytes::from(buf)))
-                        .content_length(len as i64)
+                        .content_length(i64::try_from(len).unwrap_or(i64::MAX))
                         .send()
                         .await
-                        .map_err(|e| classify_error("s3 upload part", e))?;
+                        .map_err(|e| classify_error("s3 upload part", &e))?;
                     parts.push(
                         aws_sdk_s3::types::CompletedPart::builder()
                             .e_tag(part.e_tag().unwrap_or("").to_owned())
@@ -767,7 +774,7 @@ impl ObjectStore for S3Store {
             Ok(r) => r,
             Err(e) => {
                 let _ = self.abort_multipart(dest, &upload_id).await;
-                return Err(classify_error("s3 complete multipart", e));
+                return Err(classify_error("s3 complete multipart", &e));
             }
         };
         let etag = resp.e_tag().map(|s| s.trim_matches('"').to_owned());
@@ -814,6 +821,8 @@ impl S3Store {
         len: u64,
         opts: &PutOptions,
     ) -> Result<ObjectMeta> {
+        use tokio::io::AsyncReadExt;
+
         let mut create = self
             .client
             .create_multipart_upload()
@@ -827,7 +836,7 @@ impl S3Store {
         let upload = create
             .send()
             .await
-            .map_err(|e| classify_error("s3 create multipart", e))?;
+            .map_err(|e| classify_error("s3 create multipart", &e))?;
 
         let upload_id = upload
             .upload_id()
@@ -841,17 +850,24 @@ impl S3Store {
         let mut uploaded_parts: Vec<aws_sdk_s3::types::CompletedPart> = Vec::new();
         let mut remaining = len;
 
-        use tokio::io::AsyncReadExt;
         let mut reader = body.into_async_read();
 
         while remaining > 0 {
             let this_part = part_size.min(remaining);
-            let to_read = this_part as usize;
+            let Ok(to_read) = usize::try_from(this_part) else {
+                let _ = self.abort_multipart(key, &upload_id).await;
+                return Err(StoreError::other(anyhow::anyhow!(
+                    "multipart part size {this_part} does not fit in memory"
+                )));
+            };
             let mut buf = vec![0u8; to_read];
             let mut read_total = 0;
 
             while read_total < to_read {
-                let n = match reader.read(&mut buf[read_total..]).await {
+                let Some(dst) = buf.get_mut(read_total..) else {
+                    break;
+                };
+                let n = match reader.read(dst).await {
                     Ok(n) => n,
                     Err(e) => {
                         let _ = self.abort_multipart(key, &upload_id).await;
@@ -878,14 +894,14 @@ impl S3Store {
                 .upload_id(&upload_id)
                 .part_number(part_number)
                 .body(S3ByteStream::from(Bytes::from(buf)))
-                .content_length(actual as i64)
+                .content_length(i64::try_from(actual).unwrap_or(i64::MAX))
                 .send()
                 .await
             {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = self.abort_multipart(key, &upload_id).await;
-                    return Err(classify_error("s3 upload part", e));
+                    return Err(classify_error("s3 upload part", &e));
                 }
             };
 
@@ -918,7 +934,7 @@ impl S3Store {
             Ok(r) => r,
             Err(e) => {
                 let _ = self.abort_multipart(key, &upload_id).await;
-                return Err(classify_error("s3 complete multipart", e));
+                return Err(classify_error("s3 complete multipart", &e));
             }
         };
 
@@ -938,7 +954,7 @@ impl S3Store {
             .upload_id(upload_id)
             .send()
             .await
-            .map_err(|e| classify_error("abort multipart", e))?;
+            .map_err(|e| classify_error("abort multipart", &e))?;
         Ok(())
     }
 }
@@ -1046,7 +1062,7 @@ mod tests {
     async fn throttling_is_retryable() {
         let client = fake_s3(503, "SlowDown").await;
         assert!(matches!(
-            classify_put_error("k", put_error(&client).await),
+            classify_put_error("k", &put_error(&client).await),
             StoreError::Retryable(_)
         ));
     }
@@ -1055,7 +1071,7 @@ mod tests {
     async fn server_fault_is_retryable() {
         let client = fake_s3(500, "InternalError").await;
         assert!(matches!(
-            classify_put_error("k", put_error(&client).await),
+            classify_put_error("k", &put_error(&client).await),
             StoreError::Retryable(_)
         ));
     }
@@ -1064,7 +1080,7 @@ mod tests {
     async fn a_transient_status_without_a_known_code_is_retryable() {
         let client = fake_s3(504, "SomethingUnrecognised").await;
         assert!(matches!(
-            classify_put_error("k", put_error(&client).await),
+            classify_put_error("k", &put_error(&client).await),
             StoreError::Retryable(_)
         ));
     }
@@ -1074,7 +1090,7 @@ mod tests {
         // Nothing listens on port 1: a dispatch failure, no response at all.
         let client = client_for("http://127.0.0.1:1");
         assert!(matches!(
-            classify_put_error("k", put_error(&client).await),
+            classify_put_error("k", &put_error(&client).await),
             StoreError::Retryable(_)
         ));
     }
@@ -1083,7 +1099,7 @@ mod tests {
     async fn denied_is_permanent() {
         let client = fake_s3(403, "AccessDenied").await;
         assert!(matches!(
-            classify_put_error("k", put_error(&client).await),
+            classify_put_error("k", &put_error(&client).await),
             StoreError::Other(_)
         ));
     }
@@ -1092,7 +1108,7 @@ mod tests {
     async fn a_failed_precondition_stays_a_failed_precondition() {
         let client = fake_s3(412, "PreconditionFailed").await;
         assert!(matches!(
-            classify_put_error("k", put_error(&client).await),
+            classify_put_error("k", &put_error(&client).await),
             StoreError::PreconditionFailed { .. }
         ));
     }
@@ -1101,7 +1117,7 @@ mod tests {
     async fn a_throttled_list_is_retryable() {
         let client = fake_s3(503, "SlowDown").await;
         assert!(matches!(
-            classify_list_error(list_error(&client).await),
+            classify_list_error(&list_error(&client).await),
             StoreError::Retryable(_)
         ));
     }
@@ -1110,7 +1126,7 @@ mod tests {
     async fn a_denied_list_is_permanent() {
         let client = fake_s3(403, "AccessDenied").await;
         assert!(matches!(
-            classify_list_error(list_error(&client).await),
+            classify_list_error(&list_error(&client).await),
             StoreError::Other(_)
         ));
     }

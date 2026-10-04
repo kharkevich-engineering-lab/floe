@@ -1,3 +1,13 @@
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 mod common;
 
 use std::time::Instant;
@@ -255,7 +265,7 @@ fn ref_view_lookups_are_logarithmic_and_overlay_aware() {
     let mut view = RefView::new(snap.clone());
     assert_eq!(
         view.get("refs/heads/ref-123456").as_deref(),
-        Some(format!("{:040x}", 123456).as_str())
+        Some(format!("{:040x}", 123_456).as_str())
     );
     assert_eq!(
         view.get("HEAD").as_deref(),

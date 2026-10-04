@@ -58,14 +58,18 @@ fn cgroup_cpus() -> Option<usize> {
     // cgroup v2: "quota period"; v1: cpu.cfs_quota_us / cpu.cfs_period_us.
     if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
         let mut it = s.split_whitespace();
-        if let (Some(q), Some(p)) = (it.next(), it.next()) {
-            if q != "max" {
-                if let (Ok(q), Ok(p)) = (q.parse::<f64>(), p.parse::<f64>()) {
-                    if p > 0.0 {
-                        return Some((q / p).round().max(1.0) as usize);
-                    }
-                }
-            }
+        if let (Some(q), Some(p)) = (it.next(), it.next())
+            && q != "max"
+            && let (Ok(q), Ok(p)) = (q.parse::<f64>(), p.parse::<f64>())
+            && p > 0.0
+        {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "rounded and clamped to >= 1; `as` saturates on overflow"
+            )]
+            let cpus = (q / p).round().max(1.0) as usize;
+            return Some(cpus);
         }
     }
     None
@@ -92,17 +96,18 @@ fn gce_machine_type() -> Option<String> {
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         s.rsplit('/')
             .next()
-            .map(|m| m.to_string())
+            .map(ToString::to_string)
             .filter(|m| !m.is_empty())
     })
     .clone()
 }
+#[allow(clippy::cast_precision_loss, reason = "display value; precision loss above 2^52 is irrelevant")]
 fn gib(b: u64) -> String {
     let g = b as f64 / (1u64 << 30) as f64;
     if g >= 10.0 {
-        format!("{:.0} GiB", g)
+        format!("{g:.0} GiB")
     } else {
-        format!("{:.1} GiB", g)
+        format!("{g:.1} GiB")
     }
 }
 
@@ -125,8 +130,9 @@ pub fn info(cfg: &floe_config::Config) -> InstanceInfo {
         .or_else(|| env("HOSTNAME"))
         .unwrap_or_else(|| "floe".into());
     let revision = env("FLOE_REVISION").unwrap_or_default();
-    let instance = env("FLOE_INSTANCE_ID")
-        .map(|i| {
+    let instance = env("FLOE_INSTANCE_ID").map_or_else(
+        || std::process::id().to_string(),
+        |i| {
             i.chars()
                 .rev()
                 .take(6)
@@ -134,13 +140,13 @@ pub fn info(cfg: &floe_config::Config) -> InstanceInfo {
                 .chars()
                 .rev()
                 .collect()
-        })
-        .unwrap_or_else(|| std::process::id().to_string());
+        },
+    );
     let version = match option_env!("FLOE_BUILD_SHA") {
         Some(sha) if !sha.is_empty() => format!(
             "{}+{}",
             env!("FLOE_VERSION"),
-            &sha[..sha.len().min(12)]
+            sha.get(..sha.len().min(12)).unwrap_or(sha)
         ),
         _ => env!("FLOE_VERSION").to_string(),
     };
@@ -154,15 +160,14 @@ pub fn info(cfg: &floe_config::Config) -> InstanceInfo {
             .collect()
     };
     let cpus = cgroup_cpus().unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
     });
     let memory_bytes = cgroup_memory_max().or_else(meminfo_total).unwrap_or(0);
     let shape = match kind {
-        "ssd" => gce_machine_type()
-            .map(|m| format!("{m} · {cpus} vCPU · {}", gib(memory_bytes)))
-            .unwrap_or_else(|| format!("{cpus} vCPU · {}", gib(memory_bytes))),
+        "ssd" => gce_machine_type().map_or_else(
+            || format!("{cpus} vCPU · {}", gib(memory_bytes)),
+            |m| format!("{m} · {cpus} vCPU · {}", gib(memory_bytes)),
+        ),
         "serverless" => format!("a serverless host · {cpus} vCPU · {}", gib(memory_bytes)),
         _ => format!("{cpus} cpus · {}", gib(memory_bytes)),
     };

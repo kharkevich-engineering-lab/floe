@@ -36,7 +36,7 @@ pub struct Remote {
 fn not_found(m: impl Into<String>) -> ApiError {
     ApiError::NotFound(m.into())
 }
-fn wal(e: floe_wal::WalError) -> ApiError {
+fn wal(e: &floe_wal::WalError) -> ApiError {
     ApiError::Internal(format!("remote objects: {e}"))
 }
 
@@ -81,7 +81,7 @@ impl Remote {
         self.packs
             .find(oid)
             .await
-            .map_err(wal)?
+            .map_err(|e| wal(&e))?
             .ok_or_else(|| not_found(format!("object {oid} not in the pack set")))
     }
 
@@ -127,7 +127,7 @@ impl Remote {
         &self,
         oid: &gix_hash::oid,
     ) -> Result<Option<(Kind, u64)>, ApiError> {
-        self.packs.header(oid).await.map_err(wal)
+        self.packs.header(oid).await.map_err(|e| wal(&e))
     }
 
     /// `rev-parse --verify <rev>^{commit}` without objects on disk: full or
@@ -210,10 +210,7 @@ impl Remote {
             };
             cur = e.oid;
             mode = Some(e.mode);
-            if !e.mode.is_tree() {
-                // more segments after a blob => absent
-                continue;
-            }
+            // More segments after a blob => absent (the next lookup finds nothing).
         }
         match mode {
             None => Ok(Some((cur, gix_object::tree::EntryKind::Tree.into()))),
@@ -237,20 +234,14 @@ impl Remote {
         for (i, seg) in segs.iter().enumerate() {
             let entries = self.tree_entries(&cur).await?;
             let Some(e) = entries.into_iter().find(|e| e.name == seg.as_bytes()) else {
-                return Err(not_found(format!(
-                    "path '{}' does not exist in {}",
-                    path, commit
-                )));
+                return Err(not_found(format!("path '{path}' does not exist in {commit}")));
             };
             cur = e.oid;
             mode = e.mode;
             if e.mode.is_tree() {
                 self.fault(&cur).await?;
             } else if i + 1 < segs.len() {
-                return Err(not_found(format!(
-                    "path '{}' does not exist in {}",
-                    path, commit
-                )));
+                return Err(not_found(format!("path '{path}' does not exist in {commit}")));
             } else if e.mode.is_blob() {
                 // blob: caller decides whether to fault (size check)
             }
@@ -349,7 +340,7 @@ impl Remote {
                     .notice(format!("{label}: gave up after {budget} commits"));
                 break;
             }
-            if popped % 100 == 0 {
+            if popped.is_multiple_of(100) {
                 self.reporter
                     .bar(label.to_string(), popped as u64, None, "commits");
             }
@@ -366,13 +357,12 @@ impl Remote {
                 } else {
                     let mut treesame_parent = None;
                     for par in &meta.parents {
-                        let pm = match metas.get(par) {
-                            Some(m) => m.clone(),
-                            None => {
-                                let m = self.commit(par).await?;
-                                metas.insert(*par, m.clone());
-                                m
-                            }
+                        let pm = if let Some(m) = metas.get(par) {
+                            m.clone()
+                        } else {
+                            let m = self.commit(par).await?;
+                            metas.insert(*par, m.clone());
+                            m
                         };
                         let theirs = self.path_oid(&mut path_cache, pm.tree, p).await?;
                         if theirs == mine {
@@ -395,13 +385,12 @@ impl Remote {
             for par in follow {
                 if seen.insert(par) {
                     seq += 1;
-                    let pm = match metas.get(&par) {
-                        Some(m) => m.clone(),
-                        None => {
-                            let m = self.commit(&par).await?;
-                            metas.insert(par, m.clone());
-                            m
-                        }
+                    let pm = if let Some(m) = metas.get(&par) {
+                        m.clone()
+                    } else {
+                        let m = self.commit(&par).await?;
+                        metas.insert(par, m.clone());
+                        m
                     };
                     heap.push(Item(pm.commit_time, seq, par));
                 }
@@ -414,6 +403,10 @@ impl Remote {
     /// commit, its first parent, every tree on a differing path, and the
     /// blobs of changed entries (both sides). Root commits diff against the
     /// empty tree.
+    #[allow(
+        clippy::many_single_char_names,
+        reason = "two-sided merge-walk reads best with short names"
+    )]
     pub async fn fault_commit_diff(&self, commit: &gix_hash::oid) -> Result<CommitMeta, ApiError> {
         let c = self.commit(commit).await?;
         self.fault(commit).await?;
@@ -437,7 +430,7 @@ impl Remote {
         }
         self.reporter.notice(format!(
             "Reading the trees and blobs changed by {}",
-            &c.id.to_hex().to_string()[..12]
+            c.id.to_hex_with_len(12)
         ));
         // Level-parallel: every tree pair of the current level is faulted in
         // one concurrent batch (range reads ~50 ms each; serially a large repository
@@ -476,7 +469,8 @@ impl Remote {
                 // Merge-walk by git tree order.
                 let (mut i, mut j) = (0, 0);
                 while i < ea.len() || j < eb.len() {
-                    let ord = match (ea.get(i), eb.get(j)) {
+                    let (xa, yb) = (ea.get(i), eb.get(j));
+                    let ord = match (xa, yb) {
                         (Some(x), Some(y)) => {
                             tree_cmp(&x.name, x.mode.is_tree(), &y.name, y.mode.is_tree())
                         }
@@ -486,7 +480,9 @@ impl Remote {
                     };
                     match ord {
                         std::cmp::Ordering::Equal => {
-                            let (x, y) = (&ea[i], &eb[j]);
+                            let (Some(x), Some(y)) = (xa, yb) else {
+                                break;
+                            };
                             i += 1;
                             j += 1;
                             if x.oid == y.oid && x.mode == y.mode {
@@ -517,7 +513,9 @@ impl Remote {
                             }
                         }
                         std::cmp::Ordering::Less => {
-                            let x = &ea[i];
+                            let Some(x) = xa else {
+                                break;
+                            };
                             i += 1;
                             if x.mode.is_tree() {
                                 stack.push((Some(x.oid), None));
@@ -526,7 +524,9 @@ impl Remote {
                             }
                         }
                         std::cmp::Ordering::Greater => {
-                            let y = &eb[j];
+                            let Some(y) = yb else {
+                                break;
+                            };
                             j += 1;
                             if y.mode.is_tree() {
                                 stack.push((None, Some(y.oid)));
@@ -559,7 +559,7 @@ impl Remote {
 /// git's tree entry ordering: names compared as if trees had a trailing '/'.
 fn tree_cmp(a: &[u8], a_tree: bool, b: &[u8], b_tree: bool) -> std::cmp::Ordering {
     let n = a.len().min(b.len());
-    match a[..n].cmp(&b[..n]) {
+    match a.get(..n).cmp(&b.get(..n)) {
         std::cmp::Ordering::Equal => {}
         o => return o,
     }

@@ -14,7 +14,7 @@ pub struct SourceRepo {
     _tmp: TempDir,
 }
 
-/// Owned cursor satisfying `AsyncRead + Unpin + Send + 'static` (ingest_pack
+/// Owned cursor satisfying `AsyncRead + Unpin + Send + 'static` (`ingest_pack`
 /// requires `'static`, so a borrowed `&[u8]` won't do).
 pub fn cursor(b: Vec<u8>) -> std::io::Cursor<Vec<u8>> {
     std::io::Cursor::new(b)
@@ -162,14 +162,13 @@ pub fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
         .current_dir(dir)
         .args(args)
         .output()
-        .unwrap_or_else(|e| panic!("git {:?}: {e}", args));
-    if !out.status.success() {
-        panic!(
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -249,7 +248,7 @@ pub fn extract_packfile(response: &[u8]) -> Vec<u8> {
                     } else {
                         &b[..]
                     };
-                    if line.strip_suffix(b"\n").map_or(false, |s| s == b"packfile") {
+                    if line.strip_suffix(b"\n").is_some_and(|s| s == b"packfile") {
                         in_packfile = true;
                     }
                     continue;
@@ -284,7 +283,7 @@ pub fn has_nak(response: &[u8]) -> bool {
 }
 
 /// Count object types in a pack file via `git verify-pack -v` in a fresh bare
-/// repo. Returns (num_blobs, num_commits, num_trees, num_tags).
+/// repo. Returns `(num_blobs, num_commits, num_trees, num_tags)`.
 pub fn pack_object_types(pack: &[u8]) -> (u64, u64, u64, u64) {
     let tmp = fresh_bare();
     // Write the pack and index it.

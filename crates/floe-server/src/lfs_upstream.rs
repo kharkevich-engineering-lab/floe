@@ -84,7 +84,9 @@ impl Upstream {
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
                 .build()
-                .expect("reqwest client"),
+                // Only fails when the TLS backend cannot initialise, where the
+                // default client fails the same way.
+                .unwrap_or_default(),
         }
     }
 
@@ -110,7 +112,7 @@ impl Upstream {
         match result {
             Ok(m) => m,
             Err(error) => {
-                tracing::warn!(%error, elapsed_ms = started.elapsed().as_millis() as u64, "lfs upstream batch failed; treating as absent");
+                tracing::warn!(%error, elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX), "lfs upstream batch failed; treating as absent");
                 HashMap::new()
             }
         }
@@ -156,16 +158,16 @@ impl Upstream {
             let Some(dl) = o.actions.and_then(|a| a.download) else {
                 continue;
             };
-            if !asked.contains_key(o.oid.as_str()) {
+            let Some(&asked_size) = asked.get(o.oid.as_str()) else {
                 continue;
-            }
+            };
             out.insert(
                 o.oid.clone(),
                 UpstreamObject {
                     size: if o.size > 0 {
                         o.size
                     } else {
-                        asked[o.oid.as_str()]
+                        asked_size
                     },
                     oid: o.oid,
                     href: dl.href,
@@ -211,6 +213,7 @@ impl Upstream {
     }
 
     /// The upstream token: the value of the environment variable `upstream.token_env` names.
+    #[allow(clippy::unused_async, reason = "awaited by callers in other modules (ops.rs)")]
     pub async fn secret(&self, env_name: &str) -> anyhow::Result<String> {
         let v = std::env::var(env_name).map_err(|_| {
             anyhow::anyhow!("upstream.token_env {env_name:?} is not set in this host's environment")

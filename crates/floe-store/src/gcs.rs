@@ -39,9 +39,9 @@ const LIST_PAGE_SIZE: i32 = 1000;
 /// Mid-stream resumes per bulk read before the error is surfaced.
 const BULK_RESUME_ATTEMPTS: u32 = 5;
 const META_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
-const READ_OPEN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+const READ_OPEN_DEADLINE: std::time::Duration = std::time::Duration::from_mins(1);
 /// Per chunk of a streaming body read (not the whole stream).
-const READ_CHUNK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+const READ_CHUNK_DEADLINE: std::time::Duration = std::time::Duration::from_mins(1);
 const PUT_MIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 /// Uploads get this many bytes per second on top of `PUT_MIN_DEADLINE` (1 MiB/s floor).
 const PUT_BYTES_PER_SEC: u64 = 1024 * 1024;
@@ -56,7 +56,7 @@ fn deadline_error(op: &str, key: &str, deadline: std::time::Duration) -> StoreEr
     tracing::warn!(
         op,
         key,
-        deadline_ms = deadline.as_millis() as u64,
+        deadline_ms = u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
         "gcs call exceeded deadline"
     );
     StoreError::retryable(anyhow::anyhow!(
@@ -65,7 +65,7 @@ fn deadline_error(op: &str, key: &str, deadline: std::time::Duration) -> StoreEr
 }
 
 /// Run a GCS call under `deadline`; the client error keeps its meaning through
-/// `map_error` (NotFound / PreconditionFailed / NotModified), a timeout becomes
+/// `map_error` (`NotFound` / `PreconditionFailed` / `NotModified`), a timeout becomes
 /// [`deadline_error`]. `retries` extra attempts are made only when the deadline
 /// fired (the call is idempotent for every caller that passes > 0).
 async fn call<T, F, Fut>(
@@ -92,16 +92,17 @@ where
                     op,
                     key,
                     attempt,
-                    deadline_ms = deadline.as_millis() as u64,
+                    deadline_ms = u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
                     "gcs call exceeded deadline, retrying"
                 );
                 attempt += 1;
                 let jitter = 100
-                    + (std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.subsec_nanos())
-                        .unwrap_or(0)
-                        % 400) as u64;
+                    + u64::from(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.subsec_nanos())
+                            % 400,
+                    );
                 tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
             }
         }
@@ -169,6 +170,7 @@ impl GcsStore {
     /// data (`Storage`) and control (`StorageControl`) clients, allowing
     /// emulator use.
     /// Set `telemetry.lock_wait_warn` for the bulk-permit WARN line (default 1 s).
+    #[must_use]
     pub fn with_permit_wait_warn(mut self, d: std::time::Duration) -> Self {
         self.permit_wait_warn = d;
         self
@@ -245,7 +247,11 @@ impl GcsStore {
         // bulk sat 455–472 s behind 32 stripes on the bulk semaphore while
         // info/refs waited for it).
         let name = key.rsplit('/').next().unwrap_or(key);
-        if name.ends_with(".pb") || name.ends_with(".json") {
+        // Exact (case-sensitive) suffix match on purpose: these are floe's own key names.
+        if name
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext == "pb" || ext == "json")
+        {
             return false;
         }
         key.contains("/wal/")
@@ -288,7 +294,10 @@ impl GcsStore {
             let permit = self.bulk_permits.clone().acquire_owned().await.ok();
             let queued = t.elapsed();
             if queued.as_millis() > 0 {
-                tracing::Span::current().record("queued_ms", queued.as_millis() as u64);
+                tracing::Span::current().record(
+                    "queued_ms",
+                    u64::try_from(queued.as_millis()).unwrap_or(u64::MAX),
+                );
             }
             metrics::histogram!("floe_store_bulk_queue_seconds").record(queued.as_secs_f64());
             if queued > std::time::Duration::ZERO {
@@ -299,13 +308,15 @@ impl GcsStore {
                 tracing::warn!(
                     lock = "gcs_bulk_permit",
                     key,
-                    wait_ms = queued.as_millis() as u64,
+                    wait_ms = u64::try_from(queued.as_millis()).unwrap_or(u64::MAX),
                     "lock wait"
                 );
             }
-            metrics::gauge!("floe_store_bulk_inflight")
-                .set((self.bulk_permits_total - self.bulk_permits.available_permits()) as f64);
-            (&self.bulk[i], permit)
+            #[allow(clippy::cast_precision_loss, reason = "metrics value; permit counts are small")]
+            let inflight = (self.bulk_permits_total - self.bulk_permits.available_permits()) as f64;
+            metrics::gauge!("floe_store_bulk_inflight").set(inflight);
+            // `i` is reduced modulo `bulk.len()`; fall back to the control-path client regardless.
+            (self.bulk.get(i).unwrap_or(&self.storage), permit)
         } else {
             (&self.storage, None)
         }
@@ -314,7 +325,7 @@ impl GcsStore {
     fn meta_from_object(obj: &google_cloud_storage::model::Object) -> ObjectMeta {
         ObjectMeta {
             key: obj.name.clone(),
-            size: obj.size as u64,
+            size: u64::try_from(obj.size).unwrap_or(0),
             version: gen_version(obj.generation),
         }
     }
@@ -364,16 +375,16 @@ impl BulkHttp {
         range: Option<std::ops::Range<u64>>,
         if_generation_match: Option<i64>,
     ) -> Result<(u64, Option<i64>, ByteStream)> {
-        let (size, generation, first) = self.open(key, range.clone(), if_generation_match).await?;
-        let end = range.as_ref().map(|r| r.end).unwrap_or(size);
-        let start = range.as_ref().map(|r| r.start).unwrap_or(0);
-        let this = self.clone();
-        let key_owned = key.to_owned();
         struct St {
             inner: ByteStream,
             pos: u64,
             attempts: u32,
         }
+        let (size, generation, first) = self.open(key, range.clone(), if_generation_match).await?;
+        let end = range.as_ref().map_or(size, |r| r.end);
+        let start = range.as_ref().map_or(0, |r| r.start);
+        let this = self.clone();
+        let key_owned = key.to_owned();
         let st = St {
             inner: first,
             pos: start,
@@ -446,7 +457,7 @@ impl BulkHttp {
     pub(crate) fn for_tests(endpoint: String, bucket: String) -> Self {
         BulkHttp {
             clients: vec![reqwest::Client::new()],
-            next: Default::default(),
+            next: std::sync::Arc::default(),
             creds: None,
             bucket,
             permits: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
@@ -489,7 +500,10 @@ impl BulkHttp {
                 .map(|g| format!("&ifGenerationMatch={g}"))
                 .unwrap_or_default()
         );
-        let mut req = self.clients[i].get(&url).headers(headers);
+        let Some(client) = self.clients.get(i) else {
+            return Err(StoreError::other(anyhow::anyhow!("no bulk http clients")));
+        };
+        let mut req = client.get(&url).headers(headers);
         if let Some(r) = &range {
             req = req.header(
                 reqwest::header::RANGE,
@@ -591,13 +605,12 @@ impl GcsStore {
                 let mut builder =
                     client.write_object(self.bucket_resource.clone(), key.to_owned(), b);
                 builder = apply_put_opts(builder, &opts);
-                builder.send_unbuffered().await
+                Box::pin(builder.send_unbuffered()).await
             }
             PutBody::File(path) => {
                 let small = tokio::fs::metadata(&path)
                     .await
-                    .map(|m| m.len() <= SINGLE_SHOT_PUT_LIMIT)
-                    .unwrap_or(false);
+                    .is_ok_and(|m| m.len() <= SINGLE_SHOT_PUT_LIMIT);
                 if small {
                     let bytes = tokio::fs::read(&path).await.map_err(StoreError::other)?;
                     let (client, _permit) = self.data_client(key, false).await;
@@ -607,7 +620,7 @@ impl GcsStore {
                         Bytes::from(bytes),
                     );
                     builder = apply_put_opts(builder, &opts);
-                    builder.send_unbuffered().await
+                    Box::pin(builder.send_unbuffered()).await
                 } else {
                     let stream = crate::util::file_stream(path, None, FILE_CHUNK_SIZE);
                     let source = StoreStreamSource {
@@ -617,16 +630,17 @@ impl GcsStore {
                     let mut builder =
                         client.write_object(self.bucket_resource.clone(), key.to_owned(), source);
                     builder = apply_put_opts(builder, &opts);
-                    builder.send_buffered().await
+                    Box::pin(builder.send_buffered()).await
                 }
             }
             PutBody::Stream { len, stream } if len <= SINGLE_SHOT_PUT_LIMIT => {
-                let bytes = crate::util::collect(stream, len as usize).await?;
+                // len <= SINGLE_SHOT_PUT_LIMIT; only a pre-allocation hint anyway.
+                let bytes = crate::util::collect(stream, usize::try_from(len).unwrap_or(0)).await?;
                 let (client, _permit) = self.data_client(key, false).await;
                 let mut builder =
                     client.write_object(self.bucket_resource.clone(), key.to_owned(), bytes);
                 builder = apply_put_opts(builder, &opts);
-                builder.send_unbuffered().await
+                Box::pin(builder.send_unbuffered()).await
             }
             PutBody::Stream { stream, .. } => {
                 let source = StoreStreamSource {
@@ -636,7 +650,7 @@ impl GcsStore {
                 let mut builder =
                     client.write_object(self.bucket_resource.clone(), key.to_owned(), source);
                 builder = apply_put_opts(builder, &opts);
-                builder.send_buffered().await
+                Box::pin(builder.send_buffered()).await
             }
         };
 
@@ -657,45 +671,39 @@ impl ObjectStore for GcsStore {
     async fn get(&self, key: &str, opts: GetOptions) -> Result<GetResult> {
         // if_none_match → metadata GET with if_generation_not_match.
         // 304 / FailedPrecondition = NotModified (cheap, no body download).
-        if let Some(v) = &opts.if_none_match {
-            // If the version can't be parsed as a GCS generation, it can never
-            // match the current generation → the object is always "changed"
-            // from the caller's perspective. Skip the precondition and return
-            // the object directly.
-            match parse_generation(v) {
-                Some(generation) => {
-                    let req = google_cloud_storage::model::GetObjectRequest::new()
-                        .set_bucket(self.bucket_resource.clone())
-                        .set_object(key.to_owned())
-                        .set_if_generation_not_match(generation);
+        // If the version can't be parsed as a GCS generation, it can never
+        // match the current generation → the object is always "changed"
+        // from the caller's perspective: skip the precondition and fall
+        // through to a direct read of the object.
+        if let Some(v) = &opts.if_none_match
+            && let Some(generation) = parse_generation(v)
+        {
+            let req = google_cloud_storage::model::GetObjectRequest::new()
+                .set_bucket(self.bucket_resource.clone())
+                .set_object(key.to_owned())
+                .set_if_generation_not_match(generation);
 
-                    let result = match call("get", key, META_DEADLINE, READ_RETRIES, || {
-                        self.control.get_object().with_request(req.clone()).send()
-                    })
-                    .await
-                    {
-                        Ok(obj) => {
-                            let meta = Self::meta_from_object(&obj);
-                            let body = self.read_object_body(key, opts.range.clone()).await?;
-                            Ok(GetResult::Object { meta, body })
-                        }
-                        Err(e) => {
-                            if e.is_not_modified() {
-                                Ok(GetResult::NotModified {
-                                    version: gen_version(generation),
-                                })
-                            } else {
-                                Err(e.into_store("get", key))
-                            }
-                        }
-                    };
-                    return result;
+            let result = match call("get", key, META_DEADLINE, READ_RETRIES, || {
+                self.control.get_object().with_request(req.clone()).send()
+            })
+            .await
+            {
+                Ok(obj) => {
+                    let meta = Self::meta_from_object(&obj);
+                    let body = self.read_object_body(key, opts.range.clone()).await?;
+                    Ok(GetResult::Object { meta, body })
                 }
-                None => {
-                    // Non-numeric version: can never match a GCS generation,
-                    // so the object is always "changed" → fall through to read.
+                Err(e) => {
+                    if e.is_not_modified() {
+                        Ok(GetResult::NotModified {
+                            version: gen_version(generation),
+                        })
+                    } else {
+                        Err(e.into_store("get", key))
+                    }
                 }
-            }
+            };
+            return result;
         }
 
         // Direct read (no if_none_match, or if_none_match with non-numeric
@@ -718,9 +726,7 @@ impl ObjectStore for GcsStore {
             let meta = ObjectMeta {
                 key: key.to_owned(),
                 size,
-                version: generation
-                    .map(gen_version)
-                    .unwrap_or_else(|| Version::new("")),
+                version: generation.map_or_else(|| Version::new(""), gen_version),
             };
             return Ok(GetResult::Object { meta, body });
         }
@@ -750,7 +756,7 @@ impl ObjectStore for GcsStore {
         let obj = resp.object();
         let meta = ObjectMeta {
             key: key.to_owned(),
-            size: obj.size as u64,
+            size: u64::try_from(obj.size).unwrap_or(0),
             version: gen_version(obj.generation),
         };
 
@@ -778,11 +784,11 @@ impl ObjectStore for GcsStore {
     async fn put(&self, key: &str, body: PutBody, opts: PutOptions) -> Result<ObjectMeta> {
         let size_hint = match &body {
             PutBody::Bytes(b) => b.len() as u64,
-            PutBody::File(p) => tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0),
+            PutBody::File(p) => tokio::fs::metadata(p).await.map_or(0, |m| m.len()),
             PutBody::Stream { len, .. } => *len,
         };
         let deadline = put_deadline(size_hint);
-        match tokio::time::timeout(deadline, self.put_inner(key, body, opts)).await {
+        match Box::pin(tokio::time::timeout(deadline, self.put_inner(key, body, opts))).await {
             Ok(r) => r,
             Err(_) => Err(deadline_error("put", key, deadline)),
         }
@@ -854,25 +860,20 @@ impl ObjectStore for GcsStore {
             .set_object(key.to_owned());
 
         if let Some(v) = &if_version {
-            match parse_generation(v) {
-                Some(generation) => {
-                    req = req.set_if_generation_match(generation);
+            let Some(generation) = parse_generation(v) else {
+                // Non-numeric version can never match a GCS generation.
+                // If the object exists → PreconditionFailed; else → NotFound.
+                if let Some(current) = self.current_generation(key).await {
+                    return Err(StoreError::PreconditionFailed {
+                        key: key.to_owned(),
+                        current: Some(current),
+                    });
                 }
-                None => {
-                    // Non-numeric version can never match a GCS generation.
-                    // If the object exists → PreconditionFailed; else → NotFound.
-                    if let Some(current) = self.current_generation(key).await {
-                        return Err(StoreError::PreconditionFailed {
-                            key: key.to_owned(),
-                            current: Some(current),
-                        });
-                    } else {
-                        return Err(StoreError::NotFound {
-                            key: key.to_owned(),
-                        });
-                    }
-                }
-            }
+                return Err(StoreError::NotFound {
+                    key: key.to_owned(),
+                });
+            };
+            req = req.set_if_generation_match(generation);
         }
 
         match call("delete", key, META_DEADLINE, 0, || {
@@ -906,7 +907,7 @@ impl ObjectStore for GcsStore {
         let control = self.control.clone();
         let bucket_resource = self.bucket_resource.clone();
         let prefix = prefix.to_owned();
-        let start_after = start_after.map(|s| s.to_owned());
+        let start_after = start_after.map(ToOwned::to_owned);
 
         tokio::spawn(async move {
             let mut page_token = String::new();
@@ -942,10 +943,10 @@ impl ObjectStore for GcsStore {
                 };
 
                 for obj in &resp.objects {
-                    if let Some(ref sa) = skip_key {
-                        if obj.name == *sa {
-                            continue;
-                        }
+                    if let Some(ref sa) = skip_key
+                        && obj.name == *sa
+                    {
+                        continue;
                     }
                     if tx.send(Ok(Self::meta_from_object(obj))).await.is_err() {
                         return; // consumer dropped
@@ -1007,7 +1008,7 @@ impl ObjectStore for GcsStore {
         let authorization = headers
             .get(http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+            .map(ToString::to_string);
         Some(crate::AccelTarget {
             url: format!(
                 "https://storage.googleapis.com/{}/{}",
@@ -1074,10 +1075,7 @@ fn unfold_response(
     let stream = futures::stream::unfold(
         (Some(resp), key, permit),
         |(mut resp, key, permit)| async move {
-            let r = match resp.as_mut() {
-                Some(r) => r,
-                None => return None,
-            };
+            let r = resp.as_mut()?;
             match tokio::time::timeout(READ_CHUNK_DEADLINE, r.next()).await {
                 Ok(Some(Ok(bytes))) => Some((Ok(bytes), (resp, key, permit))),
                 Ok(Some(Err(e))) => Some((Err(StoreError::other(e)), (resp, key, permit))),
@@ -1144,10 +1142,10 @@ where
 // ---- error mapping ----
 
 fn is_not_found(e: &google_cloud_storage::Error) -> bool {
-    if let Some(status) = e.status() {
-        if status.code == Code::NotFound {
-            return true;
-        }
+    if let Some(status) = e.status()
+        && status.code == Code::NotFound
+    {
+        return true;
     }
     if let Some(code) = e.http_status_code() {
         return code == 404;
@@ -1158,10 +1156,10 @@ fn is_not_found(e: &google_cloud_storage::Error) -> bool {
 /// 304 Not Modified: returned when `if_generation_not_match` fails
 /// (generation IS the same → object unchanged).
 fn is_not_modified(e: &google_cloud_storage::Error) -> bool {
-    if let Some(code) = e.http_status_code() {
-        if code == 304 {
-            return true;
-        }
+    if let Some(code) = e.http_status_code()
+        && code == 304
+    {
+        return true;
     }
     if let Some(status) = e.status() {
         // GCS returns 304 as FailedPrecondition for if_generation_not_match.
@@ -1171,10 +1169,10 @@ fn is_not_modified(e: &google_cloud_storage::Error) -> bool {
 }
 
 fn is_precondition_failed(e: &google_cloud_storage::Error) -> bool {
-    if let Some(status) = e.status() {
-        if status.code == Code::FailedPrecondition {
-            return true;
-        }
+    if let Some(status) = e.status()
+        && status.code == Code::FailedPrecondition
+    {
+        return true;
     }
     if let Some(code) = e.http_status_code() {
         // GCS JSON API sometimes returns 412 with Code::Unknown.
@@ -1223,7 +1221,7 @@ mod tests {
 
     #[test]
     fn gen_version_formats_decimal() {
-        assert_eq!(gen_version(1234567890).as_str(), "1234567890");
+        assert_eq!(gen_version(1_234_567_890).as_str(), "1234567890");
         assert_eq!(gen_version(0).as_str(), "0");
         assert_eq!(gen_version(-1).as_str(), "-1");
     }
@@ -1456,13 +1454,16 @@ mod tests {
 }
 
 fn urlencode(s: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len() + 8);
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
+                out.push(b as char);
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
         }
     }
     out
@@ -1534,14 +1535,13 @@ mod resume_tests {
                             .and_then(|v| v.to_str().ok())
                             .and_then(|v| v.strip_prefix("bytes="))
                             .and_then(|v| v.split_once('-'))
-                            .map(|(a, b)| {
+                            .map_or((0, d.len()), |(a, b)| {
                                 (a.parse::<usize>().unwrap(), b.parse::<usize>().unwrap() + 1)
-                            })
-                            .unwrap_or((0, d.len()));
+                            });
                         let body: Vec<u8> = d[start..end].to_vec();
                         let cut = n < 2;
                         let stream = futures::stream::iter(
-                            body.chunks(100).map(|c| c.to_vec()).collect::<Vec<_>>(),
+                            body.chunks(100).map(<[u8]>::to_vec).collect::<Vec<_>>(),
                         )
                         .enumerate()
                         .then(move |(i, c)| async move {

@@ -9,16 +9,15 @@ pub async fn collect(mut body: ByteStream, size_hint: usize) -> Result<Bytes> {
     let mut buf: Option<BytesMut> = None;
     while let Some(chunk) = body.next().await {
         let chunk = chunk?;
-        match (&mut first, &mut buf) {
-            (None, None) => first = Some(chunk),
-            (Some(_), None) => {
-                let f = first.take().unwrap();
-                let mut b = BytesMut::with_capacity(size_hint.max(f.len() + chunk.len()));
-                b.extend_from_slice(&f);
-                b.extend_from_slice(&chunk);
-                buf = Some(b);
-            }
-            (_, Some(b)) => b.extend_from_slice(&chunk),
+        if let Some(b) = buf.as_mut() {
+            b.extend_from_slice(&chunk);
+        } else if let Some(f) = first.take() {
+            let mut b = BytesMut::with_capacity(size_hint.max(f.len() + chunk.len()));
+            b.extend_from_slice(&f);
+            b.extend_from_slice(&chunk);
+            buf = Some(b);
+        } else {
+            first = Some(chunk);
         }
     }
     Ok(match (first, buf) {
@@ -40,9 +39,6 @@ pub fn file_stream(
     chunk: usize,
 ) -> ByteStream {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    return async_stream_file(path, range, chunk)
-        .map(|r| r.map_err(StoreError::other))
-        .boxed();
 
     fn async_stream_file(
         path: std::path::PathBuf,
@@ -63,10 +59,10 @@ pub fn file_stream(
                             Err(e) => return Some((Err(e), State::Done)),
                         },
                     };
-                    if start > 0 {
-                        if let Err(e) = f.seek(std::io::SeekFrom::Start(start)).await {
-                            return Some((Err(e), State::Done));
-                        }
+                    if start > 0
+                        && let Err(e) = f.seek(std::io::SeekFrom::Start(start)).await
+                    {
+                        return Some((Err(e), State::Done));
                     }
                     read_next(f, remaining, chunk).await
                 }
@@ -87,7 +83,9 @@ pub fn file_stream(
         if remaining == 0 {
             return None;
         }
-        let want = (chunk as u64).min(remaining) as usize;
+        // min(chunk, remaining) without a lossy cast: a remaining that does not fit
+        // in usize is larger than any chunk.
+        let want = usize::try_from(remaining).map_or(chunk, |r| r.min(chunk));
         let mut buf = BytesMut::with_capacity(want);
         // read_buf reads at most capacity; loop until we get `want` or EOF.
         while buf.len() < want {
@@ -123,6 +121,10 @@ pub fn file_stream(
         },
         Done,
     }
+
+    async_stream_file(path, range, chunk)
+        .map(|r| r.map_err(StoreError::other))
+        .boxed()
 }
 
 /// Exponential backoff with full jitter. `attempt` starts at 0.
@@ -134,7 +136,7 @@ pub fn backoff(
     use rand::Rng;
     let exp = base.saturating_mul(1u32 << attempt.min(16));
     let cap = exp.min(max);
-    let jitter = rand::rng().random_range(0..=cap.as_millis() as u64);
+    let jitter = rand::rng().random_range(0..=u64::try_from(cap.as_millis()).unwrap_or(u64::MAX));
     std::time::Duration::from_millis(jitter)
 }
 
@@ -213,12 +215,14 @@ pub async fn put_file_parallel(
                     .put(&pk, body, PutOptions::from(PutMode::Overwrite))
                     .await?;
                 let done = uploaded.fetch_add(len, std::sync::atomic::Ordering::Relaxed) + len;
+                #[allow(clippy::cast_precision_loss, reason = "log-only throughput figure")]
+                let mb_per_s = done as f64 / 1e6 / started.elapsed().as_secs_f64().max(0.001);
                 tracing::debug!(
                     key,
                     part = i,
                     done_bytes = done,
                     total_bytes = size,
-                    mb_per_s = done as f64 / 1e6 / started.elapsed().as_secs_f64().max(0.001),
+                    mb_per_s,
                     "part uploaded"
                 );
                 Ok::<(), StoreError>(())
@@ -249,12 +253,14 @@ pub async fn put_file_parallel(
         let _ = store.delete(&k, None).await;
     }
     if result.is_ok() {
+        #[allow(clippy::cast_precision_loss, reason = "log-only throughput figure")]
+        let mb_per_s = size as f64 / 1e6 / started.elapsed().as_secs_f64().max(0.001);
         tracing::info!(
             key,
             bytes = size,
             parts = part_keys.len(),
             secs = started.elapsed().as_secs_f64(),
-            mb_per_s = size as f64 / 1e6 / started.elapsed().as_secs_f64().max(0.001),
+            mb_per_s,
             "striped upload done"
         );
     }
@@ -264,13 +270,16 @@ pub async fn put_file_parallel(
 /// Percent-encode an object key for use in a URL path: slashes stay slashes (they are
 /// the key's own separators), every other byte outside the unreserved set is encoded.
 pub fn encode_path(key: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(key.len());
     for b in key.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char)
+                out.push(b as char);
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
         }
     }
     out

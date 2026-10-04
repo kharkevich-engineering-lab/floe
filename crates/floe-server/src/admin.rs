@@ -70,6 +70,7 @@ pub async fn list_repos(st: &AppState, headers: &HeaderMap) -> Result<Response, 
         .into_response())
 }
 
+#[allow(clippy::needless_pass_by_value, reason = "used as a `map_err` adapter")]
 fn auth_err(e: crate::auth::AuthError) -> ApiError {
     match e {
         crate::auth::AuthError::Invalid | crate::auth::AuthError::Unauthorized => {
@@ -81,6 +82,7 @@ fn auth_err(e: crate::auth::AuthError) -> ApiError {
         }
     }
 }
+#[allow(clippy::needless_pass_by_value, reason = "used as a `map_err` adapter")]
 fn wal_err(e: floe_wal::WalError) -> ApiError {
     match &e {
         floe_wal::WalError::NotFound => ApiError::NotFound(e.to_string()),

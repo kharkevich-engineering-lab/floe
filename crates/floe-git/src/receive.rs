@@ -18,6 +18,10 @@ use crate::{GitError, RefSnapshotData};
 
 /// Capabilities negotiated by the client in the first receive-pack command.
 #[derive(Debug, Default, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one flag per negotiated protocol capability"
+)]
 pub struct ReceiveCaps {
     pub report_status: bool,
     pub report_status_v2: bool,
@@ -63,9 +67,8 @@ impl<R: AsyncRead + Unpin> AsyncRead for PrefixedReader<R> {
         let this = self.get_mut();
         if !this.prefix.is_empty() {
             let n = this.prefix.len().min(buf.remaining());
-            for _ in 0..n {
-                buf.put_slice(&[this.prefix.pop_front().unwrap()]);
-            }
+            let chunk: Vec<u8> = this.prefix.drain(..n).collect();
+            buf.put_slice(&chunk);
             return std::task::Poll::Ready(Ok(()));
         }
         std::pin::Pin::new(&mut this.inner).poll_read(cx, buf)
@@ -100,7 +103,7 @@ pub async fn parse<R: AsyncRead + Unpin>(
         match pkt::read_pkt_line(&mut r).await? {
             Some(PktLine::Data(b)) if b.starts_with(b"shallow ") => {
                 caps.shallow
-                    .push(String::from_utf8_lossy(&b[8..]).trim().to_string());
+                    .push(String::from_utf8_lossy(b.get(8..).unwrap_or_default()).trim().to_string());
             }
             other => break other,
         }
@@ -115,7 +118,7 @@ pub async fn parse<R: AsyncRead + Unpin>(
             };
             return Ok((txn, caps, PrefixedReader::new(Vec::new(), r)));
         }
-        Some(PktLine::Delim) | Some(PktLine::ResponseEnd) => {
+        Some(PktLine::Delim | PktLine::ResponseEnd) => {
             return Err(GitError::Protocol(
                 "unexpected delim before commands".into(),
             ));
@@ -134,11 +137,10 @@ pub async fn parse<R: AsyncRead + Unpin>(
     loop {
         let line = pkt::read_pkt_line(&mut r).await?;
         match line {
-            None | Some(PktLine::Flush) => break,
-            Some(PktLine::Delim) | Some(PktLine::ResponseEnd) => break,
+            None | Some(PktLine::Flush | PktLine::Delim | PktLine::ResponseEnd) => break,
             Some(PktLine::Data(b)) if b.starts_with(b"shallow ") => {
                 caps.shallow
-                    .push(String::from_utf8_lossy(&b[8..]).trim().to_string());
+                    .push(String::from_utf8_lossy(b.get(8..).unwrap_or_default()).trim().to_string());
             }
             Some(PktLine::Data(b)) => {
                 let (update, _) = parse_command_line(&b)?;
@@ -152,8 +154,7 @@ pub async fn parse<R: AsyncRead + Unpin>(
         loop {
             let line = pkt::read_pkt_line(&mut r).await?;
             match line {
-                None | Some(PktLine::Flush) => break,
-                Some(PktLine::Delim) | Some(PktLine::ResponseEnd) => break,
+                None | Some(PktLine::Flush | PktLine::Delim | PktLine::ResponseEnd) => break,
                 Some(PktLine::Data(b)) => {
                     push_options.push(
                         String::from_utf8_lossy(&b)
@@ -175,9 +176,13 @@ pub async fn parse<R: AsyncRead + Unpin>(
 
 fn parse_command_line(b: &[u8]) -> Result<(floe_proto::v1::RefUpdate, String), GitError> {
     // First line: "<old> <new> <ref>\0<caps>". Subsequent lines have no caps.
-    let (cmd_bytes, caps_bytes) = match b.iter().position(|&c| c == 0) {
-        Some(idx) => (&b[..idx], &b[idx + 1..]),
-        None => (b, &b[..0]),
+    let (cmd_bytes, caps_bytes): (&[u8], &[u8]) = match b
+        .iter()
+        .position(|&c| c == 0)
+        .and_then(|idx| b.split_at_checked(idx))
+    {
+        Some((cmd, rest)) => (cmd, rest.get(1..).unwrap_or_default()),
+        None => (b, &[]),
     };
     let s = String::from_utf8_lossy(cmd_bytes);
     let s = s.trim_end_matches('\n');
@@ -203,7 +208,7 @@ fn parse_command_line(b: &[u8]) -> Result<(floe_proto::v1::RefUpdate, String), G
 }
 
 fn apply_caps(caps: &mut ReceiveCaps, s: &str) {
-    for tok in s.split(|c: char| c == ' ' || c == '\n') {
+    for tok in s.split([' ', '\n']) {
         let tok = tok.trim();
         if tok.is_empty() {
             continue;
@@ -216,11 +221,13 @@ fn apply_caps(caps: &mut ReceiveCaps, s: &str) {
             "quiet" => caps.quiet = true,
             "push-options" => caps.push_options = true,
             "ofs-delta" => caps.ofs_delta = true,
-            _ if tok.starts_with("agent=") => caps.agent = Some(tok[6..].to_string()),
-            _ if tok.starts_with("object-format=") => {
-                caps.object_format = Some(tok[14..].to_string())
+            _ => {
+                if let Some(v) = tok.strip_prefix("agent=") {
+                    caps.agent = Some(v.to_string());
+                } else if let Some(v) = tok.strip_prefix("object-format=") {
+                    caps.object_format = Some(v.to_string());
+                }
             }
-            _ => {}
         }
     }
 }
@@ -298,7 +305,7 @@ pub async fn report_status<W: AsyncWrite + Unpin>(
 
 /// Convenience: build a [`RefTransaction`] from a ref snapshot diff is not
 /// provided; callers construct transactions directly. This helper converts a
-/// [`RefSnapshotData`] into a transaction that creates all refs (old_oid =
+/// [`RefSnapshotData`] into a transaction that creates all refs (`old_oid` =
 /// zero), useful for materializing a checkpoint.
 pub fn txn_from_snapshot(snap: &RefSnapshotData) -> floe_proto::v1::RefTransaction {
     let mut updates: Vec<floe_proto::v1::RefUpdate> = snap

@@ -70,13 +70,15 @@ pub async fn run(cfg: &Arc<Config>) -> Result<()> {
     }
 
     // Graceful shutdown on SIGTERM / SIGINT.
-    let shutdown = async {
+    #[cfg(unix)]
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .map_err(|e| anyhow::anyhow!("install SIGTERM handler: {e}"))?;
+    #[cfg(unix)]
+    let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt())
+        .map_err(|e| anyhow::anyhow!("install SIGINT handler: {e}"))?;
+    let shutdown = async move {
         #[cfg(unix)]
         {
-            let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("install SIGTERM handler");
-            let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt())
-                .expect("install SIGINT handler");
             tokio::select! {
                 _ = sigterm.recv() => info!("received SIGTERM, shutting down"),
                 _ = sigint.recv() => info!("received SIGINT, shutting down"),
@@ -106,7 +108,7 @@ async fn compact_loop(registry: Arc<floe_wal::Registry>, cfg: Arc<Config>) {
         info!("compaction disabled by config, loop exiting");
         return;
     }
-    let interval = std::time::Duration::from_secs(60);
+    let interval = std::time::Duration::from_mins(1);
     loop {
         tokio::time::sleep(interval).await;
         if let Err(e) = run_compaction_pass(&registry, &cfg).await {
@@ -152,7 +154,7 @@ async fn bundle_loop(bundler: Arc<floe_bundle::Bundler>, cfg: Arc<Config>) {
         info!("bundles disabled by config, loop exiting");
         return;
     }
-    let interval = std::time::Duration::from_secs(60);
+    let interval = std::time::Duration::from_mins(1);
     loop {
         tokio::time::sleep(interval).await;
         let now = std::time::SystemTime::now();

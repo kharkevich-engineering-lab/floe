@@ -8,17 +8,28 @@
 //!   A. remainder: want tip, have base tip, `thin_pack = true` (prod's failing shape),
 //!   B. remainder, `thin_pack = false` (every delta whose base is outside the set re-encoded),
 //!   C. bounded zero-have: `--depth=1 --filter=blob:none` (CI's shape),
-//!   D. full zero-have (TreeContents expansion).
+//!   D. full zero-have (`TreeContents` expansion).
 //! Every output is indexed by stock git with `--strict` (ids recomputed from content), its object
 //! set compared to `git rev-list --objects` of the source, and the process's max RSS delta is
 //! bounded by a small multiple of the pack bytes.
 //!
 //! `cargo test -p floe-git --test upload_gix_scale` runs the ~30 k-object variant (< 60 s);
 //! `-- --ignored` runs the ~300 k-object one (`just test-slow`).
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 mod common;
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -28,16 +39,19 @@ mod cm {
     pub use super::common::*;
 }
 
+#[allow(unsafe_code, reason = "getrusage has no safe std wrapper")]
 fn max_rss_kb() -> u64 {
+    // SAFETY: `rusage` is a plain C struct of integers, for which all-zero bytes are a valid value.
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    // SAFETY: `ru` is a writable `rusage` that outlives the call.
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut ru) };
     // getrusage reports ru_maxrss in KB on Linux but in BYTES on macOS/BSD.
     // Without this, the memory-bound assertion reads 1024x high on macOS and
     // fails a passing result (a 16 MB delta shown as "16832 MB").
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    let kb = (ru.ru_maxrss as u64) / 1024;
+    let kb = u64::try_from(ru.ru_maxrss).unwrap_or(0) / 1024;
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    let kb = ru.ru_maxrss as u64;
+    let kb = u64::try_from(ru.ru_maxrss).unwrap_or(0);
     kb
 }
 
@@ -59,7 +73,7 @@ fn synth(commits: usize, files: usize, files_per_commit: usize, dirs: usize) -> 
     {
         let stdin = child.stdin.as_mut().unwrap();
         let mut w = std::io::BufWriter::with_capacity(1 << 20, stdin);
-        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
         let mut next = || {
             seed ^= seed << 13;
             seed ^= seed >> 7;
@@ -73,7 +87,7 @@ fn synth(commits: usize, files: usize, files_per_commit: usize, dirs: usize) -> 
                 let mut c = format!("file {f}\n");
                 let words = 200 + (next() % 6000) as usize;
                 for _ in 0..words {
-                    c.push_str(&format!("{:06x} ", next() & 0xffffff));
+                    let _ = write!(c, "{:06x} ", next() & 0x00ff_ffff);
                 }
                 c.push('\n');
                 c
@@ -94,12 +108,12 @@ fn synth(commits: usize, files: usize, files_per_commit: usize, dirs: usize) -> 
                 writeln!(w, "from :{}", c - 1).unwrap();
             }
             for _ in 0..files_per_commit {
-                let f = (next() as usize) % files;
+                let f = usize::try_from(next() % files as u64).unwrap();
                 // Mostly appends (small deltas), sometimes a rewrite (a new base in the chain).
                 if next() % 17 == 0 {
                     contents[f] = format!("file {f} rewritten at {c} {:016x}\n", next());
                 } else {
-                    contents[f].push_str(&format!("line {c} {:016x}\n", next()));
+                    let _ = writeln!(contents[f], "line {c} {:016x}", next());
                 }
                 let path = format!("d{}/s{}/f{f}.txt", f % dirs, (f / dirs) % 7);
                 writeln!(w, "M 100644 inline {path}").unwrap();
@@ -214,7 +228,7 @@ fn req(
     }
 }
 
-/// Entries of type REF_DELTA (7) in a v2 pack: walk the headers, skipping compressed data with a
+/// Entries of type `REF_DELTA` (7) in a v2 pack: walk the headers, skipping compressed data with a
 /// throwaway inflater. A self-contained pack written by pack-copy has none.
 fn count_ref_deltas(pack: &[u8]) -> usize {
     use std::io::Read;
@@ -249,7 +263,7 @@ fn count_ref_deltas(pack: &[u8]) -> usize {
         let mut d = flate2::read::ZlibDecoder::new(&pack[pos..]);
         let mut sink = Vec::new();
         d.read_to_end(&mut sink).unwrap();
-        pos += d.total_in() as usize;
+        pos += usize::try_from(d.total_in()).unwrap();
     }
     refs
 }
@@ -456,7 +470,7 @@ async fn run_shapes(commits: usize, files: usize, per_commit: usize, dirs: usize
                 took.as_secs_f64()
             );
             assert_eq!(
-                stats.objects as usize,
+                usize::try_from(stats.objects).unwrap(),
                 ids.len(),
                 "{name}: stats vs indexed entries"
             );
@@ -508,7 +522,7 @@ async fn gix_engine_packs_are_strict_valid_and_bounded_in_memory_30k() {
 
 /// ~300 k objects with long delta chains across two packs: `just test-slow`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore]
+#[ignore = "slow (~300k objects); run with `just test-slow`"]
 async fn gix_engine_packs_are_strict_valid_and_bounded_in_memory_300k() {
     run_shapes(12_000, 1_500, 10, 40, 10_000).await;
 }

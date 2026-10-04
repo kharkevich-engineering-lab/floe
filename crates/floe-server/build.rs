@@ -10,6 +10,7 @@ use std::path::Path;
 const PLACEHOLDER: &str = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>floe</title></head>\n\
 <body><p>floe web UI is not built in this binary. Run <code>just web-build</code> (vite via pnpm) and rebuild.</p></body></html>\n";
 
+#[allow(clippy::expect_used, reason = "a build script reports failure by panicking")]
 fn main() {
     let sha = build_sha();
     let version = release_version();

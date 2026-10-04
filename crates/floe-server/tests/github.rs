@@ -1,6 +1,16 @@
 //! The GitHub Enterprise Server facade (`docs/GITHUB.md`): auth stubs, the
 //! repository/commit/branch/ref reads, and a write through `github::write`
 //! that a real `git fetch` can see.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 mod harness;
 

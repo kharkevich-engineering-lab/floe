@@ -1,6 +1,16 @@
 //! Events (docs/EVENTS.md): the bridge publishes exactly what the WAL
 //! committed, from a durable cursor; the GCS-notification wake-up; the sweep;
 //! a sink failure keeps the cursor.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 mod harness;
 
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
@@ -14,7 +24,7 @@ type Captured = std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
 /// The webhook sink's target: records every event it receives (the bus as
 /// the test sees it).
 async fn webhook() -> (String, Captured) {
-    let captured: Captured = Default::default();
+    let captured = Captured::default();
     let app = axum::Router::new().route(
         "/events",
         axum::routing::post({
@@ -265,7 +275,7 @@ async fn bridge_sink_failure_keeps_the_cursor() -> TestResult {
 async fn bridge_replays_checkpointed_events_after_interrupted_first_delivery() -> TestResult {
     let entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-    let captured: Captured = Default::default();
+    let captured = Captured::default();
     let app = axum::Router::new().route(
         "/events",
         axum::routing::post({
