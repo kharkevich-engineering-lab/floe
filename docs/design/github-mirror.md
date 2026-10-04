@@ -7,7 +7,9 @@ crosses a work package is pinned here (§0.3); everything else is the implemente
 (`[workspace.lints]`, no `unwrap`/`expect`/`panic` in production code, clippy pedantic, tests next to the code).
 Where this document and the code disagree after landing, the code wins and this file gets a dated note.
 
-Status: **proposed** (2026-10-04). Decision numbers D48–D51 are reserved for it (§D.6).
+Status: **proposed** (2026-10-04; revised the same day after review). Decision numbers D48–D51 are reserved
+for it (§D.6). One item needs the owner's sign-off before §B starts: the name mapping
+`<prefix>-<owner>/<repo>` (§B.5, R1). Every other contract in §0.3 is frozen.
 
 ---
 
@@ -35,9 +37,9 @@ The MVP is three changes and some wiring:
   git transfer itself: **follow (§A) moves the bytes**. The mirror only decides *which* repositories follow
   *what*.
 - **§C `floe-catalog`**: an Iceberg writer for four audit tables (`repo_inventory`, `sync_runs`, `ref_events`,
-  `force_push_log`). It is fed by the events bridge's WAL reader (durable per-repo cursor) and by lossy
-  telemetry from the mirror and follow loops. It sits behind the `catalog` cargo feature, and a catalog outage
-  only adds catalog lag.
+  `force_push_log`). It is fed by its own WAL tail on the events host (the bridge's cursor machinery, but its
+  own loop, so it never slows the webhook) and by lossy telemetry from the mirror and follow loops. It sits
+  behind the `catalog` cargo feature, and a catalog outage only adds catalog lag.
 - **§D Wiring**: CLI, server loops, config, compose, README, AGENTS.md decisions.
 
 ### 0.2 Why this shape (principles check)
@@ -47,9 +49,13 @@ The MVP is three changes and some wiring:
   catalog and only history in the warehouse is lost; the WAL still has every ref event).
 - **II (manifest CAS is the only commit point)**: follow still publishes one PUSH entry per round; the archive
   ref and the rewrite are in **one** `RefTransaction`. The mirror creates repos by the existing manifest CAS
-  create and publishes settings via the existing SETTINGS entry. No new commit points.
+  create and publishes settings via the existing SETTINGS entry. No new commit points. One new bucket
+  object is overwritten without CAS, the disposable `mirror/github/http-cache.json`; it joins principle II's
+  `PutMode::Overwrite` list (§D.6). Every other new object (state, leases, cursors, `catalog/*.json`) is CAS'd.
+- **Scope (X, `GOAL.md` §4)**: upstream mirroring and derived audit tables are not in GOAL §4 today. §D.6
+  amends it in the same change, so the question "which line of GOAL §4 is this for?" has an answer.
 - **III (side effects are WAL readers)**: the catalog consumes the WAL through the bridge's cursor machinery
-  (D32/D46). The push-back seam (§E) is a WAL reader. Neither `follow.rs` nor the mirror makes an HTTP call
+  (D32/D46), in its own loop. The push-back seam (§E) is a WAL reader. Neither `follow.rs` nor the mirror makes an HTTP call
   *as a step of a write*; the only thing they hand the catalog is a lossy `try_send` of telemetry *after* the
   write finished (§C.6), the same as a metric.
 - **X (keep floe small)**: no new git transport (follow reuses `git fetch`), no new auth path, no database. The
@@ -60,12 +66,15 @@ The MVP is three changes and some wiring:
 | Contract | Producer | Consumer | Section |
 |---|---|---|---|
 | `[upstream]` keys `follow` (patterns), `on_rewrite`, `head`, `follow_interval`, `source`; host-only `token_env_by_host` | §A (floe-config) | §B writes them into settings | §A.1 |
+| `floe_config::refpattern::RefPatterns` (parse/matches/refspecs; in floe-config because floe-git already depends on it) | §A | floe-config validation, `floe_git::follow`, §B | §A.2 |
+| `LocalRepo::is_ancestor` returns `Err` on any exit code other than 0/1 | §A (floe-git) | follow classification | §A.4 |
 | Archive ref name `refs/archive/<unix-ts>/<original-ref>` | §A | §C `force_push_log`, humans | §A.3 |
 | Log entry meta `follow.archived` (format below) | §A | §C | §A.5 |
-| `floe_catalog::{Recorder, SyncRun, InventoryRecord}` (always compiled, no iceberg) | §C | §A (follow), §B (mirror) | §C.6 |
-| `floe_mirror::{Source, RemoteRepo, Target}` | §B | §D (server/CLI wiring) | §B.3, §B.7 |
-| `RepoHandle::publish_settings_if(toml, author, message, expected_revision)` | §B (small floe-wal addition) | §B | §B.7 |
-| `floe_store::coord::cas_update_json` | §B | §B, later the bridge | §B.6 |
+| `floe_catalog::{Recorder, SyncRun, InventoryRecord, parse_follow_archived}` (always compiled, no iceberg) | §C | §A (follow), §B (mirror), the server's catalog tail | §C.4, §C.6 |
+| `floe_mirror::{Source, RemoteRepo, Target, HttpCache}` | §B | §D (server/CLI wiring) | §B.3, §B.7 |
+| `RepoHandle::publish_settings_if(toml, author, message, expected_revision)` + `WalError::SettingsConflict { expected, actual }` | §B (small floe-wal addition) | §B | §B.7 |
+| `Registry::create` returns `WalError::AlreadyExists` for an already-cached handle too | §B (floe-wal) | §B `WalTarget::create`, `admin.rs` | §B.7 |
+| `floe_store::coord::cas_update_json`; `LeaseGuard::released_flag() -> Arc<AtomicBool>` | §B (floe-store) | §B, later the bridge | §B.6, §B.8 |
 
 Build order: §A and §C core types first (one small PR each). §B and the §C writer follow in parallel, and §D
 wires everything last. A package may stub another package's side of a contract in its tests.
@@ -89,7 +98,8 @@ pub struct UpstreamConfig {
     pub git: Option<String>,
     pub lfs: Option<String>,
     pub token_env: Option<String>,                 // host-only (unchanged)
-    /// Ref patterns kept equal to upstream's (§A.2). Empty = follow off.
+    /// Ref patterns kept equal to upstream's (§A.2). Empty = follow off; this is checked before, and
+    /// instead of, `RefPatterns::parse`, so `follow = []` is always valid (the mirror's freeze, §B.9).
     pub follow: Vec<String>,
     /// What follow does when upstream rewrites (non-fast-forward, or any tag move) or deletes a followed ref.
     pub on_rewrite: OnRewrite,                     // default Archive
@@ -125,21 +135,36 @@ pub enum OnRewrite {
 Changes in the same file:
 
 - `with_settings`: also refuse `upstream.token_env_by_host` in a settings document (same message shape as
-  `token_env`), and `public_toml`/effective view strips it. Validate `follow` with
-  `floe_git::follow::RefPatterns::parse` (§A.2) and `head` (must start with `refs/heads/`), so an invalid
-  pattern is a 400 at `PUT …/api/settings` and nothing is published.
+  `token_env`). Validate `follow`: an empty list is follow off and needs nothing more; a non-empty list goes
+  through `floe_config::refpattern::RefPatterns::parse` (§A.2). Validate `head` (must start with
+  `refs/heads/`). An invalid value is a 400 at `PUT …/api/settings` and nothing is published. This replaces
+  today's inline check (`r.starts_with("refs/") && !r.contains('*')`, lib.rs ~1485).
+- Redaction: `Config::public_settings_toml` (lib.rs ~890) removes `token_env_by_host` next to `token_env`, and
+  the flatten filter in `crates/floe-server/src/settings.rs` (~299, today `k.ends_with("token_env")`) becomes
+  `k.contains("token_env")`, so flattened keys like `upstream.token_env_by_host.github.com` never reach the
+  `fields` of `/api/settings/describe`. Test next to the existing `token_env` redaction test (lib.rs ~1957).
 - `Config::validate`: the same pattern validation for host-level `[upstream]`. `token_env_by_host` keys are
   bare hostnames (no scheme, no path), and values are non-empty.
-- **Derived default** (in `Config::load`, not `validate`): when `github_mirror.enabled` (§B.4) and
-  `token_env_by_host` has no entry for the mirror's git host, insert `host(github_mirror.git_url) →
-  github_mirror.token_env`. One token configuration then covers discovery, follow and LFS read-through.
+- **Derived default** (in `Config::load`, not `validate`): when `token_env_by_host` has no entry for
+  `host(github_mirror.git_url)`, insert `host(github_mirror.git_url) → github_mirror.token_env` if
+  **either** `github_mirror.enabled` **or** the variable `github_mirror.token_env` names is set in this
+  process's environment. The second clause covers serving-only hosts (LFS read-through runs in the serving
+  request path, not only on the maintainer), which do not run the mirror but share the fleet's `floe.toml`
+  (D45) and environment. A host without the variable stays unauthenticated for that host, as today. An operator
+  who wants something else sets `[upstream.token_env_by_host]` explicitly on every host.
 - `floe.example.toml` documents every new key (§D.3).
 
 Token resolution moves to one function, `floe_config::Config::upstream_token_env(&self, url: &str) ->
-Option<&str>`. `follow::token_for` and `lfs_upstream` (read-through) both call it. Today they each read
-`upstream.token_env`.
+Option<&str>`. Every call site that reads `cfg.upstream.token_env` today migrates to it, in the same change:
+`crates/floe-server/src/follow.rs` `token_for` (~490), `crates/floe-server/src/lfs.rs` (~109 and ~284, LFS
+read-through), and `crates/floe-server/src/ops.rs` (~330, the `repair` op). `grep -n 'upstream.token_env'
+crates/` must come back empty afterwards, except for the function itself.
 
-### A.2 Pattern syntax and matching (`crates/floe-git/src/follow.rs`, new `RefPatterns`)
+### A.2 Pattern syntax and matching (new `crates/floe-config/src/refpattern.rs`, `RefPatterns`)
+
+`RefPatterns` lives in floe-config, not floe-git: floe-git already depends on floe-config, and floe-config's
+validation needs the parser, so putting it in floe-git would be a crate cycle. It is pure string code with no
+git dependency. `floe_git::follow` uses it from there.
 
 The patterns are passed to `git fetch` verbatim as refspec sources, so they use **git refspec glob
 semantics**, not POLICY.md's doublestar dialect. A pattern has one consumer, and that consumer is git.
@@ -150,13 +175,14 @@ semantics**, not POLICY.md's doublestar dialect. A pattern has one consumer, and
 | glob | exactly one `*`, matching **any** characters **including `/`** (git refspec rule) | `refs/heads/*` matches `refs/heads/feat/x` |
 | negative | leading `^`, exact or glob; excludes (git ≥ 2.29 negative refspec) | `^refs/heads/dependabot/*` |
 
-Rules (`RefPatterns::parse(&[String]) -> Result<RefPatterns, GitError>`):
+Rules (`RefPatterns::parse(&[String]) -> Result<RefPatterns, RefPatternError>`; it is only called on a
+non-empty list, since an empty `follow` means follow off, §A.1):
 
 1. Every entry starts with `refs/` (after an optional `^`) and has at most one `*`. Each entry passes git's
    `check-ref-format --refspec-pattern` rules: no `..`, `@{`, `\`, control characters, space, `~^:?[`,
    trailing `/` or `.lock`. Implement the checks in Rust (cheap, no subprocess) and test them against git in
    one test.
-2. At least one positive entry.
+2. A non-empty list has at least one positive entry (`["^refs/heads/x"]` alone is an error).
 3. **Reserved namespaces are never followed**: `refs/archive/` and `refs/follow/`. An entry that starts with
    either is a parse error. `RefPatterns::matches` also returns false for any name under them, even when a
    positive pattern like `refs/*` would match. The fetch always appends `^refs/archive/*` and `^refs/follow/*`,
@@ -165,24 +191,33 @@ Rules (`RefPatterns::parse(&[String]) -> Result<RefPatterns, GitError>`):
 5. `refspecs()` → positive: `+<src>:refs/follow/<src minus "refs/">` (the `*` carries through), negative:
    `^<src>`. `is_exact()` reports entries without `*` (needed for the missing-ref fallback below).
 
+New `floe_git::follow::probe(upstream, token, patterns) -> Result<Probe, GitError>`: one `git ls-remote
+<upstream>` (no patterns on the command line: `ls-remote`'s own patterns are tail matches, not refspecs), whose
+output floe filters with `RefPatterns::matches`. `Probe { tips: HashMap<String, String>, advertised_any: bool }`;
+`advertised_any` is whether upstream advertised **any** ref at all, before filtering. It costs the same single
+`ls-refs` round trip the fetch's advertisement costs today, and it needs no objects and no scratch.
+
 `fetch_refs` changes signature: `refs: &[String]` becomes `patterns: &RefPatterns`, and `have` becomes "every
-WAL ref matching `patterns`". Behaviour changes:
+WAL ref matching `patterns`". It is only called when the probe saw a difference (§A.4). Behaviour changes:
 
 - **Scratch reset**: before the fetch, the scratch's `refs/follow/*` is made **exactly** `have` (delete every
   `refs/follow/*` not in `have`; `for-each-ref` + one `update-ref --stdin`). Today only the listed refs are
   reset. With globs the set changes from round to round.
 - **`--prune`** is added to the fetch so a ref upstream no longer advertises disappears from `refs/follow/*`.
   Then `read_scratch().tips` is exactly upstream's matching set, and a deletion is `have.keys() − tips.keys()`.
-- **Exact ref missing upstream**: git fails the whole fetch with `couldn't find remote ref <r>`. When stderr
-  says that, run one `git ls-remote <upstream> <exact refs…>`, drop the missing exact refs from the refspecs,
-  fetch again, and report them as absent (so they are deletions). This is the rare path; the common path stays
-  one `ls-refs` round trip when nothing moved.
-- The token still travels through the one-shot credential helper (never argv).
+- **Exact ref missing upstream**: git fails the whole fetch with `couldn't find remote ref <r>`. The probe
+  already lists what upstream has, so exact entries absent from `probe.tips` are left out of the refspecs
+  before the fetch and reported as absent (deletions). There is no retry path. If upstream deletes an exact
+  ref between the probe and the fetch, the fetch fails, and the next round re-probes.
+- The token still travels through the one-shot credential helper (never argv), for the probe as for the fetch.
 
 ### A.3 Archive ref naming
 
 `refs/archive/<unix-ts>/<original-ref>`, where `<original-ref>` is the **full** ref name and `<unix-ts>` is
-the follow op's start time in UTC seconds, taken once per op and shared by every archive in that op. Examples:
+taken once per op and shared by every archive in that op: `ts = max(now_utc_secs, newest_archive_ts + 1)`,
+where `newest_archive_ts` is the largest `<unix-ts>` among the repository's current `refs/archive/*` refs in
+the WAL snapshot the op planned from (0 when none). The timestamp is therefore strictly increasing per
+repository, and no archive name the op picks can exist in the state it planned against. Examples:
 
 ```
 refs/archive/1791072000/refs/heads/main          # main was force-pushed upstream
@@ -191,8 +226,13 @@ refs/archive/1791075600/refs/heads/feat/old-api  # branch deleted upstream
 ```
 
 - The archive ref is created with `old_oid = ""` (must not exist), so it can never overwrite an earlier
-  archive. A collision (two rewrites of one ref inside one second, which is only possible with a manual op)
-  fails that ref's update. The next round re-plans with a new timestamp.
+  archive. **A follow round is one atomic `RefTransaction`**: `publish.rs` verifies every update
+  (`verify_txn`) and appends the entry only when all of them pass (`all_ok`); WAL application is always atomic
+  (wal.proto). A name that does exist anyway (another writer published between the op's snapshot and its CAS:
+  a second maintainer, R16, or a human push of that exact name) therefore rejects the **whole round**, with
+  every other ref's update. Nothing is published, the op reports `refused` with the conflicting ref, and the
+  next round re-plans from the new snapshot with a new timestamp. The same holds for any other ref that moved
+  under the round.
 - Archive refs are ordinary refs: they keep objects reachable for `fsck`/`repair`/compaction, they are
   advertised by `ls-refs`, and `git fetch origin 'refs/archive/*:refs/archive/*'` retrieves them. Follow never
   deletes or moves them.
@@ -208,11 +248,15 @@ Split `crates/floe-server/src/follow.rs` into `follow/mod.rs` (loop, op, statuse
 // follow/plan.rs
 pub(crate) struct Observed<'a> {
     pub have: &'a HashMap<String, String>,   // WAL refs matching the patterns
-    pub tips: &'a HashMap<String, String>,   // upstream refs matching the patterns (post --prune)
+    pub tips: &'a HashMap<String, String>,   // upstream refs matching the patterns (probe, then post --prune)
+    pub advertised_any: bool,                // upstream advertised at least one ref of any name (Probe)
 }
 pub(crate) enum Change { Create { name, new }, Update { name, old, new }, Delete { name, old } }
-/// Diff; never emits a no-op. Empty `tips` with non-empty `have` yields no Delete (the empty-advertisement
-/// guard: an upstream that suddenly advertises nothing is a misconfiguration or an outage, not a mass delete).
+/// Diff; never emits a no-op. When `advertised_any` is false (upstream advertised **no refs at all**), it
+/// yields no Delete: the empty-advertisement guard. An upstream that suddenly has nothing is a
+/// misconfiguration, an outage or a wiped repository, not a mass delete. The guard is about the whole
+/// advertisement, not the matching set: `follow = ["refs/heads/main"]` with `main` deleted upstream, or
+/// `["refs/tags/*"]` with the last tag deleted, is an ordinary deletion and is archived and applied.
 pub(crate) fn diff(o: Observed<'_>) -> (Vec<Change>, Option<String /* guard notice */>);
 
 pub(crate) enum Kind { FastForward, Rewrite }   // decided by the op (async ancestry), fed back in
@@ -225,14 +269,24 @@ pub(crate) struct Archived { pub archive_ref: String, pub original: String, pub 
 pub(crate) fn build(changes: Vec<(Change, Kind)>, policy: OnRewrite, ts: u64, head: Option<HeadMove>) -> Plan;
 ```
 
-Classification, done in the op before `build`, under the existing read guard:
+Classification is done in the op **after `ingest_pack`** and before `build`, under the existing read guard,
+as `follow.rs` already orders it today (`is_ancestor` runs only once the fetched objects are in the serving
+copy). Before ingest, the new commit is not in the serving copy, and an ancestry check there would misreport
+every fast-forward.
 
 | Change | Kind |
 |---|---|
 | Create | FastForward (nothing to lose) |
 | Update under `refs/tags/` | **Rewrite**, always (POLICY.md: "a tag retarget is `force-push`") |
-| Update elsewhere | `is_ancestor(old, new)`: true ⇒ FastForward; false **or error** (non-commit objects) ⇒ Rewrite |
+| Update elsewhere | `is_ancestor(old, new)`: `Ok(true)` ⇒ FastForward; `Ok(false)` ⇒ Rewrite; `Err` ⇒ the round fails (nothing published, `failed` outcome) |
 | Delete | Rewrite |
+
+`LocalRepo::is_ancestor` (floe-git lib.rs ~1906) changes in the same PR: today it is
+`Ok(out.status.success())`, so `merge-base --is-ancestor` exiting 128 (a missing object, or `old`/`new` not a
+commit) reads as "not an ancestor". New contract: exit 0 ⇒ `Ok(true)`, exit 1 ⇒ `Ok(false)`, anything else ⇒
+`Err(GitError)` with stderr. A missing object must fail the round, never archive. A branch pointed at a
+non-commit object upstream (rare, legal) then fails every round with a clear message instead of archiving every
+round; R17 covers it.
 
 `build` with `Archive`: FastForward ⇒ one `RefUpdate{name, old, new}`. A rewritten update ⇒ two updates,
 `RefUpdate{archive_ref, "", old}` + `RefUpdate{name, old, new}`. A delete ⇒ `RefUpdate{archive_ref, "", old}` +
@@ -246,18 +300,32 @@ symbolic updates.
 
 Changes in `follow/mod.rs`:
 
-- `run_pass`: replace `cfg.upstream.follow.is_empty()` with `RefPatterns::parse` (a parse error is a `warn!`
-  and skip; it cannot normally happen, because settings are validated at publish). Skip the repository when
-  `upstream.follow_interval` is set and the last round's `Instant` (new field on `FollowStatus`, not
-  serialized) is younger. `moved` becomes `!diff(..).0.is_empty() || head differs`.
+- `run_pass` becomes **refs-first**: `sync_refs()` only (the settings ride on the manifest), skip when
+  `follow` is empty, `RefPatterns::parse` (a parse error is a `warn!` and skip; it cannot normally happen,
+  because settings are validated at publish). Skip the repository when `upstream.follow_interval` is set and
+  the last round's `Instant` (new field on `FollowStatus`, not serialized) is younger. Then `probe` and
+  `diff(have, probe.tips, probe.advertised_any)`. Nothing differs and HEAD needs no move ⇒ `in-sync`, done:
+  **no `sync()`, no `packs_fit()`, no fetch, no scratch**. Today every round does a Serve-level `sync()`
+  first, which re-downloads the pack set of every repository the LRU evicted; at mirror scale (thousands of
+  small repositories on a 20 GiB budget) that is a constant re-materialization for rounds that find nothing.
+  Only when something differs does the loop check `packs_fit()` and start the op.
+- **The loop no longer fetches** (`prefetched=1` and the loop-side `fetch_refs` call go away). It starts the
+  op through the same `(repo, "follow")` task lock a nudge (§B.8) or a manual op uses, so exactly one fetch
+  touches `cache.dir/follow/<o>/<n>.git` at a time. Today the loop's prefetch runs outside any task lock and
+  can race a manual op on the scratch (`fetch_refs` deletes `objects/pack/*` and rewrites `refs/follow/*`);
+  mirror nudges would make that race routine. The scratch is touched only inside the `follow` op.
 - `current(handle, refs)` → `current_matching(handle, &patterns)`: every snapshot ref with
   `patterns.matches(name)`.
-- `op`: `let ts = unix_now_secs();`, diff → classify → `build` → connectivity over the non-delete new oids
-  (archive refs point at objects already held) → `fill_peeled` → one `publish_push`. `per_ref` results are
-  reported as today. An archive ref that lost (moved under us) makes its paired apply lose too, because the
-  transaction is per-ref in the WAL's eyes. **The op therefore checks `per_ref`. If an archive ref failed
-  while its paired apply succeeded, it logs `error!` and records `refused`.** That cannot happen with
-  `old_oid=""` on a fresh name unless someone pushed that exact archive name; the test below pins it.
+- `op`, in this order: `sync()` (Serve) under the read guard → `current_matching` → `fetch_refs` (exact refs
+  absent from a fresh probe dropped, §A.2) → `diff` → `ingest_pack` (as today) → classify (`is_ancestor` on the
+  serving copy, which now holds the fetched objects) → `ts` (§A.3) → `build` → connectivity over the
+  non-delete new oids (archive refs point at objects already held) → `fill_peeled` → one `publish_push`.
+- The round is atomic (§A.3): `publish_push` either appends every update in the plan or none. `per_ref` is
+  still reported as today, so a rejected round names the ref that moved. There is no partial outcome to
+  handle: an archive ref cannot fail while its paired apply succeeds. A rejected round records `refused`, and
+  the next round re-plans. With wide globs, one contended ref holds back every ref of that repository until the
+  contention ends; that is the price of "the archive and the rewrite are one entry", and the contention only
+  exists with two writers (R16).
 - `FollowStatus` gains `archived: Vec<String>` (human lines), and `outcome` gains `"archived"` (published with
   at least one archive). The Settings tab shows it as it shows the other outcomes.
 - `token_for` uses `cfg.upstream_token_env(upstream)` (§A.1).
@@ -283,23 +351,32 @@ Changes in `follow/mod.rs`:
   reserved for this.
 - Bundles: `refs/archive/*` is never in `main_only` bundles. Full bundles that take every ref take them too,
   which is fine.
-- `docs/ROUNDTRIPS.md`: no change on the bucket side (still one log PUT + one manifest CAS). Upstream side: +1
-  `ls-remote` only on the missing-exact-ref path. Add the row anyway.
+- `docs/ROUNDTRIPS.md`: a publishing round is unchanged on the bucket side (one log PUT + one manifest CAS).
+  A round that finds nothing gets **cheaper**: refs-level sync only, no Serve-level `sync()` (§A.4). Upstream
+  side: one `ls-refs` (the probe) per round as today, plus the fetch's own advertisement when something moved
+  (§D.7).
 
 ### A.6 Tests (§A)
 
+`floe-config` unit tests (`refpattern.rs`): `ref_patterns_parse_and_match` (table test: exact/glob/negative,
+`refs/*` never matches `refs/archive/x`, invalid forms rejected, negative-only list rejected);
+`with_settings_accepts_empty_follow` (`follow = []` publishes, the freeze of §B.9); redaction of
+`token_env_by_host` in `public_settings_toml`.
+
 `floe-git` unit tests (`follow.rs` `#[cfg(test)]`, real git, `file://` upstream in a tempdir):
 
-- `ref_patterns_parse_and_match` (table test: exact/glob/negative, `refs/*` never matches `refs/archive/x`,
-  invalid forms rejected, agreement with `git check-ref-format --refspec-pattern` on a corpus).
+- `ref_patterns_agree_with_git` (the parser against `git check-ref-format --refspec-pattern` on a corpus).
+- `probe_reports_matching_tips_and_advertised_any` (an upstream with no refs ⇒ `advertised_any = false`).
 - `fetch_with_globs_reports_new_and_pruned_refs` (branch created and branch deleted upstream between two
   rounds → `tips` reflects both).
-- `fetch_with_missing_exact_ref_falls_back_to_ls_remote`.
+- `fetch_skips_exact_refs_the_probe_did_not_see`.
 - `negative_refspec_excludes`.
+- `is_ancestor_errors_on_missing_object` (exit 128 ⇒ `Err`, not `Ok(false)`).
 
-`floe-server` unit tests (`follow/plan.rs`): `diff` cases, the empty-advertisement guard, `build` with both
-policies, tag-move-is-rewrite, archive-and-delete pairing, HEAD move only when its target exists, ordering
-determinism of `follow.archived`.
+`floe-server` unit tests (`follow/plan.rs`): `diff` cases, the empty-advertisement guard (only when
+`advertised_any = false`), `single_exact_ref_deleted_upstream_is_a_delete`, `last_tag_deleted_is_a_delete`,
+`build` with both policies, tag-move-is-rewrite, archive-and-delete pairing, archive `ts` above the newest
+existing archive, HEAD move only when its target exists, ordering determinism of `follow.archived`.
 
 `crates/floe-server/tests/follow.rs` (extends the existing two-instance test, which uses a second floe as the
 upstream):
@@ -309,9 +386,14 @@ upstream):
    `main = new`, `meta["follow.archived"]` correct, `old` still reachable (`git cat-file -e`).
 3. `upstream_delete_is_archived_then_deleted`.
 4. `on_rewrite_refuse_keeps_d33_behaviour` (the existing assertion moves here).
-5. `empty_advertisement_never_deletes`.
+5. `empty_advertisement_never_deletes` (upstream with zero refs).
 6. `moved_tag_is_archived`.
 7. `own_repo_without_follow_is_untouched` (requirement 3).
+8. `fast_forward_is_not_archived` (classification after ingest).
+9. `round_with_a_moved_ref_publishes_nothing` (a concurrent writer moves one followed ref between plan and
+   publish ⇒ no entry, `refused`, next round converges).
+10. `in_sync_round_does_no_serve_sync` (assert on store op counts: no pack GETs after eviction).
+11. `nudge_during_loop_round_joins_one_follow_task`.
 
 `tests/events.rs`: one golden test that a rewrite yields `create(refs/archive/…)` + `update` with the same seq.
 
@@ -338,8 +420,9 @@ crates/floe-mirror/
                       #       reqwest, serde, serde_json, chrono, async-trait, tokio, tracing, metrics, anyhow, thiserror
   src/lib.rs          # pub use; run_loop(); reconcile_once()
   src/source.rs       # Source trait, RemoteRepo, Discovery, Lookup, SourceError
+  src/http_cache.rs   # forge-neutral conditional-GET cache (HttpCache: url → {etag, next, body})
   src/github/mod.rs   # GithubSource: Source
-  src/github/http.rs  # conditional GET, pagination (Link), rate limit, Retry-After; HttpCache
+  src/github/http.rs  # GitHub's REST client: headers, pagination (Link), rate limits, Retry-After
   src/github/model.rs # serde structs for the REST payloads we read (only the fields we use)
   src/naming.rs       # RemoteRepo → RepoId mapping, collision suffix
   src/select.rs       # include/exclude/skip rules (pure)
@@ -387,6 +470,8 @@ pub struct RemoteRepo {
     pub size_kb: u64,
     pub has_wiki: bool,
 }
+/// Interpreted per forge: `orgs` are GitLab groups or Gitea organisations; a forge without stars ignores
+/// `starred`. The fields are the union, not a GitHub schema.
 pub struct Selection { pub users: Vec<String>, pub orgs: Vec<String>, pub starred: Vec<String>, pub repos: Vec<String> }
 pub struct Discovery { pub repos: Vec<RemoteRepo>, pub complete: bool, pub stats: ApiStats }
 pub enum Lookup { Found(RemoteRepo), Gone /* 404 */, Forbidden /* 401/403 non-rate-limit */ }
@@ -394,6 +479,12 @@ pub struct ApiStats { pub requests: u32, pub not_modified: u32, pub rate_remaini
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError { Unauthorized, RateLimited { until: SystemTime }, Http(String), Decode(String) }
 ```
+
+Nothing in the trait or in `plan.rs`/`apply.rs`/`state.rs` names GitHub. Everything per-forge is keyed by
+`Source::kind()`: the state object `mirror/<kind>/state.json`, the cache `mirror/<kind>/http-cache.json`, the
+lease `leases/mirror-<kind>.pb`, the `upstream.source` prefix and the metric label. For the MVP, `<kind>` is
+`github` everywhere, so the paths below read `mirror/github/…`. Only the config section is per forge
+(`[github_mirror]`; a later `[gitlab_mirror]` maps onto the same `Selection`).
 
 ### B.4 Config: `[github_mirror]` (`floe-config`, new `GithubMirrorConfig`)
 
@@ -411,33 +502,62 @@ a settings section (D24) because it is not per repository.
 | `users` | `[]` | Owners whose repositories are mirrored. `"@me"` = the token's user, private included. |
 | `orgs` | `[]` | Organisations (all types; private when the token can see them). |
 | `starred` | `[]` | Users whose stars are mirrored (`"@me"` allowed). |
-| `repos` | `[]` | Explicit `"owner/name"`. Always included, even if archived/fork. Still subject to `exclude`. |
-| `include` | `["*"]` | Globs over `owner/name` (case-insensitive). `*` stops at `/`; `owner/*` and `*/name` both work. |
-| `exclude` | `[]` | Globs; exclude wins. |
+| `repos` | `[]` | Explicit `"owner/name"`. Evaluation order below. |
+| `include` | `["*/*"]` | Globs over `owner/name` (case-insensitive). `*` stops at `/`, so every pattern has exactly one `/`: `*/*` (everything), `owner/*`, `*/name`. A pattern without `/` is a `validate` error, not a silent match-nothing. |
+| `exclude` | `[]` | Globs, same syntax. Exclude wins over everything, explicit `repos` included. |
 | `skip_archived` | `true` | Do not *start* mirroring archived repositories (already mirrored ones are kept, §B.9). |
 | `skip_forks` | `true` | Same for forks. |
-| `include_private` | `true` | `false` = public only. |
+| `include_private` | `true` | `false` = public only. `true` is refused by `validate` on a host where floe readers are not all trusted with every mirrored repository, unless `private_visible_to_all_readers = true` (below; R2). |
+| `private_visible_to_all_readers` | `false` | The operator's explicit acknowledgement that floe has no per-repository read ACL, so every principal with read on this floe can read every mirrored private repository. Required when `include_private = true` and `server.auth.mode` is not `none` (`none` is loopback-only already, §1.3). |
 | `wikis` | `false` | Also mirror `<repo>.wiki.git` as `<prefix>-<owner>/<name>.wiki` (§B.10). |
 | `lfs` | `true` | Write `upstream.lfs` so LFS objects read through (`docs/LFS.md`). |
 | `follow` | `["refs/heads/*", "refs/tags/*"]` | Patterns written into each repository's `upstream.follow`. |
 | `on_rewrite` | `"archive"` | Written into `upstream.on_rewrite`. |
 | `follow_interval` | `"10m"` | Written into `upstream.follow_interval` (backstop; pushes are nudged, §B.8). |
 | `read_only` | `true` | Publish a deny-all `policy.json` at creation, so only follow (which bypasses policy, D33) moves refs. |
-| `max_repo_size` | `"2GiB"` | Repositories larger than this by GitHub `size` are `too-large`: listed in state and logged with the `floe import` recipe, never auto-created. `0` = no limit. |
+| `max_repo_size` | `"2GiB"` | Repositories larger than this by GitHub `size` are `too-large`: listed in state and logged with the `floe import` recipe (§B.7.1, handoff), never auto-created. Applies to explicit `repos` too. `0` = no limit. |
 | `max_new_per_pass` | `20` | Bound on creations per pass (a 2,000-repository org arrives over several passes, and follow is not flooded). |
 | `min_rate_remaining` | `200` | Stop a pass (incomplete) when `x-ratelimit-remaining` drops below this. |
 | `gone_after` | `"24h"` | A repository must be missing/404 for this long (several passes) before it is marked `gone`. |
 | `lease_ttl` | `"2m"` | TTL of `leases/mirror-github.pb`; heartbeat every `lease_ttl / 3`. |
 
-`Config::validate`: `enabled` ⇒ `has_role(Maintain)`; `prefix` charset; globs well-formed; `api_url`/`git_url`
-are http(s); `follow` parses (§A.2). `maintenance.follow_interval > 0` gets a **warning** when the mirror is
-enabled, because it cannot tell whether another host follows the repositories.
+`Config::validate`: `enabled` ⇒ `has_role(Maintain)`; `prefix` charset; globs well-formed (exactly one `/`);
+`api_url`/`git_url` are http(s); `follow` is non-empty and parses (§A.2); the `include_private` rule above.
+`maintenance.follow_interval == 0` (follow off on this host) gets a **warning** when the mirror is enabled:
+nudges still run follow ops here, but no backstop round ever runs, and the mirror cannot tell whether another
+host follows the repositories. The default (30 s) is what the mirror needs and is silent.
+
+**Selection, in evaluation order** (`select.rs`, pure; the first rule that decides wins). A candidate carries
+where it came from: `explicit` (in `repos`), or `listed` (from `users`, `orgs` or `starred`). A repository that
+is both is `explicit`.
+
+1. `exclude` matches ⇒ out.
+2. `private` and not `include_private` ⇒ out (explicit too: the flag is a safety rule, not a filter).
+3. Not explicit, and (`archived` ∧ `skip_archived`, or `fork` ∧ `skip_forks`) ⇒ out. This applies to starred
+   repositories as to any listed one; explicit `repos` bypass the skips.
+4. Not explicit, and no `include` glob matches ⇒ out. Explicit `repos` bypass `include`.
+5. `max_repo_size` exceeded ⇒ `too-large` (selected, never auto-created).
+6. Otherwise selected.
+
+| candidate | exclude | private / include_private=false | archived or fork (skip=true) | include no match | result |
+|---|---|---|---|---|---|
+| explicit | yes | – | – | – | out |
+| explicit | no | yes | – | – | out |
+| explicit | no | no | yes | yes | **in** |
+| listed (owner/org) | no | no | yes | – | out |
+| listed (starred) | no | no | fork | – | out |
+| listed (any) | no | no | no | yes | out |
+| listed (any) | no | no | no | no | **in** |
+
+`select.rs` tests this table row for row, plus the default config (`include = ["*/*"]`, `users = ["@me"]`
+selects every non-archived, non-fork repository the token owns).
 
 ### B.5 Naming: GitHub → floe `RepoId`
 
-The requirement says `<prefix>/<owner>/<repo>`. floe identity is exactly two segments, `<owner>/<repo>` (D5,
-`RepoId`), and routing is by those two segments (D26). A third segment would change both, so the mirror maps
-**`gh/acme/widgets` → `gh-acme/widgets`**:
+**Pending the owner's sign-off** (R1). The requirement says `<prefix>/<owner>/<repo>`. floe identity is
+exactly two segments, `<owner>/<repo>` (D5, `RepoId`), and routing is by those two segments (D26). A third
+segment would change both, so this document proposes **`gh/acme/widgets` → `gh-acme/widgets`**. Only
+`naming.rs` encodes it, so the rest of §B does not wait for the answer:
 
 - `owner = format!("{prefix}-{gh_owner}")`, lowercased (GitHub names are case-insensitive, so lowercase is
   lossless for identity). GitHub owners are `[A-Za-z0-9-]{1,39}`, so a fixed prefix plus `-` is unambiguous.
@@ -448,8 +568,14 @@ The requirement says `<prefix>/<owner>/<repo>`. floe identity is exactly two seg
   two GitHub repositories map to one name): use `<name>--<id>`. If that also exists and is not ours, the state
   entry is `conflict` and the mapping is skipped with a `warn!`. The mapping is computed **once, at creation**,
   and stored in state. A rename never changes it (§B.9).
+- **Length**: `RepoId` parts are 1..=100 characters (`validate_part`, floe-git lib.rs ~177). The owner is at
+  most 16 + 1 + 39 = 56, always valid. A GitHub name can be 100 characters, so `<name>.wiki` (≤ 105) and
+  `<name>--<id>` (≤ ~112) can overflow. Rule: when a mapped name exceeds 100, cut the base name so that the
+  result with its suffix is exactly 100 (`<name[..k]>--<id>`, with `.wiki` after it for a wiki). The id makes
+  the cut name unique. A name `RepoId::new` still rejects is `conflict` with the error as `last_error`.
 
-`naming.rs` is pure, and it is table-tested, including `RepoId::new` acceptance of every output.
+`naming.rs` is pure, and it is table-tested, including `RepoId::new` acceptance of every output, a
+100-character GitHub name, its wiki, and its collision form.
 
 ### B.6 State in the bucket
 
@@ -476,7 +602,7 @@ Two root-level objects (not under `repos/`, so `Registry::list` never sees them;
       "default_branch": "main",
       "pushed_at": "2026-10-04T11:58:01Z",
       "size_kb": 5120,
-      "first_seen": "…", "last_seen": "…", "missing_since": null,
+      "first_seen": "…", "last_seen": "…", "missing_since": null, "last_lookup": null,
       "settings_sha": "<sha256 of the [upstream] table the mirror last published>",
       "settings_revision": 3,
       "last_error": null
@@ -486,17 +612,32 @@ Two root-level objects (not under `repos/`, so `Registry::list` never sees them;
 ```
 
 `status` ∈ `active` | `too-large` | `excluded` (no longer selected; frozen) | `gone` (404 for `gone_after`;
-frozen) | `forbidden` | `conflict` | `detached` (a human edited `[upstream]`, §B.7) | `error`.
+frozen) | `forbidden` | `conflict` | `detached` (a human edited `[upstream]`, §B.7) | `error`. No status is
+terminal: §B.9 lists the way back out of each.
 
-**`mirror/github/http-cache.json`**: `{ "<url>": { "etag": "…", "body": <projected JSON> } }`, only the
-fields of `model.rs`. This is a **cache**: losing it costs rate limit, nothing else (principle I). It is
-overwritten without CAS at the end of a pass.
+**Absence bookkeeping** (`missing_since`, `last_lookup`):
+
+- `missing_since` is set to the pass's start on the **first complete discovery** that lacks the id, whether
+  or not the id is looked up in that pass, and cleared as soon as any discovery or lookup finds it selected
+  again. An incomplete discovery neither sets nor clears it.
+- Lookups are bounded to 50 per pass. Candidates are the ids with `missing_since` set, ordered by
+  `last_lookup` ascending (never looked up first), then by `missing_since`. So 2,000 removed stars are all
+  looked up within 40 passes, round-robin, and none starves. `last_lookup` records the pass time.
+- An id not looked up this pass keeps its status; `gone`/`forbidden` need a Gone/Forbidden lookup result
+  **and** `missing_since` older than `gone_after`. `excluded` needs a Found lookup (§B.9).
+
+**`mirror/github/http-cache.json`**: `{ "<url>": { "etag": "…", "next": "<rel=next url>" | null, "body":
+<projected JSON> } }`, only the fields of `model.rs`. `next` is the page's `Link rel="next"` from its last 200,
+so a 304 page (whose headers GitHub does not promise to repeat) can still be paginated past (§B.11). This is a
+**cache**: losing it costs rate limit, nothing else (principle I). It is overwritten without CAS at the end of a
+pass (`PutMode::Overwrite`, added to principle II's list, §D.6).
 
 CAS: add `floe_store::coord::cas_update_json<T: Serialize + DeserializeOwned>(store, key, max_retries, f)`
 next to `cas_update`, with the same loop shape (`get_bytes` → `f(Option<&T>)` → `put_bytes(Create |
 Update(version))`, re-read on 412, jittered backoff on `Retryable`). The reconciler writes state **after every
-action batch of ≤ 10 actions** and at the end of the pass, so a crash mid-pass loses at most 10 idempotent
-actions. Every action is idempotent (§B.7). Only the lease holder writes, so the CAS is a safety net against a
+action batch of ≤ 10 actions** and at the end of the pass, so a crash mid-pass loses the state records of at
+most 10 actions. Every action is idempotent and re-derivable from the floe side, including a publish whose
+state record was lost (§B.7.1, the `author` rule). Only the lease holder writes, so the CAS is a safety net against a
 lost lease, not a hot contention point. A 412 after retries aborts the pass (`warn!`), and the next holder
 re-plans.
 
@@ -507,7 +648,7 @@ The floe side is a trait, so the planner and applier test without a server:
 ```rust
 #[async_trait::async_trait]
 pub trait Target: Send + Sync {
-    async fn exists(&self, id: &RepoId) -> anyhow::Result<Option<ExistingRepo>>; // settings toml + revision + upstream.source
+    async fn exists(&self, id: &RepoId) -> anyhow::Result<Option<ExistingRepo>>; // settings toml + revision + author + upstream.source + head_seq
     async fn create(&self, id: &RepoId) -> anyhow::Result<CreateOutcome>;          // Created | AlreadyExists
     async fn publish_upstream(&self, id: &RepoId, upstream: &toml::Table, expected_revision: u64) -> anyhow::Result<PublishOutcome>; // Published(rev) | Conflict
     async fn put_policy_if_absent(&self, id: &RepoId, policy_json: &[u8]) -> anyhow::Result<()>;
@@ -521,15 +662,17 @@ pub trait Target: Send + Sync {
 | Step | Call |
 |---|---|
 | exists | `registry.open(&id)` → `NotFound` ⇒ `None`; else `handle.sync_refs()` then `handle.settings()` (D24 settings ride on the manifest, so this is a refs-level sync with no pack I/O) |
-| create | `registry.create(&id, floe_git::ObjectFormat::Sha1)` (GitHub is SHA-1; `git.object_format` is ignored on purpose) → `WalError::AlreadyExists` ⇒ `AlreadyExists` |
+| create | `registry.create(&id, floe_git::ObjectFormat::Sha1)` (GitHub is SHA-1; `git.object_format` is ignored on purpose) → `WalError::AlreadyExists` ⇒ `AlreadyExists`. Today `Registry::create` returns `Ok` for a handle it has cached (registry.rs ~192), so a repository opened earlier on this instance would read as `Created`. It changes to return `AlreadyExists` for a cached handle too, matching its doc comment; its callers (`admin.rs`, `floe repo create`, tests) create once per id and want that answer anyway |
 | settings | parse the current `RepoSettings.toml` (empty when none) into `toml::Table`, replace only the `upstream` table with the mirror's (§B.7.1), serialize, then **`handle.publish_settings_if(text, "github-mirror", "floe github mirror: <reason>", expected_revision)`** |
 | policy | `store.get_bytes(floe_proto::keys::policy_key(o, n))`; absent ⇒ `put_bytes(.., PutMode::Create)`. The same object `crate::policy::save` writes; `Create` makes it never overwrite a human's file |
 | nudge | server: closure (§D.2); CLI: no-op |
 
 **New floe-wal method** (small, in `handle.rs` + `publish::publish_settings_impl`): `publish_settings_if(toml,
 author, message, expected_revision: u64) -> Result<u64, WalError>`. It is the same loop, but after the refs
-sync it compares `manifest.settings.revision` (0 when none) with `expected_revision` and returns
-`WalError::Conflict` on mismatch, without retrying. `publish_settings` stays as it is (HTTP API). This makes
+sync it compares `manifest.settings.revision` (0 when none) with `expected_revision` and returns the new
+variant `WalError::SettingsConflict { expected: u64, actual: u64 }` on mismatch, without retrying (`WalError`
+has no generic conflict variant today; `RefConflict` is about refs). `WalTarget` maps it to
+`PublishOutcome::Conflict`. `publish_settings` stays as it is (HTTP API). This makes
 the mirror's read-modify-write safe against a concurrent human `PUT …/api/settings`.
 
 #### B.7.1 The `[upstream]` table the mirror owns
@@ -547,12 +690,34 @@ follow_interval = "10m"
 
 - Other sections (`[bundles]`, `[maintenance]`, `[compaction]`) are the operator's and are preserved byte-for-
   byte in meaning (re-serialized through `toml::Table`).
-- **Human edits win**: before publishing, the mirror compares the *current* `[upstream]` table's canonical
-  hash to `settings_sha` in state. If they differ, a human changed it: the entry becomes `detached`, the mirror
-  logs once and never touches that repository's settings again until an operator runs `floe github adopt
-  <floe repo>` (post-MVP; for the MVP, deleting the state entry re-adopts it).
-- Ownership test (`ExistingRepo` is ours) is `upstream.source == "github:<id>"`. A pre-existing repository
-  without that marker is **never** modified (requirement 3). It becomes a `conflict`, and naming picks `--<id>`.
+- **Ownership** (`ExistingRepo` is ours), checked before any publish:
+  1. `upstream.source == "github:<id>"` ⇒ ours.
+  2. Otherwise, the repository was never written (`head_seq == 0`: no settings, no refs) **and** its name is
+     the one this entry maps to ⇒ ours. This is the crash between `Create` and the first `PublishUpstream`,
+     where the marker is not written yet. An empty repository that a human created under a `gh-*` name in that
+     window is the only false positive, and it holds no data.
+  3. Otherwise **never** modified (requirement 3): `conflict`, and naming picks `--<id>`.
+- **Human edits win**, decided by who wrote the settings, not by a hash alone. Before publishing, for a
+  repository that is ours:
+  1. The current `[upstream]` table's canonical hash equals `settings_sha` in state ⇒ unchanged; publish if the
+     rendered table differs.
+  2. Else the current `RepoSettings.author == "github-mirror"` ⇒ the mirror wrote it, and the state record of
+     that publish was lost (a crash between `PublishUpstream` and the state CAS, §B.6). Re-adopt: record its
+     hash and revision as `settings_sha`/`settings_revision`, then continue as in 1. The same applies when the
+     current table equals the one the mirror would render now, whoever the author is.
+  3. Else, when `settings_sha` is null and either the repository has no settings yet (ownership rule 2) or
+     the source marker matches (an operator prepared the repository for the mirror: the too-large handoff
+     below) ⇒ adopt: publish the rendered `[upstream]` table over it.
+  4. Else a human changed `[upstream]`: the entry becomes `detached`, the mirror logs once and never touches
+     that repository's settings again until an operator runs `floe github adopt <floe repo>` (post-MVP; for
+     the MVP, deleting the state entry re-adopts it through rule 3).
+  An operator who edits only `[bundles]`/`[maintenance]`/`[compaction]` changes the author but not the
+  `[upstream]` hash, so rule 1 still holds and the repository stays managed.
+- **Too-large handoff** (`max_repo_size`): the logged recipe is (1) `floe import` into the entry's mapped name
+  on an SSD host, then (2) `floe repo settings set <floe repo>` with `[upstream] source = "github:<id>"` (the
+  recipe prints the exact line). The next pass finds the mapped repository with a matching marker and
+  `settings_sha = null`, adopts it (rule 3), sets `status = active` and nudges follow, which fetches only the
+  delta since the import. No `adopt` command is needed for this.
 
 #### B.7.2 Read-only policy (when `read_only`)
 
@@ -575,16 +740,21 @@ pub async fn run_loop(target: Arc<dyn Target>, source: Arc<dyn Source>, store: D
 pub async fn reconcile_once(/* same */, opts: PassOptions { dry_run: bool }) -> anyhow::Result<PassReport>;
 ```
 
-- **Lease**: `leases/mirror-github.pb` at the bucket root (store root, not a repo prefix), via
-  `floe_store::coord::try_acquire(store, key, instance_id(), "github-mirror", lease_ttl)` and
+- **Lease**: `leases/mirror-github.pb` (`leases/mirror-<kind>.pb`) at the bucket root (store root, not a repo
+  prefix), via `floe_store::coord::try_acquire(store, key, instance_id(), "github-mirror", lease_ttl)` and
   `LeaseGuard::spawn_heartbeat(guard, lease_ttl/3, lease_ttl)`. Exactly one reconciler fleet-wide. A host that
   does not get the lease sleeps `interval` and tries again. If the heartbeat reports a lost lease, the pass
-  aborts before its next action (check a `released` flag between actions).
+  aborts before its next action. `LeaseGuard`'s `released: AtomicBool` is private today, and reading it through
+  the heartbeat's `Arc<Mutex<LeaseGuard>>` would wait behind a heartbeat PUT in flight. So floe-store gains a
+  small change (§0.3): the field becomes `Arc<AtomicBool>` and `LeaseGuard::released_flag(&self) ->
+  Arc<AtomicBool>` hands out a clone before `spawn_heartbeat` takes the guard. The reconciler checks it
+  lock-free between actions.
 - **Loop**: tick every `interval` (first tick 10 s after start, jittered ±10%); `floe_wal::tasks::draining()`
   ⇒ release the lease and return (D31 phase 1). One pass:
   1. load state (+ http cache);
   2. `source.discover(sel)`, filter with `select.rs`;
-  3. for ids in state but not discovered: `source.lookup(id)` (bounded to 50 per pass);
+  3. for ids in state but not discovered: set `missing_since` (complete discovery only), then
+     `source.lookup(id)` for at most 50 of them, in the order §B.6 gives;
   4. `registry`-side facts via `target.exists` for new mappings only;
   5. `plan.rs` → `Vec<Action>` (`Create`, `PublishUpstream{reason}`, `PutPolicy`, `Nudge`, `MarkStatus`);
   6. `apply.rs`, in action order, CAS state every ≤ 10 actions;
@@ -593,8 +763,9 @@ pub async fn reconcile_once(/* same */, opts: PassOptions { dry_run: bool }) -> 
   created), call `target.nudge_follow(id)`. In the server, the nudge closure runs
   `crate::ops::start(state, id, "follow", {})` **only when `cfg.placement.maintains(owner, name)` on this host**
   (D28/D30). Otherwise it does nothing, and the maintaining host's follow loop picks the change up within
-  `upstream.follow_interval`. `ops::start` joins a running `follow` task for the same repository, so a nudge
-  can never start a second one.
+  `upstream.follow_interval`. `ops::start` joins a running `follow` task for the same repository, and the
+  follow loop starts its rounds through the same task lock and no longer fetches outside it (§A.4), so a nudge
+  never runs a second fetch against the repository's scratch.
 - **Server placement**: spawned in `floe-cli/src/serve.rs` next to `follow::run_loop`, inside `if maintainer`,
   when `cfg.github_mirror.enabled`. It is its own loop, never a unit of the priority loop (same reasoning as
   D33: discovery must not wait behind a base rebuild).
@@ -606,13 +777,19 @@ pub async fn reconcile_once(/* same */, opts: PassOptions { dry_run: bool }) -> 
 | New repository matching the selection | discovery | `Create` → `PutPolicy` → `PublishUpstream("created")` → `Nudge`; `status=active` (or `too-large`) |
 | Push | `pushed_at` changed | `Nudge` |
 | Default branch changed | `default_branch` changed | `PublishUpstream("default branch")` (`head`) |
-| Renamed / transferred | same `id`, new `full_name` | floe name **unchanged** (stable URLs, no floe rename exists); `PublishUpstream("renamed")` with the new `git`/`lfs` URLs; `full_name` updated; `info!` |
+| Renamed / transferred, still selected | same `id`, new `full_name`, passes §B.4 selection | floe name **unchanged** (stable URLs, no floe rename exists); `PublishUpstream("renamed")` with the new `git`/`lfs` URLs; `full_name` updated; `info!` |
+| Transferred to an owner outside the selection | absent from a complete discovery, `lookup` = Found under a new `full_name` | Selection decides (§B.4) on the new `full_name`: `excluded` (frozen, below) unless the id is in explicit `repos` by its old name, in which case it stays `active` and is handled as a rename. `exclude` still wins |
 | Archived | `archived` became true | Keep following (nothing moves, and the cost is one `ls-refs` per `follow_interval`); `PublishUpstream` with `follow_interval = "24h"`; inventory row |
 | Unarchived | `archived` became false | restore `follow_interval` |
 | Visibility public ↔ private | `private` changed | state + inventory only (floe has no per-repo read ACL, see Risks R2). If access is lost, it is handled as below |
-| No longer selected (exclude added, star removed) | absent from a **complete** discovery, `lookup` = Found | `status=excluded`; **frozen**: `PublishUpstream` with `follow = []` (data kept, follow stopped) |
-| Deleted / access revoked | absent from a complete discovery, `lookup` = Gone/Forbidden for `gone_after` | `status=gone`/`forbidden`; frozen as above. Never deleted in floe |
-| Discovery incomplete (rate limit, 5xx) | `complete=false` | no absence-based action this pass |
+| No longer selected (exclude added, star removed) | absent from a **complete** discovery (or present but rejected by §B.4), `lookup` = Found | `status=excluded`; **frozen**: `PublishUpstream` with `follow = []` (valid: an empty list is follow off, §A.1; data kept, follow stopped) |
+| Deleted / access revoked | absent from a complete discovery, `lookup` = Gone/Forbidden, `missing_since` older than `gone_after` (§B.6) | `status=gone`/`forbidden`; frozen as above. Never deleted in floe |
+| `excluded` / `gone` / `forbidden` → selected again (star re-added, exclude removed, access restored, repository restored) | present and selected in a discovery, or `lookup` = Found and selected | `status=active`; `missing_since` cleared; `PublishUpstream("resumed")` restoring the configured `follow` (and URLs, `head`); `Nudge`. The floe name is the stored one |
+| `too-large` → under the limit (`max_repo_size` raised, or the repository shrank) | selected and size ≤ limit | handled as a new repository: `Create` → … → `Nudge`, `status=active`. A `too-large` entry whose mapped repository now exists with a matching marker is adopted (§B.7.1 handoff) |
+| `conflict` → the blocking repository is gone, or became ours | `target.exists` on the stored candidate names, re-checked every pass for `conflict` entries (cheap: refs-level, and conflicts are rare) | re-run naming from scratch (the plain name first) and proceed as a new repository |
+| `error` | the failed action | retried every pass; the status follows from the next successful plan |
+| `detached` | — | stays until an operator re-adopts (§B.7.1). Freeze/rename rows do not apply to it: the mirror never publishes there |
+| Discovery incomplete (rate limit, 5xx) | `complete=false` | no absence-based action this pass; lookups and reverse transitions still apply to what was seen |
 | Token invalid (401 on `/user`) | discovery error | pass fails; nothing changes; `error!` naming `token_env` |
 
 ### B.10 Wikis and LFS
@@ -642,14 +819,22 @@ Headers on every request: `Accept: application/vnd.github+json`, `X-GitHub-Api-V
 | `repos` and `lookup` | `GET /repos/{owner}/{name}`; by id `GET /repositories/{id}` (follows renames/transfers) |
 
 - **Pagination**: follow `Link: <…>; rel="next"` to the end. Each page URL has its own ETag entry. A 304 page
-  reuses the cached projection. Every page is requested every pass (a 304 does not count against the primary
-  rate limit for authenticated requests).
+  reuses the cached projection, and its next page is the response's `Link rel="next"` if present, else the
+  cached entry's `next`. A 304 with neither (an entry from an older cache, say) marks the discovery
+  incomplete; it is never treated as the last page. Every page is requested every pass (a 304 does not count
+  against the primary rate limit for authenticated requests).
 - **Rate limit**: read `x-ratelimit-remaining` / `x-ratelimit-reset` from every response into `ApiStats`. Below
-  `min_rate_remaining`, stop (incomplete pass). A `403`/`429` with `retry-after`, or with `remaining = 0`, is
-  `SourceError::RateLimited{until}`: the pass ends incomplete and the loop sleeps until `until` (capped at 1 h).
-  Secondary limits: requests are strictly sequential (no concurrency against the API), with no pacing beyond that.
+  `min_rate_remaining`, stop (incomplete pass). A `403` or `429` is `SourceError::RateLimited{until}` when
+  **any** of these holds: it has `retry-after` (`until = now + retry-after`); `x-ratelimit-remaining = 0`
+  (`until = x-ratelimit-reset`); or the body's `message` or `documentation_url` mentions a secondary rate limit
+  (`"secondary rate limit"`, `…#secondary-rate-limits`) — GitHub's secondary-limit 403 often carries neither
+  header and has `remaining > 0`, so then `until = now + 60 s` at least (GitHub's guidance), doubled on each
+  consecutive secondary hit up to 15 min. The pass ends incomplete and the loop sleeps until `until` (capped at
+  1 h). Requests are strictly sequential (no concurrency against the API), which avoids most secondary limits.
 - **Errors**: 5xx/timeouts retry twice with jittered backoff (`floe_store::util::backoff` shape), then mark the
-  pass incomplete. 401 = `Unauthorized` (pass fails). 404/403 on `lookup` = `Gone`/`Forbidden`.
+  pass incomplete. 401 = `Unauthorized` (pass fails). On `lookup`, 404 = `Gone` and a 403 that is **not**
+  rate-limited by the rule above (an access-denied message) = `Forbidden`. A rate-limited lookup never counts as
+  `Gone`/`Forbidden`; it ends the pass and the id keeps its status.
 - Client: `reqwest` (workspace, rustls), 30 s timeout, built once (a `reqwest::Client::builder()` error is a
   startup `Err`, never `expect`).
 
@@ -684,16 +869,22 @@ floe --config floe.toml github status [--json]
 ### B.14 Tests (§B, no network)
 
 - `select.rs`, `naming.rs`, `settings.rs` (merge preserves other sections, hash stability), `plan.rs`: pure table
-  tests, covering every row of §B.9 as a `(state, discovery, lookup) → actions` case, plus "incomplete discovery
-  never marks gone" and "human-edited upstream ⇒ detached, no publish".
+  tests, covering every row of §B.9 (reverse transitions included) as a `(state, discovery, lookup) →
+  actions` case, plus "incomplete discovery never marks gone", "human-edited upstream ⇒ detached, no publish",
+  "author github-mirror with a stale `settings_sha` ⇒ re-adopted, not detached", "transfer out of the
+  selection ⇒ excluded", "lookup order is oldest `last_lookup` first", and the §B.4 selection table.
 - `FakeSource` (scripted `Discovery`/`Lookup` per pass) + `WalTarget` over `MemoryStore` (real `Registry`, no
   server): `reconcile_creates_repos_with_settings_and_policy`, `reconcile_is_idempotent` (second pass: zero
   actions, state unchanged), `crash_between_create_and_settings_is_repaired` (create done, state not written →
-  next pass publishes settings), `rename_keeps_floe_name_and_updates_url`, `max_new_per_pass_bounds_creations`,
-  `existing_unmanaged_repo_is_never_touched`.
+  next pass claims the empty repository and publishes settings), `crash_after_publish_before_state_cas_is_not_detached`
+  (a rename publish lands, state CAS skipped → next pass re-adopts and does nothing else),
+  `freeze_publishes_empty_follow` (through `WalTarget`, the settings validation accepts `follow = []`),
+  `rename_keeps_floe_name_and_updates_url`, `max_new_per_pass_bounds_creations`,
+  `existing_unmanaged_repo_is_never_touched`, `too_large_handoff_is_adopted`, `create_on_a_cached_handle_is_already_exists`.
 - `github/http.rs`: an in-process axum stub on `127.0.0.1` (loopback, as `tests/follow.rs` does with a second
-  floe): Link pagination, ETag 304 reuse, `retry-after` → `RateLimited`, `x-ratelimit-remaining` floor →
-  incomplete.
+  floe): Link pagination, ETag 304 reuse **with and without** a `Link` header on the 304 (cached `next`),
+  `retry-after` → `RateLimited`, secondary-limit 403 without headers and `remaining > 0` → `RateLimited` with
+  ≥ 60 s, access-denied 403 on lookup → `Forbidden`, `x-ratelimit-remaining` floor → incomplete.
 - Lease: two `run_loop`s over one `MemoryStore` → exactly one reconciles (assert on the state's `holder`).
 - End to end (`crates/floe-server/tests/mirror.rs`): `FakeSource` pointing `git_url` at a second floe instance
   (as `tests/follow.rs`); the mirror creates the repository, the nudge runs the follow op, and refs arrive. This
@@ -708,7 +899,7 @@ floe --config floe.toml github status [--json]
 ```
 crates/floe-catalog/
   Cargo.toml   # [features] iceberg = ["dep:iceberg", "dep:iceberg-catalog-rest", "dep:iceberg-storage-opendal", "dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
-  src/lib.rs        # always: rows, Recorder trait, NoopRecorder, rows_from_entries, CatalogConfig re-export
+  src/lib.rs        # always: rows, Recorder trait, NoopRecorder, parse_follow_archived, CatalogConfig re-export
   src/rows.rs       # RefEventRow, ForcePushRow, SyncRun, InventoryRecord (+ Arrow schema behind feature)
   src/buffer.rs     # always: bounded group-commit buffer, flush policy (unit-tested without iceberg)
   src/iceberg.rs    # #[cfg(feature = "iceberg")] IcebergWriter: connect, ensure tables, append
@@ -747,7 +938,7 @@ crates/floe-catalog/
 | `flush_rows` | `5000` | Commit when this many rows are buffered (per table). |
 | `max_buffer_rows` | `100000` | Bound on buffered rows. Beyond it, durable appends fail fast (lag stays in the WAL) and lossy telemetry is dropped. |
 | `commit_timeout` | `"60s"` | A durable append that is not committed within this fails (cursor not advanced). |
-| `backfill` | `false` | First cursor for a repository: `false` = its current `head_seq` (start now); `true` = the retained log start (full history, like the events bridge). |
+| `backfill` | `false` | First cursor for a repository that existed **before** the catalog was first enabled: `false` = its current `head_seq` (start now); `true` = the retained log start (full history, like the events bridge). A repository created after that always starts at its retained log start, so its whole history (a mirror's initial import included) reaches `ref_events` (§C.4). |
 | `create_tables` | `true` | Create namespace and tables if missing; `false` = fail if they are missing. |
 
 ### C.3 Table schemas
@@ -821,8 +1012,9 @@ Partition: `month(committed_at)`.
 (Follow rounds that find nothing are **not** recorded. They would dominate the table and say nothing a metric
 does not.)
 
-**`repo_inventory`** — slowly changing record of every floe repository and its source. Source: the mirror (one
-row per change of a state entry) + a daily full snapshot by the mirror lease holder (`registry.list()` + state).
+**`repo_inventory`** — slowly changing record of every floe repository and its source. Sources: the mirror
+(one lossy row per change of a state entry) + a **daily full snapshot taken by the catalog itself** (§C.6),
+which runs whether or not the mirror is enabled, so own repositories (`source = 'own'`) are always present.
 Partition: `day(observed_at)`.
 
 | id | column | type | notes |
@@ -842,27 +1034,50 @@ Partition: `day(observed_at)`.
 | 13 | `pushed_at` | timestamptz | |
 | 14 | `size_kb` | long | |
 | 15 | `head_seq` | long | snapshot rows only (manifest) |
+| 16 | `snapshot_id` | string | snapshot rows only; the completed one is in `catalog/inventory.json` (§C.6) |
 
 ### C.4 Consuming the WAL (durable cursor, D32/D46/D47)
 
-The catalog is a **third target kind of the events bridge**, next to the native webhook (`events/cursor.json`)
-and the GitHub facade targets (`github/events/<generation>.json`):
+The catalog is a WAL reader on the events host with the bridge's cursor machinery (`Cursor`,
+`read_log_retained`, D47 traversal) but **its own loop**, never a future inside `Bridge::catch_up`. Today
+`catch_up` joins its targets with `tokio::join!` and propagates errors with `?`, `http_notify` awaits it inside
+the HTTP request (503 on any error), and `sweep` drives it with `buffer_unordered(16)`. A catalog target in that
+join would make every bucket notification wait for an Iceberg group commit (up to `flush_interval`), turn a
+catalog outage into a 503 storm of redeliveries for targets that already succeeded, and hold the webhook sweep
+to about 16 repositories per flush. So:
 
+- New `crates/floe-server/src/catalog_tail.rs` (`CatalogTail`), started next to the bridge when `events`
+  role ∧ `catalog.enabled`. Its own sweep every `events.sweep_interval` with its own concurrency (8), and
+  its own wake channel: `object_finalized` sends the repository id to it with `try_send` (dropped when full;
+  the sweep is the backstop) and **never awaits it**. The webhook's `catch_up`, notify response and sweep are
+  unchanged.
 - Cursor key: `repos/<o>/<r>/catalog/cursor.json`, the same `Cursor { published_seq, updated_at }` JSON. It is
-  distinct from `floe_proto::keys::CATALOG` (`meta/repos.pb`), which is unrelated.
-- `Bridge::new`: a bridge exists when `events` role ∧ (webhook ∨ github facade ∨ **catalog.enabled**).
-  `catch_up(id)` joins a third future, `catch_up_catalog(id)`, so each target advances **only its own cursor**
-  (the D46 rule). A catalog failure never holds back the webhook or the reverse.
-- Generalise `catch_up_target` so a target receives `&[LogEntry]` (it reads them already via
-  `read_log_retained`) instead of only `RefEvent`s. The existing sinks keep calling `events::refs_from_entries`.
-  The catalog target calls `floe_catalog::rows_from_entries(repo, &entries) -> (Vec<RefEventRow>,
-  Vec<ForcePushRow>)` (in the core, pure, golden-tested against `events::refs_from_entries` so `ref_events`
-  and webhook events never disagree), then `writer.append_durable(rows).await`, then CAS the cursor.
-- Cold cursor: `catalog.backfill = false` ⇒ create the cursor at the current `head_seq` (persisted before any
-  delivery, as the bridge does). `true` ⇒ `handle.retained_log_start()` (checkpoint history, D47).
-- Wake-ups are the bridge's: `POST /_events/notify` and `events.sweep_interval`. **No `wake()` from
-  writers** (that concession is the GitHub facade's alone). Catalog latency ≈ notification latency + flush
-  interval, or the sweep interval without notifications.
+  distinct from `floe_proto::keys::CATALOG` (`meta/repos.pb`), which is unrelated. Each target advances only
+  its own cursor (the D46 rule).
+- While the writer is down (`floe_catalog_up == 0`), `append_durable` fails at once with
+  `CatalogError::Unavailable` (§C.5), so the tail costs a cursor GET per repository per sweep and nothing
+  waits.
+- Rows: the tail reads `&[LogEntry]` with `read_log_retained`, builds `RefEvent`s with the same
+  `events::refs_from_entries` the webhook uses (it is `pub(crate)` in floe-server, and the tail lives in
+  floe-server, so there is one implementation of the zero-OID, HEAD-skip and classify rules), and converts
+  each `RefEvent` plus the `LogEntry` it came from (same seq: `principal`, `request_id`, `writer`,
+  `created_at`, `meta.upstream`, entry kind) into a `RefEventRow`. `force_push_log` rows come from
+  `floe_catalog::parse_follow_archived(&meta) -> Vec<ArchivedLine>` (pure, in the catalog core; it parses only
+  the §A.5 format). Then `writer.append_durable(rows).await`, then CAS the cursor. The golden test that pins
+  `ref_events` = webhook events lives in floe-server (`tests/events.rs`).
+- **Cold cursor** (no `catalog/cursor.json` yet). The catalog's first enablement is recorded once in
+  `catalog/epoch.json` at the bucket root (`{ "enabled_at": … }`, CAS `Create`; whoever wins, every host then
+  reads the same value). For a repository without a cursor:
+  - `backfill = true` ⇒ `handle.retained_log_start()` (checkpoint history, D47);
+  - else, when the repository's oldest retained log entry was committed at or after `enabled_at` (it was created
+    after the catalog was enabled: every mirror-created repository, for instance) ⇒ the retained log start, so
+    its initial import is in `ref_events`;
+  - else ⇒ the current `head_seq` (the catalog was enabled after this repository had history, and the operator
+    did not ask for a backfill).
+  The cursor is persisted before any delivery, as the bridge does. Reading the oldest entry is one log GET, on
+  the cold path only.
+- Latency ≈ notification latency + flush interval, or the sweep interval without notifications. **No
+  `wake()` from writers** (that concession is the GitHub facade's alone).
 - Semantics: **at-least-once**. A crash after the Iceberg commit and before the cursor CAS re-appends the
   batch, and so does a `ref_events` commit followed by a failed `force_push_log` commit. Consumers dedup on
   `(repo, seq, ref_name)`. Recommended views: `SELECT DISTINCT` or `ROW_NUMBER() … = 1` over the identifier.
@@ -873,8 +1088,11 @@ and the GitHub facade targets (`github/events/<generation>.json`):
 - One writer per process (`Arc<CatalogWriter>`), with one in-memory buffer per table.
 - `append_durable(rows) -> Result<(), CatalogError>` (bridge path): enqueue with a oneshot, then wait for the
   commit that contains the rows (group commit, like publish's batch window). It fails fast with
-  `CatalogError::Backpressure` when `max_buffer_rows` would be exceeded, and with `Timeout` after
-  `commit_timeout`. On any error the bridge leaves the cursor, so the WAL holds the backlog and memory does not.
+  `CatalogError::Unavailable` while the writer has no live catalog connection (`floe_catalog_up == 0`), with
+  `Backpressure` when `max_buffer_rows` would be exceeded, and with `Timeout` after `commit_timeout`. On any
+  error the catalog tail leaves its cursor, so the WAL holds the backlog and memory does not. Only the catalog
+  tail (§C.4) and the inventory snapshot (§C.6) call it; nothing on a webhook, git, sync, follow or mirror path
+  does.
 - `record_*` (telemetry path): `try_send` into the same buffer. When full, drop and count
   (`floe_catalog_dropped_total{table}`). This path never awaits.
 - Flusher task: when a table has `≥ flush_rows` rows or its oldest row is `≥ flush_interval` old, do this per
@@ -885,8 +1103,8 @@ and the GitHub facade targets (`github/events/<generation>.json`):
 - **Isolation**: the writer is the only code that talks to the catalog. It runs on the serving runtime but
   does only network I/O (Parquet encoding of ≤ `flush_rows` rows is small; move it to `spawn_blocking` if a
   flush exceeds 50 ms in the benchmark). Startup **never** waits for the catalog: `connect` happens in the
-  flusher with retry and backoff (cap 5 min), and until it succeeds durable appends time out (lag) and
-  telemetry drops (counted). Nothing on a git, sync, follow or mirror path awaits the writer.
+  flusher with retry and backoff (cap 5 min), and until it succeeds durable appends fail with `Unavailable`
+  (lag) and telemetry drops (counted). Nothing on a git, sync, follow, mirror or webhook path awaits the writer.
 - Metrics: `floe_catalog_rows_total{table}`, `floe_catalog_commits_total{table, outcome}`,
   `floe_catalog_commit_seconds{table}`, `floe_catalog_buffer_rows{table}`, `floe_catalog_dropped_total{table}`,
   `floe_catalog_up` (0/1). Bridge lag per target: `events_bridge_lag_entries{repo, target="catalog"}` (add the
@@ -909,21 +1127,40 @@ compiled *and* `catalog.enabled`). Follow (§A.4, after the op) and the mirror (
 Why `sync_runs`/`repo_inventory` are lossy and `ref_events`/`force_push_log` are not: the latter are derived
 from the WAL and can always be replayed from a cursor. The former describe processes, not data (they are
 metrics with more columns). Making them durable would need either a second store of truth (principle I) or
-writing operational telemetry into the WAL. The daily inventory snapshot bounds what a loss can hide.
+writing operational telemetry into the WAL. The daily inventory snapshot bounds what a loss can hide, so the
+snapshot itself is **not** lossy:
+
+- **Inventory snapshot** (`crates/floe-server/src/catalog_tail.rs`, next to the tail): once a day, on the
+  events host that holds `leases/catalog-inventory.pb`, whether or not the mirror is enabled. Its schedule
+  lives in `catalog/inventory.json` (`{ "last_snapshot": …, "snapshot_id": … }`, CAS), so restarts and lease
+  handovers neither skip nor repeat a day. It walks `registry.list()` (the bridge's sweep already lists; this is
+  a daily background walk, not a hot path) plus `mirror/*/state.json` when present, and emits `change =
+  'snapshot'` rows: `source = 'own'` for repositories without a mirror entry.
+- Rows go through `append_durable` in chunks of `flush_rows`, each awaited (backpressure, never `try_send`).
+  `last_snapshot` is CAS'd only after the last chunk committed. A snapshot interrupted by an outage is retried
+  whole the next time the lease holder runs it; rows of the partial attempt share a `snapshot_id` that
+  consumers can ignore unless it completed (the completed id is the one in `catalog/inventory.json`). The
+  column `snapshot_id` (string, id 16) is added to `repo_inventory` for this.
 
 ### C.7 Tests (§C)
 
 Without a live catalog (run in `just test`):
 
-- `rows_from_entries` golden tests: PUSH with archive meta → one `ForcePushRow` per line and `is_archive` on
-  the archive `RefEventRow`; HEAD retargets and SETTINGS/COMPACT emit nothing; zero-OID conventions match
-  `events::refs_from_entries` row for row.
+- `parse_follow_archived` (catalog core): one `ArchivedLine` per line, `-` ⇒ delete, malformed lines skipped
+  and counted, never a panic.
+- Golden test in floe-server (`tests/events.rs`): PUSH with archive meta → one `ForcePushRow` per line and
+  `is_archive` on the archive `RefEventRow`; HEAD retargets and SETTINGS/COMPACT emit nothing; `ref_events` rows
+  equal the webhook's `RefEvent`s row for row (both come from `events::refs_from_entries`).
 - `buffer.rs` with a fake committer (a trait object inside `buffer.rs`; the Iceberg committer is the real
   implementation): flush by rows, flush by age, backpressure, timeout, waiter completion, telemetry drop when
   full, a committer error fails the waiters and keeps the rows out.
-- Bridge (`crates/floe-server/tests/events.rs`): with a fake catalog target, a failing catalog leaves
-  `catalog/cursor.json` and still advances `events/cursor.json`, and the reverse; `backfill=false` starts at
-  head.
+- Catalog tail (`crates/floe-server/tests/events.rs`): with a fake writer, a failing catalog leaves
+  `catalog/cursor.json` and still advances `events/cursor.json`, and the reverse;
+  `notify_latency_is_independent_of_the_catalog` (a writer that never commits: `/_events/notify` still answers
+  200 at webhook speed); `backfill=false` starts an old repository at head; `repo_created_after_enable_gets_its_history`
+  (cold cursor at the retained start, the initial import is in the rows).
+- Inventory snapshot: runs with the mirror disabled (own repositories as `source = 'own'`), chunks through
+  `append_durable`, `last_snapshot` advances only after the last chunk, a lease handover does not repeat a day.
 - `#[cfg(feature = "iceberg")]` schema tests: Arrow ↔ Iceberg schema round trip, field ids stable (snapshot of
   the schema JSON).
 
@@ -971,7 +1208,9 @@ if cfg.github_mirror.enabled {
   It spawns `ops::start(state, id, "follow", {})` iff `state.cfg.placement.maintains(..)`. This module is the
   only coupling between the server and `floe-mirror`.
 - Catalog: `AppState::new` builds the writer when `cfg!(feature = "catalog") && cfg.catalog.enabled` (writer
-  + flusher task), sets `recorder`, and passes the writer to `Bridge::new`.
+  + flusher task) and sets `recorder`. `serve.rs` spawns `CatalogTail` (WAL tail + inventory snapshot, §C.4,
+  §C.6) on the events host and hands `Bridge` only the tail's wake sender, which `object_finalized` uses with
+  `try_send`. `Bridge::new`'s condition and its `catch_up` join are unchanged.
 - Drain (D31): the mirror loop checks `draining()` before each action; the flusher gets a final best-effort
   flush in phase 2, bounded by `server.drain_timeout`, and losing it costs only telemetry (durable rows are
   re-read from the cursor).
@@ -1001,11 +1240,12 @@ users = []                        # "@me" = the token's user (private included)
 orgs = []
 starred = []
 repos = []                        # explicit "owner/name"
-include = ["*"]
+include = ["*/*"]                 # globs over owner/name; `*` stops at `/`
 exclude = []
 skip_archived = true
 skip_forks = true
 include_private = true
+private_visible_to_all_readers = false   # must be true when include_private and auth mode != none (no per-repo read ACL)
 wikis = false
 lfs = true
 follow = ["refs/heads/*", "refs/tags/*"]
@@ -1061,7 +1301,8 @@ create_tables = true
 
 A new section, **"Mirroring GitHub"**, after "Running it": five lines on what it does (discover → create →
 follow → archive on rewrite), the minimal config (`[github_mirror] enabled, users = ["@me"]` +
-`FLOE_GITHUB_TOKEN` + a `maintain` host), the naming rule (`gh-acme/widgets`), `floe github sync --once
+`FLOE_GITHUB_TOKEN` + a `maintain` host, and `private_visible_to_all_readers = true` or `include_private =
+false` outside `auth.mode = none`), the naming rule (`gh-acme/widgets`), `floe github sync --once
 --dry-run`, the archive ref convention, the no-per-repo-ACL warning (R2), and one line on `--features catalog` +
 `[catalog]`. Update the code map (`floe-mirror`, `floe-catalog`) and the `floe-cli` subcommand list.
 `docs/LFS.md`: correct the `token_env`-in-settings example (`token_env` is host-only in the code), and mention
@@ -1073,38 +1314,50 @@ follow → archive on rewrite), the minimal config (`[github_mirror] enabled, us
   (one `*` crossing `/`, `^` negatives; `refs/archive/` and `refs/follow/` are never followed). With
   `on_rewrite = "archive"` (default), a non-fast-forward, a tag move, or a deletion upstream publishes **one**
   PUSH entry that creates `refs/archive/<unix-ts>/<original-ref>` at the old tip (`old_oid = ""`, never
-  overwritten) and applies upstream's state, with `meta["follow.archived"]`. An upstream that advertises no
-  matching refs never causes deletions. `"refuse"` is D33's behaviour. Follow still bypasses policy.
-  Supersedes D33's "fast-forward only" clause; the rest of D33 stands.
+  overwritten) and applies upstream's state, with `meta["follow.archived"]`. The round is one atomic
+  transaction: any ref that moved under it rejects the whole round, which the next round re-plans. An upstream
+  that advertises no refs at all never causes deletions. A round probes refs first and does Serve-level work
+  only when something moved. `"refuse"` is D33's behaviour. Follow still bypasses policy. Supersedes D33's
+  "fast-forward only" clause; the rest of D33 stands.
 - **D49 (2026-10-04) The GitHub mirror decides, follow moves bytes.** `floe-mirror` runs on a `maintain` host
   under `leases/mirror-github.pb`, keeps `mirror/github/state.json` (CAS) and a disposable HTTP cache in the
-  bucket, maps `owner/name` to `<prefix>-<owner>/<name>` (identity stays two segments, D5/D26), creates
-  repositories by the manifest CAS, and owns only the `[upstream]` table of repositories marked
-  `upstream.source = "github:<id>"`. A human edit of that table detaches the repository. It never deletes a
+  bucket, maps `owner/name` to `<prefix>-<owner>/<name>` (identity stays two segments, D5/D26; **this
+  mapping is recorded only after the owner signs off**, R1), creates repositories by the manifest CAS, and owns
+  only the `[upstream]` table of repositories marked `upstream.source = "github:<id>"`. A human edit of that
+  table (an `[upstream]` change whose settings author is not `github-mirror`) detaches the repository. It never deletes a
   floe repository, never stores a token (`token_env` + `upstream.token_env_by_host`), and never transfers git
   objects. GitLab/Gitea implement `Source`.
 - **D50 (2026-10-04) Iceberg audit tables are a WAL reader, behind a feature.** `floe-catalog` (`--features
-  catalog`) writes `ref_events`/`force_push_log` from the WAL as a bridge target with its own cursor
-  `catalog/cursor.json` (at-least-once, dedup `(repo, seq, ref_name)`), and `sync_runs`/`repo_inventory` from
-  lossy telemetry (`Recorder`). The catalog is never a source of truth, never holds git objects, and its
+  catalog`) writes `ref_events`/`force_push_log` from the WAL in its own loop on the events host, outside the
+  webhook's catch-up, with its own cursor `catalog/cursor.json` (at-least-once, dedup `(repo, seq,
+  ref_name)`), `sync_runs`/`repo_inventory` changes from lossy telemetry (`Recorder`), and a durable daily
+  `repo_inventory` snapshot. The catalog is never a source of truth, never holds git objects, and its
   outage only adds catalog lag. Git, sync, follow and the mirror never await it.
 - **D51 (reserved) Push to an upstream is a WAL reader on the maintaining host** (§E). It is reserved now so
   the rule "a ref is either followed or pushed, never both; entries with `principal = upstream` are never
   pushed" is on record before anyone builds it.
 
-Also update: AGENTS.md §0 document map (this file), §2.1 table (`mirror/github/state.json`, `catalog/cursor.json`,
-`refs/archive/`), §2.2 (follow line), `docs/CONTRACT.md` (`floe-mirror`, `floe-catalog` blocks), `docs/EVENTS.md`
-(§A.5 paragraph, catalog target), `docs/ROUNDTRIPS.md` (§D.7).
+Also update: AGENTS.md §0 document map (this file), §2.1 table (`mirror/github/state.json`,
+`mirror/github/http-cache.json`, `catalog/cursor.json`, `catalog/epoch.json`, `catalog/inventory.json`,
+`refs/archive/`), §2.2 (follow line), **§3 principle II's `PutMode::Overwrite` list** (add the mirror's HTTP
+cache), `docs/CONTRACT.md` (`floe-mirror`, `floe-catalog` blocks; `RefPatterns` in floe-config),
+`docs/EVENTS.md` (§A.5 paragraph, catalog tail), `docs/ROUNDTRIPS.md` (§D.7).
+
+**`GOAL.md` §4** ("all the features a git host needs, and only those") gains, in the same change: "upstream
+mirroring (follow an upstream's refs, discover and mirror a forge's repositories, nothing rewritten upstream is
+ever lost) and derived audit tables of ref history". Principle X measures scope against that line, and without
+it neither the mirror nor the catalog has one.
 
 ### D.7 Round trips (`docs/ROUNDTRIPS.md` rows to add)
 
 | Operation | Bucket critical path |
 |---|---|
-| Follow round, nothing moved | unchanged: conditional manifest GET (+ upstream `ls-refs`) |
-| Follow round with archive | unchanged: log PUT + manifest CAS (archive refs ride in the same txn) |
+| Follow round, nothing moved | refs-level only: conditional manifest GET (+ checkpoint/log tail GETs on a cold handle); no pack GETs, even for a repository the LRU evicted (today: a Serve-level `sync()` every round). Upstream: one `ls-refs` (probe) |
+| Follow round, something moved | Serve-level `sync()` (pack GETs only for packs not local) + log PUT + manifest CAS; archive refs ride in the same txn. Upstream: probe `ls-refs` + fetch |
 | Mirror pass, nothing changed | lease GET/PUT (heartbeat) + state GET + http-cache GET/PUT; GitHub: one request per listing page (304s) |
 | Mirror create | manifest PUT(Create) + policy GET + PUT(Create) + manifest GET + log PUT + manifest CAS (settings) + state CAS (amortised per ≤ 10 actions) |
-| Catalog catch-up per repo | cursor GET + manifest conditional GET + log GETs + cursor CAS; the Iceberg commit is off the bucket's git path (catalog + table files) |
+| Catalog catch-up per repo (own loop) | cursor GET + manifest conditional GET + log GETs + cursor CAS; the Iceberg commit is off the bucket's git path (catalog + table files). Cold cursor: + `catalog/epoch.json` GET + one log GET. While the catalog is down: cursor GET only. Adds nothing to the webhook's notify path |
+| Inventory snapshot (daily) | lease GET/PUT + `catalog/inventory.json` GET/CAS + one `registry.list()` + mirror state GET; off every hot path |
 
 ---
 
@@ -1136,9 +1389,9 @@ Also update: AGENTS.md §0 document map (this file), §2.1 table (`mirror/github
 
 | # | Risk / question | Mitigation / owner decision needed |
 |---|---|---|
-| R1 | **Naming deviates** from the requested `<prefix>/<owner>/<repo>`: floe ids are two segments (D5, D26), so we use `<prefix>-<owner>/<repo>`. | Accept (recommended), or open a separate decision to allow nested owners, which touches `RepoId`, routing, the edge contract and the UI. |
-| R2 | **No per-repository read ACL**: a mirrored private GitHub repository is readable by every principal with read on floe. | Document loudly; `include_private = false` for shared hosts; per-repo read ACL is a separate feature. |
-| R3 | **Follow does not scale linearly**: one sequential loop, Serve-level sync and `packs_fit()` per repo, the whole object set local. Hundreds of repos are fine; thousands, or one huge repo, are not. | `max_repo_size` + `max_new_per_pass`; nudges instead of tight polling; huge repos go through `floe import` on an SSD host and only *then* get `[upstream]`. A post-MVP item is a concurrency limit for follow ops. |
+| R1 | **Naming deviates** from the requested `<prefix>/<owner>/<repo>`: floe ids are two segments (D5, D26), so we propose `<prefix>-<owner>/<repo>`. **Open: needs the owner's sign-off before §B starts** (status line, §B.5, D49). | Accept (recommended), or open a separate decision to allow nested owners, which touches `RepoId`, routing, the edge contract and the UI. Only `naming.rs` changes if the answer differs. |
+| R2 | **No per-repository read ACL**: a mirrored private GitHub repository is readable by every principal with read on floe. | `validate` refuses `include_private = true` outside `auth.mode = none` unless `private_visible_to_all_readers = true` (§B.4), so the exposure is an explicit operator decision; README says it loudly; per-repo read ACL is a separate feature. |
+| R3 | **Follow does not scale linearly**: one sequential loop (an `ls-refs` probe per repo per round; Serve-level sync and `packs_fit()` only for repos that moved), the whole object set local while a round publishes. Hundreds of repos are fine; thousands, or one huge repo, are not. | `max_repo_size` + `max_new_per_pass`; refs-first rounds (§A.4); nudges instead of tight polling; huge repos go through the too-large handoff (`floe import` on an SSD host, then the source marker, §B.7.1). A post-MVP item is a concurrency limit for follow ops. |
 | R4 | Archive refs grow the ref count forever (a repository force-pushed hourly gets about 8.7k archive refs a year), and `ls-refs` advertises them. | Acceptable at these sizes (refs are O(1) on hot paths). Post-MVP: optional `upstream.archive_retention` (still never auto-deletes by default), and hiding `refs/archive/` from v0 advertisement. |
 | R5 | **LFS is read-through, not prefetched**: an LFS object never downloaded before the GitHub repository disappears is lost. | Post-MVP `lfs_prefetch` unit. Call it out in README. |
 | R6 | **RustFS S3 Tables is preview**: exact REST path, warehouse identifier, and auth (SigV4 vs bearer/OAuth). `iceberg-catalog-rest` 0.10 is not known to sign SigV4. | Verify against the pinned RustFS release before §C lands. If SigV4 is mandatory, add a signing `reqwest` middleware or put the Iceberg REST fixture in front. The ignored test runs against either. |
@@ -1149,6 +1402,7 @@ Also update: AGENTS.md §0 document map (this file), §2.1 table (`mirror/github
 | R11 | `force_push_log` covers upstream rewrites only, not human force pushes to own repos. | Post-MVP: `receive.rs` records `meta["forced"]` (it already classifies `force-push` for policy); the catalog then picks it up with no other change. |
 | R12 | Deleted vs. access revoked is indistinguishable for private repositories (both 404). | Both freeze (`gone`/`forbidden`); nothing is deleted, so a wrong guess costs nothing. |
 | R13 | Renamed repositories keep their old floe name. | Intentional (stable URLs). A floe-side rename/alias is a separate decision. |
-| R14 | Mass deletion upstream (e.g. a force-mirror push that drops branches) archives and deletes at scale. | Nothing is lost (archives). Only an *empty* advertisement is guarded. A `max_delete_fraction` guard is an easy follow-up if wanted. |
+| R14 | Mass deletion upstream (e.g. a force-mirror push that drops branches) archives and deletes at scale. | Nothing is lost (archives). Only an upstream advertising *no refs at all* is guarded. A `max_delete_fraction` guard is an easy follow-up if wanted. |
 | R15 | `on_rewrite = "archive"` as the default changes behaviour for existing `follow` users. | Intended (requirement). Noted in D48 and in the release notes. |
-| R16 | Two hosts maintaining one repository (placement misconfig) would both follow it. | Already true for D33. Publish is CAS-safe; archive refs use `old_oid = ""`, so at worst one round's archive name collides and is retried. |
+| R16 | Two hosts maintaining one repository (placement misconfig) would both follow it. | Already true for D33. Publish is CAS-safe and a round is atomic: when both plan the same rewrite, the second's round is rejected whole (its refs or its archive name moved) and re-plans to "in sync". No duplicate archive, nothing partial. |
+| R17 | A followed branch upstream that points at a non-commit object makes `is_ancestor` fail, so every round of that repository fails. | Rare and visible (`failed` outcome naming the ref). Narrow the patterns with a `^` negative for that ref. |
