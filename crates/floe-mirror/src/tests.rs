@@ -102,18 +102,23 @@ async fn reconcile_creates_repos_with_settings_and_policy_then_is_idempotent() {
     assert_eq!(rep.published, 2);
     assert_eq!(rep.errors, 0, "{rep:?}");
 
-    let up = r.upstream("gh-acme/widgets").await;
+    let up = r.upstream("acme/widgets").await;
     assert_eq!(s(&up, "source"), "github:42");
     assert_eq!(s(&up, "git"), "https://github.com/Acme/Widgets.git");
     assert_eq!(s(&up, "lfs"), "https://github.com/Acme/Widgets.git/info/lfs");
     assert_eq!(s(&up, "head"), "refs/heads/main");
-    assert_eq!(r.settings("gh-acme/widgets").await.author, settings::AUTHOR);
-    assert_eq!(s(&r.upstream("gh-acme/_.github").await, "source"), "github:7");
+    assert_eq!(r.settings("acme/widgets").await.author, settings::AUTHOR);
+    // The visible marker: the repository's description names the source.
+    assert_eq!(
+        settings::description_of(&r.settings("acme/widgets").await.toml).as_deref(),
+        Some("Mirror of https://github.com/Acme/Widgets")
+    );
+    assert_eq!(s(&r.upstream("acme/_.github").await, "source"), "github:7");
 
     // The read-only policy, exactly the published constant.
     let (_, policy) = r
         .store
-        .get_bytes(&floe_proto::keys::policy_key("gh-acme", "widgets"))
+        .get_bytes(&floe_proto::keys::policy_key("acme", "widgets"))
         .await
         .unwrap()
         .unwrap();
@@ -121,13 +126,14 @@ async fn reconcile_creates_repos_with_settings_and_policy_then_is_idempotent() {
 
     let st = r.state().await;
     let e = st.repos.get("42").unwrap();
-    assert_eq!(e.floe.as_deref(), Some("gh-acme/widgets"));
+    assert_eq!(e.floe.as_deref(), Some("acme/widgets"));
+    assert_eq!(e.claiming, None, "cleared once created");
     assert_eq!(e.status, Status::Active);
     assert_eq!(e.settings_revision, 1);
     assert_eq!(st.token_login.as_deref(), Some("me"));
     let mut nudged = r.nudged.lock().clone();
     nudged.sort();
-    assert_eq!(nudged, ["gh-acme/_.github", "gh-acme/widgets"]);
+    assert_eq!(nudged, ["acme/_.github", "acme/widgets"]);
 
     // Second pass: nothing to do, nothing written but the bookkeeping.
     let rep = r.pass().await;
@@ -135,7 +141,7 @@ async fn reconcile_creates_repos_with_settings_and_policy_then_is_idempotent() {
     assert_eq!((rep.created, rep.published, rep.nudged), (0, 0, 0));
     let st2 = r.state().await;
     assert_eq!(st2.repos.get("42").unwrap().settings_sha, e.settings_sha);
-    assert_eq!(r.settings("gh-acme/widgets").await.revision, 1);
+    assert_eq!(r.settings("acme/widgets").await.revision, 1);
 }
 
 #[tokio::test]
@@ -147,7 +153,7 @@ async fn dry_run_writes_nothing() {
         .unwrap();
     assert_eq!(
         rep.plan.first().map(String::as_str),
-        Some("create gh-a/b ← a/b (public, 0.0 MiB)")
+        Some("create a/b ← a/b (public, 0.0 MiB)")
     );
     assert!(r.registry.list().await.unwrap().is_empty());
     assert!(r.state().await.repos.is_empty());
@@ -156,17 +162,28 @@ async fn dry_run_writes_nothing() {
 #[tokio::test]
 async fn crash_between_create_and_settings_is_repaired() {
     let r = rig();
-    // The create landed, the state CAS did not.
-    let id = RepoId::new("gh-acme", "widgets").unwrap();
+    // The pass saved `claiming`, the create landed, the state CAS after it did not.
+    let mut st = MirrorState::default();
+    st.repos.insert(
+        "42".into(),
+        RepoEntry {
+            full_name: "Acme/Widgets".into(),
+            default_branch: Some("main".into()),
+            claiming: Some("acme/widgets".into()),
+            ..RepoEntry::default()
+        },
+    );
+    state::save(r.store.as_ref(), "github", &mut st, "test").await.unwrap();
+    let id = RepoId::new("acme", "widgets").unwrap();
     r.registry.create(&id, floe_git::ObjectFormat::Sha1).await.unwrap();
     r.source.set_repos(vec![remote("42", "Acme", "Widgets")], true);
     let rep = r.pass().await;
     assert_eq!(rep.errors, 0, "{rep:?}");
     assert_eq!(rep.created, 0, "adopted, not created");
-    assert_eq!(s(&r.upstream("gh-acme/widgets").await, "source"), "github:42");
+    assert_eq!(s(&r.upstream("acme/widgets").await, "source"), "github:42");
     assert_eq!(
         r.state().await.repos.get("42").unwrap().floe.as_deref(),
-        Some("gh-acme/widgets")
+        Some("acme/widgets")
     );
 }
 
@@ -189,7 +206,7 @@ async fn crash_after_publish_before_state_cas_is_not_detached() {
     let e = r.state().await.repos.get("42").cloned().unwrap();
     assert_eq!(e.status, Status::Active, "{e:?}");
     assert_eq!(rep.published, 0, "re-adopted, nothing republished");
-    assert_eq!(r.settings("gh-acme/widgets").await.revision, 2);
+    assert_eq!(r.settings("acme/widgets").await.revision, 2);
 }
 
 #[tokio::test]
@@ -204,13 +221,18 @@ async fn rename_keeps_floe_name_and_updates_url() {
     r.source.set_repos(vec![renamed], true);
     let rep = r.pass().await;
     assert_eq!(rep.published, 1);
-    let up = r.upstream("gh-acme/widgets").await;
+    let up = r.upstream("acme/widgets").await;
     assert_eq!(s(&up, "git"), "https://github.com/NewCo/Gizmos.git");
+    assert_eq!(
+        settings::description_of(&r.settings("acme/widgets").await.toml).as_deref(),
+        Some("Mirror of https://github.com/NewCo/Gizmos"),
+        "the description follows the rename"
+    );
     let st = r.state().await;
     let e = st.repos.get("42").unwrap();
     assert_eq!(e.full_name, "NewCo/Gizmos");
-    assert_eq!(e.floe.as_deref(), Some("gh-acme/widgets"));
-    assert!(r.registry.open(&RepoId::new("gh-newco", "gizmos").unwrap()).await.is_err());
+    assert_eq!(e.floe.as_deref(), Some("acme/widgets"));
+    assert!(r.registry.open(&RepoId::new("newco", "gizmos").unwrap()).await.is_err());
 }
 
 #[tokio::test]
@@ -224,26 +246,26 @@ async fn freeze_publishes_empty_follow_and_resume_restores_it() {
     r.pass().await;
     let st = r.state().await;
     assert_eq!(st.repos.get("42").unwrap().status, Status::Gone);
-    let up = r.upstream("gh-acme/widgets").await;
+    let up = r.upstream("acme/widgets").await;
     assert_eq!(up.get("follow"), Some(&toml::Value::Array(vec![])));
     assert!(up.get("lfs").is_none(), "no read-through for a frozen repository");
-    assert!(r.registry.open(&RepoId::new("gh-acme", "widgets").unwrap()).await.is_ok());
+    assert!(r.registry.open(&RepoId::new("acme", "widgets").unwrap()).await.is_ok());
     // Restored.
     r.nudged.lock().clear();
     r.source.set_repos(vec![remote("42", "Acme", "Widgets")], true);
     let rep = r.pass().await;
     assert_eq!(rep.published, 1);
-    let up = r.upstream("gh-acme/widgets").await;
+    let up = r.upstream("acme/widgets").await;
     assert_eq!(up.get("follow").and_then(|v| v.as_array()).map(Vec::len), Some(2));
     assert_eq!(s(&up, "lfs"), "https://github.com/Acme/Widgets.git/info/lfs");
-    assert_eq!(r.nudged.lock().as_slice(), ["gh-acme/widgets"]);
+    assert_eq!(r.nudged.lock().as_slice(), ["acme/widgets"]);
 }
 
 #[tokio::test]
 async fn existing_unmanaged_repo_is_never_touched() {
     let r = rig();
-    // A human's repository already holds the plain name, with settings.
-    let id = RepoId::new("gh-acme", "widgets").unwrap();
+    // A human's repository already holds the name, with settings.
+    let id = RepoId::new("acme", "widgets").unwrap();
     let h = r.registry.create(&id, floe_git::ObjectFormat::Sha1).await.unwrap();
     h.publish_settings("[bundles]\nmain_only = true\n", "alice", "mine")
         .await
@@ -251,12 +273,38 @@ async fn existing_unmanaged_repo_is_never_touched() {
     r.source.set_repos(vec![remote("42", "Acme", "Widgets")], true);
     let rep = r.pass().await;
     assert_eq!(rep.errors, 0, "{rep:?}");
-    assert_eq!(r.settings("gh-acme/widgets").await.author, "alice");
-    assert_eq!(
-        r.state().await.repos.get("42").unwrap().floe.as_deref(),
-        Some("gh-acme/widgets--42")
-    );
-    assert_eq!(s(&r.upstream("gh-acme/widgets--42").await, "source"), "github:42");
+    assert_eq!(rep.created, 0);
+    // Skipped, visibly: a conflict in the state (`floe github status`) and an
+    // inventory change (the catalog row); never renamed around.
+    assert_eq!(rep.changes, [("acme/widgets".to_string(), "conflict".to_string())]);
+    let e = r.state().await.repos.get("42").cloned().unwrap();
+    assert_eq!(e.status, Status::Conflict);
+    assert_eq!(e.floe, None);
+    assert_eq!(e.claiming, None);
+    assert!(e.last_error.as_deref().unwrap_or_default().contains("is not a mirror"), "{e:?}");
+    let st = r.settings("acme/widgets").await;
+    assert_eq!((st.author.as_str(), st.revision), ("alice", 1));
+    assert!(!st.toml.contains("upstream"), "{}", st.toml);
+    assert_eq!(r.registry.list().await.unwrap().len(), 1);
+    // Retried every pass, reported once.
+    let rep = r.pass().await;
+    assert!(rep.changes.is_empty(), "{:?}", rep.changes);
+    assert_eq!(r.state().await.repos.get("42").unwrap().status, Status::Conflict);
+    assert_eq!(r.settings("acme/widgets").await.revision, 1);
+}
+
+#[tokio::test]
+async fn empty_own_repo_is_not_adopted_without_a_claim() {
+    // An empty, never-written repository the mirror did not record it was
+    // creating is someone else's: a conflict, not an adoption.
+    let r = rig();
+    let id = RepoId::new("acme", "widgets").unwrap();
+    r.registry.create(&id, floe_git::ObjectFormat::Sha1).await.unwrap();
+    r.source.set_repos(vec![remote("42", "Acme", "Widgets")], true);
+    let rep = r.pass().await;
+    assert_eq!((rep.created, rep.published), (0, 0), "{rep:?}");
+    assert_eq!(r.state().await.repos.get("42").unwrap().status, Status::Conflict);
+    assert_eq!(r.settings("acme/widgets").await.revision, 0);
 }
 
 #[tokio::test]
@@ -265,7 +313,7 @@ async fn human_edit_of_upstream_detaches() {
     let w = remote("42", "Acme", "Widgets");
     r.source.set_repos(vec![w.clone()], true);
     r.pass().await;
-    let h = r.registry.open(&RepoId::new("gh-acme", "widgets").unwrap()).await.unwrap();
+    let h = r.registry.open(&RepoId::new("acme", "widgets").unwrap()).await.unwrap();
     h.publish_settings(
         "[upstream]\ngit = \"https://example.com/fork.git\"\nfollow = [\"refs/heads/main\"]\n",
         "alice",
@@ -279,7 +327,7 @@ async fn human_edit_of_upstream_detaches() {
     let rep = r.pass().await;
     assert_eq!(rep.published, 0);
     assert_eq!(r.state().await.repos.get("42").unwrap().status, Status::Detached);
-    assert_eq!(r.settings("gh-acme/widgets").await.author, "alice");
+    assert_eq!(r.settings("acme/widgets").await.author, "alice");
     // And stays so.
     let rep = r.pass().await;
     assert!(rep.plan.is_empty());
@@ -287,7 +335,7 @@ async fn human_edit_of_upstream_detaches() {
     let r2 = rig();
     r2.source.set_repos(vec![remote("1", "a", "b")], true);
     r2.pass().await;
-    let h = r2.registry.open(&RepoId::new("gh-a", "b").unwrap()).await.unwrap();
+    let h = r2.registry.open(&RepoId::new("a", "b").unwrap()).await.unwrap();
     let cur = h.settings().unwrap_or_default().toml;
     h.publish_settings(&format!("{cur}\n[bundles]\nmain_only = true\n"), "alice", "bundles")
         .await
@@ -297,7 +345,7 @@ async fn human_edit_of_upstream_detaches() {
     r2.source.set_repos(vec![moved], true);
     let rep = r2.pass().await;
     assert_eq!(rep.published, 1, "{rep:?}");
-    let st = r2.settings("gh-a/b").await;
+    let st = r2.settings("a/b").await;
     assert!(st.toml.contains("main_only = true"), "{}", st.toml);
     assert!(st.toml.contains("refs/heads/trunk"), "{}", st.toml);
 }
@@ -313,7 +361,7 @@ async fn too_large_handoff_is_adopted() {
     assert!(r.registry.list().await.unwrap().is_empty());
     assert_eq!(r.state().await.repos.get("9").unwrap().status, Status::TooLarge);
     // The operator imports it and sets the marker (the logged recipe).
-    let id = RepoId::new("gh-acme", "mono").unwrap();
+    let id = RepoId::new("acme", "mono").unwrap();
     let h = r.registry.create(&id, floe_git::ObjectFormat::Sha1).await.unwrap();
     h.publish_settings("[upstream]\nsource = \"github:9\"\n", "ops", "handoff")
         .await
@@ -323,8 +371,8 @@ async fn too_large_handoff_is_adopted() {
     assert_eq!(rep.published, 1);
     let e = r.state().await.repos.get("9").cloned().unwrap();
     assert_eq!(e.status, Status::Active);
-    assert_eq!(e.floe.as_deref(), Some("gh-acme/mono"));
-    assert_eq!(s(&r.upstream("gh-acme/mono").await, "git"), "https://github.com/Acme/Mono.git");
+    assert_eq!(e.floe.as_deref(), Some("acme/mono"));
+    assert_eq!(s(&r.upstream("acme/mono").await, "git"), "https://github.com/Acme/Mono.git");
 }
 
 #[tokio::test]

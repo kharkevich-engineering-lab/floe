@@ -21,6 +21,8 @@ pub struct ExistingRepo {
     pub settings_author: String,
     /// `upstream.source`.
     pub source: Option<String>,
+    /// `repo.description`.
+    pub description: Option<String>,
     /// 0 = never written (no settings, no refs).
     pub head_seq: u64,
 }
@@ -42,12 +44,13 @@ pub enum PublishOutcome {
 pub trait Target: Send + Sync {
     async fn exists(&self, id: &RepoId) -> anyhow::Result<Option<ExistingRepo>>;
     async fn create(&self, id: &RepoId) -> anyhow::Result<CreateOutcome>;
-    /// Replace only `[upstream]` in the settings document, as a CAS on
-    /// `expected_revision` (author [`settings::AUTHOR`]).
+    /// Replace only `[upstream]` and `repo.description` in the settings
+    /// document, as a CAS on `expected_revision` (author [`settings::AUTHOR`]).
     async fn publish_upstream(
         &self,
         id: &RepoId,
         upstream: &toml::Table,
+        description: &str,
         expected_revision: u64,
         reason: &str,
     ) -> anyhow::Result<PublishOutcome>;
@@ -92,6 +95,7 @@ impl Target for WalTarget {
         let s = handle.settings().unwrap_or_default();
         Ok(Some(ExistingRepo {
             source: settings::source_of(&s.toml),
+            description: settings::description_of(&s.toml),
             settings_toml: s.toml,
             settings_revision: s.revision,
             settings_author: s.author,
@@ -112,13 +116,14 @@ impl Target for WalTarget {
         &self,
         id: &RepoId,
         upstream: &toml::Table,
+        description: &str,
         expected_revision: u64,
         reason: &str,
     ) -> anyhow::Result<PublishOutcome> {
         let handle = self.registry.open(id).await?;
         drop(handle.sync_refs_only().await?);
         let current = handle.settings().unwrap_or_default();
-        let text = settings::merge(&current.toml, upstream)?;
+        let text = settings::merge(&current.toml, upstream, description)?;
         let message = format!("floe github mirror: {reason}");
         match handle
             .publish_settings_if(&text, settings::AUTHOR, &message, expected_revision)

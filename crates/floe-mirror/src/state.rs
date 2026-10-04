@@ -101,8 +101,15 @@ impl Status {
 pub struct RepoEntry {
     /// `owner/name` as the forge spells it now (renames update it).
     pub full_name: String,
-    /// The floe repository (`gh-acme/widgets`), fixed at creation. `None` until created.
+    /// The floe repository (`acme/widgets`), fixed at creation. `None` until created.
     pub floe: Option<String>,
+    /// The floe repository this mirror is about to create, saved in the state
+    /// before the manifest CAS-create: an empty, never-written repository of
+    /// exactly this name is then the mirror's own (a crash between the create and
+    /// the first publish) and is adopted. Nothing else that exists without the
+    /// mirror's marker ever is (§B.7.1). Cleared once claimed or in conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claiming: Option<String>,
     pub status: Status,
     pub private: bool,
     pub archived: bool,

@@ -1,6 +1,8 @@
-//! The `[upstream]` table the mirror owns (§B.7.1): render it, hash it
-//! canonically, and merge it into a repository's settings document without
-//! touching the operator's other sections.
+//! What the mirror owns in a repository's settings document (§B.7.1): the
+//! `[upstream]` table (render it, hash it canonically) and `repo.description`
+//! (`Mirror of <url>`), merged in without touching the operator's other sections.
+//! Ownership and detach decisions look at `[upstream]` only: a human edit of the
+//! description is not a detach, it is rewritten by the mirror's next publish.
 
 use floe_config::{GithubMirrorConfig, OnRewrite};
 use sha2::{Digest, Sha256};
@@ -61,6 +63,18 @@ pub fn render(
     t
 }
 
+/// The `repo.description` the mirror writes: `Mirror of <forge page>`.
+pub fn description(source: &dyn Source, r: &RemoteRepo) -> String {
+    format!("Mirror of {}", source.web_url(r))
+}
+
+/// The `repo.description` of a settings document, if any.
+pub fn description_of(settings_toml: &str) -> Option<String> {
+    floe_config::RepoMeta::from_settings(settings_toml)
+        .ok()
+        .and_then(|m| m.description)
+}
+
 /// sha256 (hex) of the table's canonical TOML (`toml::Table` is key-ordered).
 pub fn hash(t: &toml::Table) -> String {
     let text = toml::to_string(t).unwrap_or_default();
@@ -87,15 +101,25 @@ pub fn source_of(settings_toml: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `settings_toml` with `[upstream]` replaced by `upstream`; every other section
-/// is kept (re-serialized through `toml::Table`).
-pub fn merge(settings_toml: &str, upstream: &toml::Table) -> anyhow::Result<String> {
+/// `settings_toml` with `[upstream]` replaced by `upstream` and
+/// `repo.description` set to `description`; every other section and key is kept
+/// (re-serialized through `toml::Table`).
+pub fn merge(settings_toml: &str, upstream: &toml::Table, description: &str) -> anyhow::Result<String> {
     let mut doc: toml::Table = if settings_toml.trim().is_empty() {
         toml::Table::new()
     } else {
         settings_toml.parse()?
     };
     doc.insert("upstream".into(), toml::Value::Table(upstream.clone()));
+    let repo = doc
+        .entry(floe_config::REPO_META_SECTION)
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if !repo.is_table() {
+        *repo = toml::Value::Table(toml::Table::new());
+    }
+    if let Some(t) = repo.as_table_mut() {
+        t.insert("description".into(), description.into());
+    }
     Ok(toml::to_string(&doc)?)
 }
 
@@ -134,13 +158,17 @@ mod tests {
         assert!(text.contains("follow_interval = \"10m\""), "{text}");
         assert!(text.contains("refs/tags/*"), "{text}");
         // The rendered table is a valid [upstream] for the host config.
-        let doc = merge("", &t).unwrap();
+        let doc = merge("", &t, &description(&src, &repo())).unwrap();
         floe_config::Config::default().with_settings(&doc).unwrap();
+        assert_eq!(
+            description_of(&doc).as_deref(),
+            Some("Mirror of https://github.com/Acme/Widgets")
+        );
 
         let frozen = render(&src, &cfg, &repo(), Status::Gone);
         assert_eq!(frozen.get("follow"), Some(&toml::Value::Array(vec![])));
         floe_config::Config::default()
-            .with_settings(&merge("", &frozen).unwrap())
+            .with_settings(&merge("", &frozen, "Mirror of x").unwrap())
             .unwrap();
         let mut archived = repo();
         archived.archived = true;
@@ -158,8 +186,9 @@ mod tests {
     fn merge_preserves_other_sections() {
         let src = FakeSource::new("https://github.com");
         let t = render(&src, &GithubMirrorConfig::default(), &repo(), Status::Active);
-        let before = "[bundles]\nmain_only = true\n\n[upstream]\nfollow = []\ngit = \"https://x/y\"\n";
-        let after = merge(before, &t).unwrap();
+        let before = "[bundles]\nmain_only = true\n\n[repo]\ndescription = \"mine\"\n\n[upstream]\nfollow = []\ngit = \"https://x/y\"\n";
+        let after = merge(before, &t, "Mirror of https://github.com/Acme/Widgets").unwrap();
+        assert_eq!(description_of(&after).as_deref(), Some("Mirror of https://github.com/Acme/Widgets"));
         let doc: toml::Table = after.parse().unwrap();
         assert_eq!(
             doc.get("bundles")

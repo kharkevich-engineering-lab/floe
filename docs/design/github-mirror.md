@@ -8,8 +8,8 @@ crosses a work package is pinned here (§0.3); everything else is the implemente
 Where this document and the code disagree after landing, the code wins and this file gets a dated note.
 
 Status: **proposed** (2026-10-04; revised the same day after review). Decision numbers D48–D51 are reserved
-for it (§D.6). One item needs the owner's sign-off before §B starts: the name mapping
-`<prefix>-<owner>/<repo>` (§B.5, R1). Every other contract in §0.3 is frozen.
+for it (§D.6). The owner decided the name mapping on 2026-10-04: a mirror is the plain `<owner>/<repo>`, with
+no prefix, marked by its description (§B.5, R1). Every other contract in §0.3 is frozen.
 
 ---
 
@@ -537,7 +537,6 @@ a settings section (D24) because it is not per repository.
 | `api_url` | `"https://api.github.com"` | REST base. GHES: `https://ghe.example.com/api/v3`. |
 | `git_url` | `"https://github.com"` | Base for clone/LFS/wiki URLs and the `token_env_by_host` key. |
 | `token_env` | `"FLOE_GITHUB_TOKEN"` | Env var holding a PAT (classic `repo` scope, or fine-grained Contents:read + Metadata:read). Never in the bucket. Empty/missing env at runtime = a failed pass with a clear error, never a crash. |
-| `prefix` | `"gh"` | floe owner = `<prefix>-<github owner>` (§B.5). `[a-z0-9]{1,16}`. |
 | `interval` | `"5m"` | Discovery/reconcile cadence. `0` = only `floe github sync --once` and startup. |
 | `users` | `[]` | Owners whose repositories are mirrored. `"@me"` = the token's user, private included. |
 | `orgs` | `[]` | Organisations (all types; private when the token can see them). |
@@ -549,7 +548,7 @@ a settings section (D24) because it is not per repository.
 | `skip_forks` | `true` | Same for forks. |
 | `include_private` | `true` | `false` = public only. `true` is refused by `validate` on a host where floe readers are not all trusted with every mirrored repository, unless `private_visible_to_all_readers = true` (below; R2). |
 | `private_visible_to_all_readers` | `false` | The operator's explicit acknowledgement that floe has no per-repository read ACL, so every principal with read on this floe can read every mirrored private repository. Required whenever `include_private = true`, in every auth mode: the bucket is the fleet's, so the mirror host's auth mode does not bound who reads it. |
-| `wikis` | `false` | Also mirror `<repo>.wiki.git` as `<prefix>-<owner>/<name>.wiki` (§B.10). |
+| `wikis` | `false` | Also mirror `<repo>.wiki.git` as `<owner>/<name>.wiki` (§B.10). |
 | `lfs` | `true` | Write `upstream.lfs` so LFS objects read through (`docs/LFS.md`). |
 | `follow` | `["refs/heads/*", "refs/tags/*"]` | Patterns written into each repository's `upstream.follow`. |
 | `on_rewrite` | `"archive"` | Written into `upstream.on_rewrite`. |
@@ -561,7 +560,7 @@ a settings section (D24) because it is not per repository.
 | `gone_after` | `"24h"` | A repository must be missing/404 for this long (several passes) before it is marked `gone`. |
 | `lease_ttl` | `"2m"` | TTL of `leases/mirror-github.pb`; heartbeat every `lease_ttl / 3`. |
 
-`Config::validate`: `enabled` ⇒ `has_role(Maintain)`; `prefix` charset; globs well-formed (exactly one `/`);
+`Config::validate`: `enabled` ⇒ `has_role(Maintain)`; globs well-formed (exactly one `/`);
 `api_url`/`git_url` are http(s); `follow` is non-empty and parses (§A.2); the `include_private` rule above.
 `maintenance.follow_interval == 0` (follow off on this host) gets a **warning** when the mirror is enabled:
 nudges still run follow ops here, but no backstop round ever runs, and the mirror cannot tell whether another
@@ -594,28 +593,26 @@ selects every non-archived, non-fork repository the token owns).
 
 ### B.5 Naming: GitHub → floe `RepoId`
 
-**Pending the owner's sign-off** (R1). The requirement says `<prefix>/<owner>/<repo>`. floe identity is
-exactly two segments, `<owner>/<repo>` (D5, `RepoId`), and routing is by those two segments (D26). A third
-segment would change both, so this document proposes **`gh/acme/widgets` → `gh-acme/widgets`**. Only
-`naming.rs` encodes it, so the rest of §B does not wait for the answer:
+**Decided by the owner (2026-10-04)**, replacing the proposed `<prefix>-<owner>/<repo>`: a mirrored repository
+has the **plain** `<owner>/<repo>` of its source, with no prefix and no prefix key. What marks it as a mirror is
+its description (`repo.description = "Mirror of https://github.com/<owner>/<repo>"`, §B.7.1) for people, and
+`upstream.source = "github:<id>"` for the mirror's ownership checks. Only `naming.rs` encodes the mapping:
 
-- `owner = format!("{prefix}-{gh_owner}")`, lowercased (GitHub names are case-insensitive, so lowercase is
-  lossless for identity). GitHub owners are `[A-Za-z0-9-]{1,39}`, so a fixed prefix plus `-` is unambiguous.
-- `name = gh_name` lowercased. GitHub allows a leading `.` (`.github`), and floe does not. A leading `.` maps to
-  `_.` (`.github` → `_.github`).
+- `owner = gh_owner` lowercased, `name = gh_name` lowercased (GitHub names are case-insensitive, so lowercase
+  is lossless for identity). GitHub allows a leading `.` (`.github`) and floe does not: it maps to `_.`
+  (`.github` → `_.github`).
 - Wiki: `name + ".wiki"`.
-- **Collision** (the mapped id already exists and is not ours, i.e. its `upstream.source` ≠ `github:<id>`, or
-  two GitHub repositories map to one name): use `<name>--<id>`. If that also exists and is not ours, the state
-  entry is `conflict` and the mapping is skipped with a `warn!`. The mapping is computed **once, at creation**,
-  and stored in state. A rename never changes it (§B.9).
-- **Length**: `RepoId` parts are 1..=100 characters (`validate_part`, floe-git lib.rs ~177). The owner is at
-  most 16 + 1 + 39 = 56, always valid. A GitHub name can be 100 characters, so `<name>.wiki` (≤ 105) and
-  `<name>--<id>` (≤ ~112) can overflow. Rule: when a mapped name exceeds 100, cut the base name so that the
-  result with its suffix is exactly 100 (`<name[..k]>--<id>`, with `.wiki` after it for a wiki). The id makes
-  the cut name unique. A name `RepoId::new` still rejects is `conflict` with the error as `last_error`.
+- **One candidate, no fallback.** If the mapped repository already exists and is not this mirror's (an own
+  repository, or another GitHub id that already maps there), the entry is `conflict`: skipped, never adopted,
+  overwritten or renamed around, with the reason in `last_error` (`floe github status`), one `conflict` change
+  (the `repo_inventory` row names the blocked floe repository) and a `warn!`. It is retried every pass and
+  proceeds once the name is free. A name `RepoId::new` rejects (a reserved owner, say) is a `conflict` too.
+- The mapping is computed **once, at creation**, and stored in state. A rename at GitHub never changes it
+  (§B.9); the description follows the new URL.
+- **Length**: `RepoId` parts are 1..=100 characters. GitHub owners are at most 39 and names at most 100, so the
+  plain mapping always fits (a wiki's `.wiki` suffix may not; wikis are not built, §B.15).
 
-`naming.rs` is pure, and it is table-tested, including `RepoId::new` acceptance of every output, a
-100-character GitHub name, its wiki, and its collision form.
+`naming.rs` is pure and table-tested, including `RepoId::new` acceptance of every output and the longest names.
 
 ### B.6 State in the bucket
 
@@ -635,7 +632,7 @@ Two root-level objects (not under `repos/`, so `Registry::list` never sees them;
   "repos": {
     "123456789": {
       "full_name": "Acme/Widgets",
-      "floe": "gh-acme/widgets",
+      "floe": "acme/widgets",
       "wiki_floe": null,
       "status": "active",
       "private": true, "archived": false, "fork": false,
@@ -732,11 +729,15 @@ follow_interval = "10m"
   byte in meaning (re-serialized through `toml::Table`).
 - **Ownership** (`ExistingRepo` is ours), checked before any publish:
   1. `upstream.source == "github:<id>"` ⇒ ours.
-  2. Otherwise, the repository was never written (`head_seq == 0`: no settings, no refs) **and** its name is
-     the one this entry maps to ⇒ ours. This is the crash between `Create` and the first `PublishUpstream`,
-     where the marker is not written yet. An empty repository that a human created under a `gh-*` name in that
-     window is the only false positive, and it holds no data.
-  3. Otherwise **never** modified (requirement 3): `conflict`, and naming picks `--<id>`.
+  2. Otherwise, the repository was never written (`head_seq == 0`: no settings, no refs) **and** the entry
+     recorded, in a state CAS made just before the create, that it was creating exactly this name
+     (`RepoEntry.claiming`) ⇒ ours. This is the crash between `Create` and the first `PublishUpstream`, where
+     the marker is not written yet. An empty repository nobody claimed is someone else's.
+  3. Otherwise **never** adopted or modified (requirement 3): `conflict` (§B.5).
+- **Description**: every publish also sets `repo.description = "Mirror of <forge URL>"` (the `[repo]` section of
+  the settings document, `floe_config::RepoMeta`, shown by the overview API and the web UI). Ownership and the
+  detach rule below look at `[upstream]` only: a human edit of the description does not detach; the mirror's
+  next publish (a rename, a default-branch change, a freeze) writes it again.
 - **Human edits win**, decided by who wrote the settings, not by a hash alone. Before publishing, for a
   repository that is ours:
   1. The current `[upstream]` table's canonical hash equals `settings_sha` in state ⇒ unchanged; publish if the
@@ -834,7 +835,7 @@ pub async fn reconcile_once(/* same */, opts: PassOptions { dry_run: bool }) -> 
 
 ### B.10 Wikis and LFS
 
-- **Wikis** (`wikis = true` and `has_wiki`): a second floe repository `<prefix>-<owner>/<name>.wiki` with
+- **Wikis** (`wikis = true` and `has_wiki`): a second floe repository `<owner>/<name>.wiki` with
   `upstream.git = https://github.com/<owner>/<name>.wiki.git`, `follow = ["refs/heads/*"]`, same policy.
   GitHub reports `has_wiki = true` even when the wiki has no pages, and then the wiki git URL is a 404. Follow
   reports `fetch failed`. The mirror sees the `failed` SyncRun only through the catalog, so it does not react.
@@ -888,7 +889,7 @@ floe --config floe.toml github status [--json]
 - `sync` without `--once` runs `run_loop` in the foreground (the same lease, so it and a server never reconcile
   together). `--once` acquires the lease (waits up to `lease_ttl`; otherwise exit 3, naming the holder and
   expiry), runs `reconcile_once`, prints the `PassReport`, then releases. `--dry-run` prints the plan
-  (`create gh-acme/widgets ← Acme/Widgets (private, 5.0 MiB)`) and changes nothing (no lease, no writes).
+  (`create acme/widgets ← Acme/Widgets (private, 5.0 MiB)`) and changes nothing (no lease, no writes).
   Follow is not run by the CLI (`nudge_follow` is a no-op): the maintaining host picks new repositories up
   within one `follow_interval`. To force it, run `floe repo …` ops on that host.
 - `status` reads `mirror/github/state.json` and prints counts per status, the last pass, and every non-`active`
@@ -936,6 +937,11 @@ Where the code differs from §B.1–§B.14 (the code wins):
 
 - **Not landed**: wikis (`wikis` key, §B.10) are left out entirely rather than added as a refused key. The
   end-to-end `crates/floe-server/tests/mirror.rs` (mirror → nudge → follow) is open.
+- **Naming (2026-10-04, owner decision)**: `prefix` and the `<name>--<id>` collision form are gone. One
+  candidate, the plain `<owner>/<name>` (§B.5); a name held by a repository that is not the mirror's is a
+  `conflict`. The crash-window adoption needs `RepoEntry.claiming`, saved by a state CAS right before the
+  create (`apply::Flow::Persist`), instead of any empty repository with the mapped name. Every publish also
+  writes `repo.description` (§B.7.1).
 - **Telemetry seam**: `floe-mirror` does not depend on the catalog writer. `run_loop` takes an
   `on_pass: Fn(&PassReport)` hook, and `PassReport.changes` carries the inventory changes. The server's
   `floe_server::mirror::run_loop` passes `record_pass` over `AppState::recorder`. `floe github sync` passes the
@@ -1355,7 +1361,6 @@ enabled = false
 api_url = "https://api.github.com"
 git_url = "https://github.com"
 token_env = "FLOE_GITHUB_TOKEN"   # PAT: classic `repo`, or fine-grained Contents:read + Metadata:read
-prefix = "gh"                     # floe repo = <prefix>-<owner>/<name>, lowercased
 interval = "5m"
 users = []                        # "@me" = the token's user (private included)
 orgs = []
@@ -1426,7 +1431,7 @@ create_tables = true
 A new section, **"Mirroring GitHub"**, after "Running it": five lines on what it does (discover → create →
 follow → archive on rewrite), the minimal config (`[github_mirror] enabled, users = ["@me"]` +
 `FLOE_GITHUB_TOKEN` + a `maintain` host, and `private_visible_to_all_readers = true` or `include_private =
-false`), the naming rule (`gh-acme/widgets`), `floe github sync --once
+false`), the naming rule (`acme/widgets`, plain, marked by its description), `floe github sync --once
 --dry-run`, the archive ref convention, the no-per-repo-ACL warning (R2), and one line on `--features catalog` +
 `[catalog]`. Update the code map (`floe-mirror`, `floe-catalog`) and the `floe-cli` subcommand list.
 `docs/LFS.md`: correct the `token_env`-in-settings example (`token_env` is host-only in the code), and mention
@@ -1445,8 +1450,8 @@ false`), the naming rule (`gh-acme/widgets`), `floe github sync --once
   "fast-forward only" clause; the rest of D33 stands.
 - **D49 (2026-10-04) The GitHub mirror decides, follow moves bytes.** `floe-mirror` runs on a `maintain` host
   under `leases/mirror-github.pb`, keeps `mirror/github/state.json` (CAS) and a disposable HTTP cache in the
-  bucket, maps `owner/name` to `<prefix>-<owner>/<name>` (identity stays two segments, D5/D26; **this
-  mapping is recorded only after the owner signs off**, R1), creates repositories by the manifest CAS, and owns
+  bucket, maps `owner/name` to the plain `<owner>/<name>` (decided 2026-10-04, R1; an existing repository that
+  is not the mirror's is a `conflict`, never adopted), creates repositories by the manifest CAS, and owns
   only the `[upstream]` table of repositories marked `upstream.source = "github:<id>"`. A human edit of that
   table (an `[upstream]` change whose settings author is not `github-mirror`) detaches the repository. It never deletes a
   floe repository, never stores a token (`token_env` + `upstream.token_env_by_host`), and never transfers git
@@ -1543,7 +1548,7 @@ it neither the mirror nor the catalog has one.
 
 | # | Risk / question | Mitigation / owner decision needed |
 |---|---|---|
-| R1 | **Naming deviates** from the requested `<prefix>/<owner>/<repo>`: floe ids are two segments (D5, D26), so we propose `<prefix>-<owner>/<repo>`. **Open: needs the owner's sign-off before §B starts** (status line, §B.5, D49). | Accept (recommended), or open a separate decision to allow nested owners, which touches `RepoId`, routing, the edge contract and the UI. Only `naming.rs` changes if the answer differs. |
+| R1 | Naming. **Decided (owner, 2026-10-04):** the plain `<owner>/<repo>`, no prefix; the description marks a mirror; an own repository at that name is a `conflict`, never adopted or overwritten (§B.5, D49). | Closed. |
 | R2 | **No per-repository read ACL**: a mirrored private GitHub repository is readable by every principal with read on floe. | `validate` refuses `include_private = true` unless `private_visible_to_all_readers = true` (§B.4), so the exposure is an explicit operator decision; README says it loudly; per-repo read ACL is a separate feature. |
 | R3 | **Follow does not scale linearly**: one sequential loop (an `ls-refs` probe per repo per round; Serve-level sync and `packs_fit()` only for repos that moved), the whole object set local while a round publishes. Hundreds of repos are fine; thousands, or one huge repo, are not. | `max_repo_size` + `max_new_per_pass`; refs-first rounds (§A.4); nudges instead of tight polling; huge repos go through the too-large handoff (`floe import` on an SSD host, then the source marker, §B.7.1). A post-MVP item is a concurrency limit for follow ops. |
 | R4 | Archive refs grow the ref count forever (a repository force-pushed hourly gets about 8.7k archive refs a year), and `ls-refs` advertises them. | Acceptable at these sizes (refs are O(1) on hot paths). Post-MVP: optional `upstream.archive_retention` (still never auto-deletes by default), and hiding `refs/archive/` from v0 advertisement. |

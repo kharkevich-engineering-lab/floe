@@ -311,13 +311,14 @@ enabled = false
                                   # [events].sweep_interval
 
 [github_mirror]                   # D49, docs/design/github-mirror.md §B — discover GitHub repositories, create
-                                  # <prefix>-<owner>/<name> with an [upstream] table; follow (D48) moves the bytes.
+                                  # the same <owner>/<name> (lowercased, no prefix) with an [upstream] table and
+                                  # repo.description = "Mirror of <url>"; follow (D48) moves the bytes. A name an
+                                  # own repository already holds is skipped as `conflict`, never adopted.
                                   # Needs the maintain role; one reconciler fleet-wide (leases/mirror-github.pb).
 enabled = false
 api_url = "https://api.github.com"   # GHES: https://ghe.example.com/api/v3
 git_url = "https://github.com"       # base of clone/LFS URLs; also maps upstream.token_env_by_host[host] = token_env
 token_env = "FLOE_GITHUB_TOKEN"   # PAT: classic `repo`, or fine-grained Contents:read + Metadata:read; never stored
-prefix = "gh"                     # floe repo = <prefix>-<owner>/<name>, lowercased ([a-z0-9]{1,16})
 interval = "5m"                   # reconcile cadence; 0 = one pass at startup (and `floe github sync --once`)
 users = []                        # "@me" = the token's user (private included)
 orgs = []

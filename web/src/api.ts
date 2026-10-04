@@ -155,6 +155,8 @@ export interface BundleInfo {
 }
 export interface Overview {
   repo: string;
+  /** `repo.description` from the repository's settings (the GitHub mirror writes `Mirror of <url>`). */
+  description?: string;
   instance: { kind: string; name: string; revision: string; instance: string; version: string; roles: string[]; disk: string; shape: string; cpus: number; memory_bytes: number };
   clone_url: string;
   setup: string;

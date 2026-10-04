@@ -22,6 +22,8 @@ pub enum Flow {
     Continue,
     /// Stop this repository's steps (conflict, detached, too large and unclaimed).
     Stop,
+    /// Save the state (the entry's new `claiming`), then run the same step again.
+    Persist,
 }
 
 /// Counters a step contributes to the pass report.
@@ -78,15 +80,25 @@ fn floe_id(e: &RepoEntry) -> anyhow::Result<RepoId> {
         .ok_or_else(|| anyhow::anyhow!("no floe repository recorded"))
 }
 
-/// Ownership (§B.7.1): ours when it carries our marker, or (only when we may
-/// create) when it was never written, which is the crash between the create
-/// and the first publish. Anything else is never modified (requirement 3).
-fn is_ours(ex: &ExistingRepo, marker: &str, allow_create: bool) -> bool {
+/// Ownership (§B.7.1): ours when it carries our marker (`upstream.source`), or
+/// when it is the empty, never-written repository this entry recorded it was
+/// about to create (`claiming`: a crash between the create and the first
+/// publish). Anything else, an own repository above all, is never adopted or
+/// modified.
+fn is_ours(ex: &ExistingRepo, marker: &str, claimed: bool) -> bool {
     ex.source.as_deref() == Some(marker)
-        || (allow_create && ex.head_seq == 0 && ex.settings_revision == 0)
+        || (claimed && ex.head_seq == 0 && ex.settings_revision == 0)
 }
 
-/// Map the name (plain, then `--<id>`), then adopt or create it.
+/// The floe repository `Create` claims for `e` (`None`: the forge name has no
+/// valid floe form).
+fn claim_target(e: &RepoEntry, id: &str) -> Option<RepoId> {
+    let r = e.to_remote(id);
+    naming::floe_id(&r.owner, &r.name)
+}
+
+/// Adopt or create the one floe name the forge name maps to; a name taken by
+/// a repository that is not this entry's is a `conflict` (skipped, retried).
 async fn claim(
     ctx: &Ctx<'_>,
     id: &str,
@@ -95,45 +107,65 @@ async fn claim(
     out: &mut Outcome,
 ) -> anyhow::Result<Flow> {
     let marker = settings::marker(ctx.source.kind(), id);
-    let r = e.to_remote(id);
-    let owner = naming::owner(&ctx.cfg.prefix, &r.owner);
-    for name in naming::candidates(&ctx.cfg.prefix, &r.owner, &r.name, id) {
-        let rid = RepoId::new(owner.clone(), name)?;
-        if ctx.taken.contains(&rid.to_string()) {
-            continue;
-        }
-        let mut existing = ctx.target.exists(&rid).await?;
-        if existing.is_none() && allow_create {
-            match ctx.target.create(&rid).await? {
-                CreateOutcome::Created => {
-                    tracing::info!(id, floe = %rid, repo = %e.full_name, "created");
-                    out.created = true;
-                    e.floe = Some(rid.to_string());
-                    e.status = Status::Active;
-                    return Ok(Flow::Continue);
-                }
-                // Raced (or cached on this instance): judge what is there.
-                CreateOutcome::AlreadyExists => existing = ctx.target.exists(&rid).await?,
-            }
-        }
-        match existing {
-            Some(ex) if is_ours(&ex, &marker, allow_create) => {
-                tracing::info!(id, floe = %rid, repo = %e.full_name, "adopted");
+    let Some(rid) = claim_target(e, id) else {
+        let why = format!("{} has no valid floe repository name", e.full_name);
+        return Ok(conflict(e, id, allow_create, why));
+    };
+    if ctx.taken.contains(&rid.to_string()) {
+        let why = format!("floe repository {rid} already mirrors another repository");
+        return Ok(conflict(e, id, allow_create, why));
+    }
+    let claimed = e.claiming.as_deref() == Some(rid.to_string().as_str());
+    let mut existing = ctx.target.exists(&rid).await?;
+    if existing.is_none() && allow_create && !claimed {
+        e.claiming = Some(rid.to_string());
+        return Ok(Flow::Persist);
+    }
+    if existing.is_none() && allow_create {
+        match ctx.target.create(&rid).await? {
+            CreateOutcome::Created => {
+                tracing::info!(id, floe = %rid, repo = %e.full_name, "created");
+                out.created = true;
                 e.floe = Some(rid.to_string());
+                e.claiming = None;
                 e.status = Status::Active;
                 return Ok(Flow::Continue);
             }
-            Some(_) => {}
-            // Too large and nobody prepared it: stays too-large.
-            None => return Ok(Flow::Stop),
+            // Raced (or cached on this instance): judge what is there.
+            CreateOutcome::AlreadyExists => existing = ctx.target.exists(&rid).await?,
         }
     }
-    if allow_create {
-        tracing::warn!(id, repo = %e.full_name, "every candidate floe name is taken by a repository that is not ours");
-        e.status = Status::Conflict;
-        e.last_error = Some("every candidate floe name is taken by a repository that is not ours".into());
+    match existing {
+        Some(ex) if is_ours(&ex, &marker, claimed) => {
+            tracing::info!(id, floe = %rid, repo = %e.full_name, "adopted");
+            e.floe = Some(rid.to_string());
+            e.claiming = None;
+            e.status = Status::Active;
+            Ok(Flow::Continue)
+        }
+        Some(_) => {
+            let why = format!(
+                "floe repository {rid} exists and is not a mirror of {}: skipped, never adopted or overwritten",
+                e.full_name
+            );
+            Ok(conflict(e, id, allow_create, why))
+        }
+        // Too large and nobody prepared it: stays too-large.
+        None => Ok(Flow::Stop),
     }
-    Ok(Flow::Stop)
+}
+
+/// The name is not ours to take: `conflict` (when the mirror may create; a
+/// too-large entry stays too-large), with the reason in `last_error` for
+/// `floe github status`. Retried every pass; never renamed around.
+fn conflict(e: &mut RepoEntry, id: &str, allow_create: bool, why: String) -> Flow {
+    e.claiming = None;
+    if allow_create {
+        tracing::warn!(id, repo = %e.full_name, "{why}");
+        e.status = Status::Conflict;
+        e.last_error = Some(why);
+    }
+    Flow::Stop
 }
 
 /// Publish the rendered table, after deciding who wrote the current one.
@@ -145,8 +177,10 @@ async fn publish(
     out: &mut Outcome,
 ) -> anyhow::Result<Flow> {
     let rid = floe_id(e)?;
-    let desired = settings::render(ctx.source, ctx.cfg, &e.to_remote(id), e.status);
+    let remote = e.to_remote(id);
+    let desired = settings::render(ctx.source, ctx.cfg, &remote, e.status);
     let desired_hash = settings::hash(&desired);
+    let description = settings::description(ctx.source, &remote);
     let ex = ctx
         .target
         .exists(&rid)
@@ -170,14 +204,14 @@ async fn publish(
         e.last_error = Some(format!("[upstream] edited by {}", ex.settings_author));
         return Ok(Flow::Stop);
     }
-    if current_hash == desired_hash {
+    if current_hash == desired_hash && ex.description.as_deref() == Some(description.as_str()) {
         e.settings_sha = Some(current_hash);
         e.settings_revision = ex.settings_revision;
         return Ok(Flow::Continue);
     }
     match ctx
         .target
-        .publish_upstream(&rid, &desired, ex.settings_revision, reason)
+        .publish_upstream(&rid, &desired, &description, ex.settings_revision, reason)
         .await?
     {
         PublishOutcome::Published(rev) => {

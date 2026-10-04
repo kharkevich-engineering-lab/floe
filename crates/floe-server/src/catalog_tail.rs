@@ -491,7 +491,7 @@ mod tests {
     /// entry's provenance; an archive line becomes a `force_push_log` row.
     #[test]
     fn rows_follow_the_webhook_events_and_archive_meta() {
-        let id = RepoId::new("gh-acme", "widgets").unwrap();
+        let id = RepoId::new("acme", "widgets").unwrap();
         let (a, b) = ("a".repeat(40), "b".repeat(40));
         let archive = "refs/archive/1700000000/refs/heads/main".to_string();
         let mut entry = LogEntry {
@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(own.change, "snapshot");
         let entry: floe_mirror::RepoEntry = serde_json::from_value(serde_json::json!({
             "full_name": "Acme/Widgets",
-            "floe": "gh-acme/widgets",
+            "floe": "acme/widgets",
             "status": "active",
             "private": true,
             "archived": false,
@@ -617,7 +617,7 @@ mod tests {
         }))
         .unwrap();
         let sid = "123".to_string();
-        let m = inventory_row(now, "gh-acme/widgets", Some((&sid, &entry)), None, "s1");
+        let m = inventory_row(now, "acme/widgets", Some((&sid, &entry)), None, "s1");
         assert_eq!(m.source, "github");
         assert_eq!(m.source_id.as_deref(), Some("123"));
         assert_eq!(m.full_name.as_deref(), Some("Acme/Widgets"));

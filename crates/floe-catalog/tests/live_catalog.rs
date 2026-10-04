@@ -120,7 +120,7 @@ async fn appends_and_reads_back_all_four_tables() {
     writer.record_inventory(InventoryRecord::new(
         Utc::now(),
         "created",
-        "gh-o/r",
+        "o/r",
         "github",
     ));
     writer.shutdown().await;

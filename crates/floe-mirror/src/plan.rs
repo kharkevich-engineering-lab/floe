@@ -425,7 +425,7 @@ mod tests {
         let src = FakeSource::new("https://github.com");
         let mut e = RepoEntry::default();
         e.observe(r, t(0));
-        e.floe = Some(format!("gh-{}/{}", r.owner.to_lowercase(), r.name.to_lowercase()));
+        e.floe = Some(format!("{}/{}", r.owner.to_lowercase(), r.name.to_lowercase()));
         e.settings_sha = Some(settings::hash(&settings::render(&src, cfg, r, Status::Active)));
         e.settings_revision = 1;
         e.policy = true;
@@ -469,7 +469,7 @@ mod tests {
         assert_eq!(steps(&p, "1"), ["publish"]);
         let e = p.state.repos.get("1").unwrap();
         assert_eq!(e.full_name, "Acme/Gadgets");
-        assert_eq!(e.floe.as_deref(), Some("gh-acme/widgets"));
+        assert_eq!(e.floe.as_deref(), Some("acme/widgets"));
 
         let mut branch = r.clone();
         branch.default_branch = Some("trunk".into());
@@ -632,7 +632,7 @@ mod tests {
         let mut s = MirrorState::default();
         let mut e = RepoEntry::default();
         e.observe(&r, t(0));
-        e.floe = Some("gh-acme/widgets".into());
+        e.floe = Some("acme/widgets".into());
         e.status = Status::Error;
         s.repos.insert("1".into(), e);
         let p = run(&s, &c, &disc(vec![r.clone()], true), &BTreeMap::new(), t(1));

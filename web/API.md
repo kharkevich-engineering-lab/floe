@@ -464,7 +464,8 @@ list by `commit_date` day and shows `subject` + `author`.
 
 Backs the "WAL" tab. Not needed by Code/Commits pages; a host without a
 WAL should return `404` (the tab then shows the error text). Shape is in
-`api.ts#Overview` / `overview.go`: `repo`, `clone_url`, `hostname`,
+`api.ts#Overview` / `overview.go`: `repo`, `description?` (the settings document's `repo.description`, absent
+when unset; the GitHub mirror writes `Mirror of <url>`), `clone_url`, `hostname`,
 `health{status: ok|degraded|error, issues[], deep, suggestions[{op, params?, reason, auto?}]}` — `deep` is the
 last connectivity audit as recorded in the store (`fsck.pb`, any maintainer), `auto` says how/when the
 maintainer loop performs a suggestion by itself (absent = a human must) — `manifest{version,

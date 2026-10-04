@@ -374,6 +374,10 @@ fn content_type(path: &str) -> &'static str {
 #[derive(Serialize)]
 struct Overview {
     repo: String,
+    /// `repo.description` from the settings document (`floe_config::RepoMeta`);
+    /// the GitHub mirror sets it to `Mirror of <url>`. Absent when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     /// Which instance rendered this page (kind, name, shape, build).
     instance: crate::instance::InstanceInfo,
     clone_url: String,
@@ -973,8 +977,14 @@ async fn overview(
             orphaned,
         }
     };
+    let description = manifest
+        .settings
+        .as_ref()
+        .and_then(|s| floe_config::RepoMeta::from_settings(&s.toml).ok())
+        .and_then(|m| m.description);
     let body = Overview {
         repo: id.to_string(),
+        description,
         instance: crate::instance::info(&state.cfg),
         clone_url,
         setup,

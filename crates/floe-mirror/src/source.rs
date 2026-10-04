@@ -29,6 +29,12 @@ pub trait Source: Send + Sync {
     fn git_url(&self, r: &RemoteRepo) -> String;
     /// The LFS endpoint (`upstream.lfs`).
     fn lfs_url(&self, r: &RemoteRepo) -> Option<String>;
+    /// The repository's page at the forge (the `Mirror of <url>` description):
+    /// by default the git URL without its `.git`.
+    fn web_url(&self, r: &RemoteRepo) -> String {
+        let git = self.git_url(r);
+        git.strip_suffix(".git").map_or_else(|| git.clone(), str::to_string)
+    }
 }
 
 /// One repository as the forge reports it (only what the mirror uses).

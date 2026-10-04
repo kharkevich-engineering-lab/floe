@@ -842,8 +842,9 @@ impl Default for GithubConfig {
 }
 
 /// D49 — the GitHub mirror (`floe-mirror`, `docs/design/github-mirror.md` §B):
-/// discovers repositories on GitHub, creates `<prefix>-<owner>/<name>` with an
-/// `[upstream]` table, and lets follow (D48) move the bytes. Host-level only (not
+/// discovers repositories on GitHub, creates the same `<owner>/<name>` in floe
+/// (lowercased) with an `[upstream]` table and a `repo.description` naming the
+/// source, and lets follow (D48) move the bytes. Host-level only (not
 /// a settings section); runs on a `maintain` host under `leases/mirror-github.pb`.
 /// `[github]` is the facade (D42), hence the name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -859,8 +860,6 @@ pub struct GithubMirrorConfig {
     /// Env var holding a PAT (classic `repo`, or fine-grained Contents:read +
     /// Metadata:read). Read at every pass; never written to the bucket.
     pub token_env: String,
-    /// floe owner = `<prefix>-<github owner>`, lowercased. `[a-z0-9]{1,16}`.
-    pub prefix: String,
     /// Discovery/reconcile cadence. `0` = only at startup (and `floe github sync --once`).
     #[serde(with = "humantime_serde")]
     pub interval: Duration,
@@ -926,7 +925,6 @@ impl Default for GithubMirrorConfig {
             api_url: "https://api.github.com".into(),
             git_url: "https://github.com".into(),
             token_env: "FLOE_GITHUB_TOKEN".into(),
-            prefix: "gh".into(),
             interval: Duration::from_mins(5),
             users: Vec::new(),
             orgs: Vec::new(),
@@ -1038,16 +1036,6 @@ impl GithubMirrorConfig {
     /// The section's own checks, without the role rule: `floe github sync`
     /// runs them on a CLI host, where `enabled` is normally off.
     pub fn check(&self) -> Result<()> {
-        anyhow::ensure!(
-            !self.prefix.is_empty()
-                && self.prefix.len() <= 16
-                && self
-                    .prefix
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
-            "github_mirror.prefix must be [a-z0-9]{{1,16}}, got {:?}",
-            self.prefix
-        );
         for (key, list) in [("include", &self.include), ("exclude", &self.exclude)] {
             for g in list {
                 anyhow::ensure!(
@@ -1166,6 +1154,53 @@ fn default_true() -> bool {
 
 /// D24: the top-level sections a repository's settings may override.
 pub const SETTINGS_SECTIONS: &[&str] = &["bundles", "maintenance", "compaction", "upstream"];
+/// The settings document's one section that is not configuration: `[repo]`,
+/// the repository's own metadata ([`RepoMeta`]). Never merged into a [`Config`].
+pub const REPO_META_SECTION: &str = "repo";
+/// Longest `repo.description`, in characters.
+pub const DESCRIPTION_MAX_CHARS: usize = 512;
+
+/// `[repo]` in a repository's settings document: metadata about the
+/// repository itself, shown by the API (`overview.description`) and the web UI.
+/// The GitHub mirror (D49) sets `description` to `Mirror of <url>` and keeps it
+/// current. Rides on the same CAS'd, WAL-logged SETTINGS entry as the overrides.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoMeta {
+    /// One line of free text (no control characters), at most
+    /// [`DESCRIPTION_MAX_CHARS`] characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl RepoMeta {
+    /// The `[repo]` table of a settings document (default when absent).
+    pub fn from_settings(settings_toml: &str) -> Result<RepoMeta> {
+        if settings_toml.trim().is_empty() {
+            return Ok(RepoMeta::default());
+        }
+        let mut doc: toml::Table = settings_toml.parse().context("settings: parsing TOML")?;
+        Self::from_value(doc.remove(REPO_META_SECTION))
+    }
+
+    fn from_value(v: Option<toml::Value>) -> Result<RepoMeta> {
+        let Some(v) = v else {
+            return Ok(RepoMeta::default());
+        };
+        let meta: RepoMeta = v.try_into().context("settings: [repo]")?;
+        if let Some(d) = &meta.description {
+            anyhow::ensure!(
+                d.chars().count() <= DESCRIPTION_MAX_CHARS,
+                "settings: repo.description is longer than {DESCRIPTION_MAX_CHARS} characters"
+            );
+            anyhow::ensure!(
+                !d.chars().any(char::is_control),
+                "settings: repo.description must be one line without control characters"
+            );
+        }
+        Ok(meta)
+    }
+}
 /// D24: maximum size of a settings document.
 pub const SETTINGS_MAX_BYTES: usize = 16 * 1024;
 
@@ -1192,11 +1227,13 @@ impl Config {
             settings_toml.len() <= SETTINGS_MAX_BYTES,
             "settings document larger than {SETTINGS_MAX_BYTES} bytes"
         );
-        let overrides: toml::Table = settings_toml.parse().context("settings: parsing TOML")?;
+        let mut overrides: toml::Table = settings_toml.parse().context("settings: parsing TOML")?;
+        // `[repo]` is metadata, not configuration: checked, never merged.
+        RepoMeta::from_value(overrides.remove(REPO_META_SECTION))?;
         for k in overrides.keys() {
             anyhow::ensure!(
                 SETTINGS_SECTIONS.contains(&k.as_str()),
-                "settings: section [{k}] may not be set per repository (allowed: {})",
+                "settings: section [{k}] may not be set per repository (allowed: {}, and [{REPO_META_SECTION}])",
                 SETTINGS_SECTIONS.join(", ")
             );
         }
@@ -2378,6 +2415,29 @@ listen = \"0.0.0.0:1\"\n",
     }
 
     #[test]
+    fn repo_description_is_metadata_not_config() {
+        let c = Config::default();
+        let doc = "[repo]\ndescription = \"Mirror of https://github.com/acme/widgets\"\n\n[bundles]\nmain_only = true\n";
+        c.with_settings(doc).unwrap();
+        assert_eq!(
+            RepoMeta::from_settings(doc).unwrap().description.as_deref(),
+            Some("Mirror of https://github.com/acme/widgets")
+        );
+        assert_eq!(RepoMeta::from_settings("").unwrap(), RepoMeta::default());
+        assert_eq!(RepoMeta::from_settings("[bundles]\nmain_only = true\n").unwrap(), RepoMeta::default());
+        for bad in [
+            "[repo]\ntopic = \"x\"\n".to_string(),
+            "[repo]\ndescription = \"a\\nb\"\n".to_string(),
+            format!("[repo]\ndescription = \"{}\"\n", "x".repeat(DESCRIPTION_MAX_CHARS + 1)),
+        ] {
+            assert!(c.with_settings(&bad).is_err(), "{bad}");
+            assert!(RepoMeta::from_settings(&bad).is_err(), "{bad}");
+        }
+        // Never part of the effective config a reader sees.
+        assert!(!c.with_settings(doc).unwrap().public_settings_toml().unwrap().contains("Mirror of"));
+    }
+
+    #[test]
     fn github_mirror_validates_and_derives_the_token_host() {
         let mut c = Config::default();
         c.github_mirror.enabled = true;
@@ -2389,9 +2449,7 @@ listen = \"0.0.0.0:1\"\n",
         bad.server.roles = vec![Role::Serve];
         assert!(bad.validate().is_err());
         bad.github_mirror.check().unwrap();
-        let edits: [fn(&mut GithubMirrorConfig); 10] = [
-            |m: &mut GithubMirrorConfig| m.prefix = "GH".into(),
-            |m: &mut GithubMirrorConfig| m.prefix = String::new(),
+        let edits: [fn(&mut GithubMirrorConfig); 8] = [
             |m: &mut GithubMirrorConfig| m.include = vec!["acme".into()],
             |m: &mut GithubMirrorConfig| m.exclude = vec!["a/b/c".into()],
             |m: &mut GithubMirrorConfig| m.repos = vec!["acme/*".into()],

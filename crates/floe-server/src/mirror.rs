@@ -176,8 +176,8 @@ mod tests {
             outcome: "ok",
             complete: true,
             changes: vec![
-                ("gh-acme/widgets".into(), "created".into()),
-                ("gh-acme/gadgets".into(), "gone".into()),
+                ("acme/widgets".into(), "created".into()),
+                ("acme/gadgets".into(), "gone".into()),
             ],
             api: floe_mirror::ApiStats {
                 requests: 4,
@@ -197,7 +197,7 @@ mod tests {
         assert!(run.repo.is_none());
         let inv = rec.inventory.lock();
         let changes: Vec<_> = inv.iter().map(|r| (r.floe_repo.as_str(), r.change.as_str(), r.source.as_str())).collect();
-        assert_eq!(changes, [("gh-acme/widgets", "created", "github"), ("gh-acme/gadgets", "gone", "github")]);
+        assert_eq!(changes, [("acme/widgets", "created", "github"), ("acme/gadgets", "gone", "github")]);
     }
 
     /// A failed pass (GitHub down, a bad token) is a `failed` run carrying

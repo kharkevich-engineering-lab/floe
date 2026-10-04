@@ -353,7 +353,10 @@ decision in §4 — or the PR is; never "fix later".
   `…/history`; `floe repo settings show|set|clear|history`. Not in settings: auth, store, server, wal, cache,
   `upstream.token_env` (host-only). `GET …/effective` returns only those sections. PUT/DELETE of settings and of
   `policy.json` require an **admin** principal (`tokens[].admin`, or oidc `admin_emails`/`admin_domains`;
-  `mode = none` is admin on loopback). Write is push, not admin.
+  `mode = none` is admin on loopback). Write is push, not admin. *2026-10-04:* the document may also carry
+  `[repo]`, the repository's own metadata, never merged into the config (`floe_config::RepoMeta`): today
+  `description` (one line, ≤ 512 chars), shown as `description` by `GET …/api/overview` and the web UI; the GitHub
+  mirror writes `Mirror of <url>` there (D49).
 - **D25** **Two cache modes.** `cache.mode = "budget" | "disk" | "auto"` (auto = disk when `maintenance.disk =
   "ssd"`); in **disk** mode `cache_budget_bytes()` is 0 = unlimited — every repo fully local, never the
   too-large/remote/link path, eviction only under disk pressure (`cache.disk_high_watermark`, idle-oldest first).
@@ -490,11 +493,14 @@ bypass) that a policy file replaces only by defining a rule of that name (`docs/
 **D49 — The GitHub mirror decides, follow moves bytes (2026-10-04).** `floe-mirror` runs on a `maintain` host
 (`[github_mirror] enabled`, its own loop next to follow) or as `floe github sync`, under
 `leases/mirror-github.pb`; it keeps `mirror/github/state.json` (CAS, generation-guarded) and a disposable
-`mirror/github/http-cache.json` (`PutMode::Overwrite`, a cache) in the bucket, maps `owner/name` to
-`<prefix>-<owner>/<name>` (identity stays two segments, D5/D26; pending the owner's sign-off, R1), creates
-repositories by the manifest CAS, publishes a read-only `policy.json` (create-only) and owns only the `[upstream]`
-table of repositories marked `upstream.source = "github:<id>"`, written with `publish_settings_if` (a CAS on the
-settings revision). A human edit of that table (settings author not `github-mirror`) detaches the repository. It
+`mirror/github/http-cache.json` (`PutMode::Overwrite`, a cache) in the bucket, maps `Owner/Name` to the plain
+`owner/name` (lowercased, no prefix; owner decision 2026-10-04, R1), creates repositories by the manifest CAS
+(after recording the name it is about to create, `RepoEntry.claiming`), publishes a read-only `policy.json`
+(create-only) and owns only the `[upstream]` table and `repo.description` (`Mirror of <url>`, the visible
+marker) of repositories marked `upstream.source = "github:<id>"`, written with `publish_settings_if` (a CAS on
+the settings revision). A repository that already holds the name and is not the mirror's (an own repository) is
+never adopted or overwritten: the entry is `conflict` (state, `floe github status`, an inventory row) and is
+retried every pass. A human edit of that table (settings author not `github-mirror`) detaches the repository. It
 never deletes a floe repository (gone/excluded repositories are frozen with `follow = []`), never stores a token
 (`token_env` + `upstream.token_env_by_host`), and never transfers git objects: a push seen at the forge nudges
 `ops::start(.., "follow")` on the maintaining host only. GitLab/Gitea implement `Source`. Design:

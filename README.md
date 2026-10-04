@@ -152,8 +152,10 @@ users = ["@me"]          # the token's user, private repositories included
 private_visible_to_all_readers = true    # or include_private = false
 ```
 
-* Names: `Acme/Widgets` becomes `gh-acme/widgets` (`<prefix>-<owner>/<name>`, lowercased; floe ids are two segments).
-  The name stays the same when the repository is renamed on GitHub.
+* Names: `Acme/Widgets` becomes `acme/widgets`: the same `<owner>/<name>`, lowercased, no prefix. Its description
+  reads `Mirror of https://github.com/Acme/Widgets` (and follows renames); the name itself stays the same when the
+  repository is renamed on GitHub. If one of your own repositories already has that name, the mirror leaves it
+  alone and reports the GitHub repository as `conflict` in `floe github status`.
 * `floe github sync --once --dry-run` prints the plan and changes nothing. `floe github sync --once` runs one pass,
   and `floe github status` shows what the mirror knows.
 * Mirrored repositories are read-only by default (a deny-all `policy.json`), so only follow moves their refs. Floe never

@@ -78,7 +78,7 @@ pub struct PassReport {
     pub published: u32,
     pub nudged: u32,
     pub errors: u32,
-    /// One human line per planned step (`create gh-acme/widgets ← Acme/Widgets …`).
+    /// One human line per planned step (`create acme/widgets ← Acme/Widgets …`).
     pub plan: Vec<String>,
     /// `(floe repository or forge name, change)` for inventory telemetry.
     pub changes: Vec<(String, String)>,
@@ -233,7 +233,16 @@ pub async fn reconcile_once(
                 return Err(PassError::Draining);
             }
             let mut out = apply::Outcome::default();
-            let r = apply::step(&ctx, &action.id, &mut e, s, &mut out).await;
+            let mut r = apply::step(&ctx, &action.id, &mut e, s, &mut out).await;
+            if let Ok(apply::Flow::Persist) = r {
+                // The name is free and about to be created: record `claiming`
+                // first (one state CAS per creation), so after a crash in
+                // between only that empty repository is ours. Then create.
+                st.repos.insert(action.id.clone(), e.clone());
+                save(m, &mut st, holder).await?;
+                since_save = 0;
+                r = apply::step(&ctx, &action.id, &mut e, s, &mut out).await;
+            }
             since_save += 1;
             report.created += u32::from(out.created);
             report.published += u32::from(out.published);
@@ -242,7 +251,7 @@ pub async fn reconcile_once(
                 .increment(1);
             match r {
                 Ok(apply::Flow::Continue) => {}
-                Ok(apply::Flow::Stop) => {
+                Ok(apply::Flow::Stop | apply::Flow::Persist) => {
                     finished = false;
                     break;
                 }
@@ -276,9 +285,17 @@ pub async fn reconcile_once(
     report.changes = changes
         .iter()
         .map(|(id, c)| {
+            // The floe repository, or the one it maps to when it has none yet
+            // (a conflict names the repository that blocks it), else the forge name.
             let name = st.repos.get(id).map_or_else(
                 || id.clone(),
-                |e| e.floe.clone().unwrap_or_else(|| e.full_name.clone()),
+                |e| {
+                    let r = e.to_remote(id);
+                    e.floe
+                        .clone()
+                        .or_else(|| naming::floe_id(&r.owner, &r.name).map(|f| f.to_string()))
+                        .unwrap_or_else(|| e.full_name.clone())
+                },
             );
             (name, c.clone())
         })
@@ -323,7 +340,6 @@ fn count_statuses(st: &MirrorState) -> BTreeMap<&'static str, usize> {
 
 /// Human lines for a plan (`--dry-run` and logs).
 fn describe(m: &Mirror, p: &plan::Plan) -> Vec<String> {
-    let gm = &m.cfg.github_mirror;
     let mut lines = Vec::new();
     for a in &p.actions {
         let Some(e) = p.state.repos.get(&a.id) else {
@@ -331,11 +347,7 @@ fn describe(m: &Mirror, p: &plan::Plan) -> Vec<String> {
         };
         let r = e.to_remote(&a.id);
         let floe = e.floe.clone().unwrap_or_else(|| {
-            let name = naming::candidates(&gm.prefix, &r.owner, &r.name, &a.id)
-                .into_iter()
-                .next()
-                .unwrap_or_default();
-            format!("{}/{name}", naming::owner(&gm.prefix, &r.owner))
+            naming::floe_id(&r.owner, &r.name).map_or_else(|| "(no valid floe name)".to_string(), |id| id.to_string())
         });
         for s in &a.steps {
             lines.push(match s {
