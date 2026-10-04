@@ -11,6 +11,12 @@ pub use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 pub use std::str::FromStr;
 
+mod tls;
+pub use tls::{
+    AcmeConfig, CloudflareConfig, DNS01, DnsProvider, LETSENCRYPT_PRODUCTION, LETSENCRYPT_STAGING,
+    TlsConfig, TlsMode, valid_cert_name,
+};
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
@@ -80,47 +86,10 @@ pub struct ServerConfig {
     /// methods require a matching `Origin` when one is sent. Browser identity
     /// is the app session cookie.
     pub cors_origins: Vec<String>,
-    /// TLS terminated by floe itself (standalone, D39). A reverse proxy may terminate
-    /// TLS and use `mode = "off"` (h2c); a standalone host serves
+    /// TLS terminated by floe itself (D39, D59): `off` | `files` | `acme` (DNS-01). A reverse
+    /// proxy may terminate TLS and use `mode = "off"` (h2c); a standalone host serves
     /// `https://` directly so git, browsers and the SDK see one origin with no edge.
     pub tls: TlsConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct TlsConfig {
-    pub mode: TlsMode,
-    /// `files` mode: PEM certificate chain and PKCS#8/PKCS#1 private key.
-    pub cert: Option<PathBuf>,
-    pub key: Option<PathBuf>,
-    /// `self_signed` mode: subject alternative names. Empty = `localhost`, `*.localhost`,
-    /// `127.0.0.1`, `::1` and the host of `server.public_url`. The certificate is written
-    /// once to `<cache.dir>/tls/{cert,key}.pem` and regenerated when this set changes;
-    /// clients fetch it at `/services/public/ca.pem` (the installer pins it for git).
-    pub hostnames: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TlsMode {
-    /// Plain HTTP/1.1 + h2c (behind an edge that terminates TLS).
-    #[default]
-    Off,
-    /// A self-signed certificate floe generates and keeps under `cache.dir`.
-    SelfSigned,
-    /// `cert` + `key` from disk.
-    Files,
-}
-
-impl Default for TlsConfig {
-    fn default() -> Self {
-        TlsConfig {
-            mode: TlsMode::Off,
-            cert: None,
-            key: None,
-            hostnames: vec![],
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1921,24 +1890,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.store.bucket.is_empty(), "store.bucket must be set");
         self.catalog.validate()?;
-        let t = &self.server.tls;
-        match t.mode {
-            TlsMode::Files => anyhow::ensure!(
-                t.cert.is_some() && t.key.is_some(),
-                "server.tls.cert and server.tls.key must both be set in files mode"
-            ),
-            TlsMode::Off | TlsMode::SelfSigned => anyhow::ensure!(
-                t.cert.is_none() && t.key.is_none(),
-                "server.tls.cert/key are only read in files mode (got mode = {:?})",
-                t.mode
-            ),
-        }
-        if t.mode != TlsMode::SelfSigned {
-            anyhow::ensure!(
-                t.hostnames.is_empty(),
-                "server.tls.hostnames only applies to self_signed mode"
-            );
-        }
+        self.server.tls.validate()?;
         if let Some(u) = &self.server.public_url {
             anyhow::ensure!(
                 u.starts_with("https://") || u.starts_with("http://"),
@@ -2190,39 +2142,6 @@ impl Config {
     /// Whether this process terminates TLS itself (D39 standalone shape).
     pub fn tls_enabled(&self) -> bool {
         self.server.tls.mode != TlsMode::Off
-    }
-
-    /// Where the self-signed certificate lives: `<cache.dir>/tls/`.
-    pub fn tls_dir(&self) -> PathBuf {
-        self.cache.dir.join("tls")
-    }
-
-    /// Subject alternative names for a self-signed certificate: the configured
-    /// `server.tls.hostnames`, else localhost forms plus `public_url`'s host.
-    pub fn tls_hostnames(&self) -> Vec<String> {
-        if !self.server.tls.hostnames.is_empty() {
-            return self.server.tls.hostnames.clone();
-        }
-        let mut v: Vec<String> = ["localhost", "*.localhost", "127.0.0.1", "::1"]
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        if let Some(u) = &self.server.public_url {
-            let host = u
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .trim_start_matches('[');
-            let host = host
-                .rsplit_once(']')
-                .map_or_else(|| host.split(':').next().unwrap_or(host), |(h, _)| h);
-            if !host.is_empty() && !v.iter().any(|h| h == host) {
-                v.push(host.to_string());
-            }
-        }
-        v
     }
 
     pub fn has_role(&self, role: Role) -> bool {
