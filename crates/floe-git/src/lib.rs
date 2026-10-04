@@ -118,7 +118,10 @@ pub fn validate_ref_update(u: &floe_proto::v1::RefUpdate) -> Result<(), GitError
     validate_oid(&u.new_oid)
 }
 
-const FLOE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Version advertised as `agent=floe/<version>`: the release version (`FLOE_VERSION` at
+/// build time, see build.rs), else the crate version. floe-server's protocol v2 advert
+/// uses this same constant so the two wire paths never disagree.
+pub const FLOE_VERSION: &str = env!("FLOE_VERSION");
 
 #[cfg(test)]
 mod validate_ref_tests {
@@ -2892,6 +2895,25 @@ fn capabilities_for(service: Service, format: ObjectFormat) -> String {
             "report-status report-status-v2 delete-refs side-band-64k quiet atomic ofs-delta \
              push-options object-format={of} {agent}"
         ),
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+
+    #[test]
+    fn both_services_advertise_the_baked_version() {
+        // FLOE_VERSION is the build.rs value (release version or crate version);
+        // a hard-coded CARGO_PKG_VERSION here once drifted from `floe --version`.
+        assert!(!FLOE_VERSION.is_empty());
+        for service in [Service::UploadPack, Service::ReceivePack] {
+            let caps = capabilities_for(service, ObjectFormat::Sha1);
+            assert!(
+                caps.ends_with(&format!(" agent=floe/{FLOE_VERSION}")),
+                "{caps}"
+            );
+        }
     }
 }
 

@@ -46,7 +46,18 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: |
           if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            # A fixed rustup-init checked against a hash pinned here, never `curl | sh` of
+            # whatever sh.rustup.rs serves today. Bump RUSTUP and both hashes together.
+            RUSTUP=1.29.1
+            case "$(uname -m)" in
+              aarch64) triple=aarch64-unknown-linux-gnu; sum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;;
+              x86_64) triple=x86_64-unknown-linux-gnu; sum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;;
+              *) echo "::error::no pinned rustup-init for $(uname -m)"; exit 1 ;;
+            esac
+            curl --proto '=https' --tlsv1.2 -sSfo "$RUNNER_TEMP/rustup-init" "https://static.rust-lang.org/rustup/archive/${RUSTUP}/${triple}/rustup-init"
+            echo "${sum}  $RUNNER_TEMP/rustup-init" | sha256sum -c -
+            chmod +x "$RUNNER_TEMP/rustup-init"
+            "$RUNNER_TEMP/rustup-init" -y --profile minimal --default-toolchain none
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
@@ -107,7 +118,18 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: |
           if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            # A fixed rustup-init checked against a hash pinned here, never `curl | sh` of
+            # whatever sh.rustup.rs serves today. Bump RUSTUP and both hashes together.
+            RUSTUP=1.29.1
+            case "$(uname -m)" in
+              aarch64) triple=aarch64-unknown-linux-gnu; sum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;;
+              x86_64) triple=x86_64-unknown-linux-gnu; sum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;;
+              *) echo "::error::no pinned rustup-init for $(uname -m)"; exit 1 ;;
+            esac
+            curl --proto '=https' --tlsv1.2 -sSfo "$RUNNER_TEMP/rustup-init" "https://static.rust-lang.org/rustup/archive/${RUSTUP}/${triple}/rustup-init"
+            echo "${sum}  $RUNNER_TEMP/rustup-init" | sha256sum -c -
+            chmod +x "$RUNNER_TEMP/rustup-init"
+            "$RUNNER_TEMP/rustup-init" -y --profile minimal --default-toolchain none
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
@@ -148,23 +170,54 @@ jobs:
           retention-days: 14
 
   container:
-    name: release container
-    runs-on: blacksmith-4vcpu-ubuntu-2204
+    name: release container (${{ matrix.arch }})
+    # Both arches the release workflow publishes, each on a native runner: the release
+    # run on main must never be the first time the Containerfile is built for arm64.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runs-on: blacksmith-4vcpu-ubuntu-2204
+          - arch: arm64
+            platform: linux/arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
-      - uses: useblacksmith/setup-docker-builder@v1
+      - if: matrix.arch == 'amd64'
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Build release image without publishing
+        if: matrix.arch == 'amd64'
         uses: useblacksmith/build-push-action@v2
         with:
           context: .
           file: Containerfile
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: false
           load: true
           provenance: false
           build-args: FLOE_BUILD_SHA=${{ github.sha }}
           tags: floe:smoke
+      # Blacksmith has no arm64 builder; the same build on GitHub's native arm64 runner.
+      - if: matrix.arch == 'arm64'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Build release image without publishing
+        if: matrix.arch == 'arm64'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Containerfile
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: true
+          provenance: false
+          build-args: FLOE_BUILD_SHA=${{ github.sha }}
+          tags: floe:smoke
+          cache-from: type=gha,scope=ci-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.arch }}
       - name: Start S3-compatible test store
         run: |
           docker compose up -d --wait rustfs
@@ -195,7 +248,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: editor-container-logs
+          name: editor-container-logs-${{ matrix.arch }}
           path: smoke-logs/
           retention-days: 14
       - name: Clean up

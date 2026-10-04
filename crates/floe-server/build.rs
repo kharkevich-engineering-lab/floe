@@ -30,8 +30,9 @@ fn main() {
 }
 
 /// Release version for `floe --version`. The release workflow passes the version
-/// semantic-release is about to tag as `FLOE_VERSION` (the binaries are built before
-/// `scripts/release.sh` rewrites Cargo.toml); any other build reports the crate version.
+/// semantic-release is about to tag as `FLOE_VERSION` (no release ever rewrites
+/// Cargo.toml); any other build reports the crate's placeholder version. floe-git's
+/// build.rs repeats this so the git `agent=` advert agrees.
 fn release_version() -> String {
     println!("cargo:rerun-if-env-changed=FLOE_VERSION");
     std::env::var("FLOE_VERSION")

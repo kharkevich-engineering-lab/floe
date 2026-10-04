@@ -21,8 +21,9 @@ env:
 
 jobs:
   # The version this push will release, before anything is built with it. floe bakes
-  # its version in at compile time (FLOE_VERSION, crates/floe-server/build.rs), and
-  # release.sh rewrites Cargo.toml only later, so the build must be told up front.
+  # its version in at compile time (FLOE_VERSION, read by the build.rs of floe-server
+  # and floe-git); the version lives only in the tag and in FLOE_VERSION, never in a
+  # commit (Cargo.toml stays at its placeholder), so the build must be told up front.
   version:
     name: Work out the next version
     runs-on: ubuntu-latest
@@ -47,17 +48,19 @@ jobs:
           node-version: 24
       - name: Dry-run semantic-release
         id: next
-        uses: cycjimmy/semantic-release-action@v6
+        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
         with:
           dry_run: true
-          # The same plugins as the real run: .releaserc names them and semantic-release
-          # loads every plugin before deciding anything. A dry run runs no prepareCmd,
-          # so release.sh never executes here.
+          # Exactly the versions of the real run below (keep the two blocks identical):
+          # the dry run decides the version baked into the binaries, so it must resolve
+          # the same code as the run that tags. A dry run runs no prepareCmd, so
+          # release.sh never executes here.
+          semantic_version: 25.0.9
           extra_plugins: |
-            @semantic-release/commit-analyzer
-            @semantic-release/release-notes-generator
-            @semantic-release/exec
-            @semantic-release/github
+            @semantic-release/commit-analyzer@13.0.1
+            @semantic-release/release-notes-generator@14.1.1
+            @semantic-release/exec@7.1.0
+            @semantic-release/github@12.0.10
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -92,9 +95,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -103,7 +106,7 @@ jobs:
       # tagged manifest after the release exists, so a failed release tags nothing.
       - name: Build and push the image (${{ matrix.platform }})
         id: image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: Containerfile
@@ -122,7 +125,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
       # Same builder, same build args: every layer up to `binaries` is a cache hit.
       - name: Export the binaries from the same build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: Containerfile
@@ -146,7 +149,7 @@ jobs:
               x86_64-*) file "$binary" | grep -q "x86-64" ;;
             esac
             # Native runner, so the binary can run here: it must report the version
-            # about to be tagged, not the stale one in Cargo.toml.
+            # about to be tagged, not the placeholder in Cargo.toml.
             chmod +x "$binary"
             "$binary" --version
             "$binary" --version | grep -qF " ${VERSION} ("
@@ -182,7 +185,9 @@ jobs:
           name: digest-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
-          retention-days: 1
+          # As long as a "Re-run failed jobs" of `image` is a plausible recovery: a rerun
+          # of the whole workflow will not rebuild once the tag exists.
+          retention-days: 14
 
   release:
     name: Release
@@ -213,13 +218,15 @@ jobs:
         run: ls -l dist/
       - name: Run semantic-release
         id: release
-        uses: cycjimmy/semantic-release-action@v6
+        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
         with:
+          # Pinned identically to the dry run in the `version` job.
+          semantic_version: 25.0.9
           extra_plugins: |
-            @semantic-release/commit-analyzer
-            @semantic-release/release-notes-generator
-            @semantic-release/exec
-            @semantic-release/github
+            @semantic-release/commit-analyzer@13.0.1
+            @semantic-release/release-notes-generator@14.1.1
+            @semantic-release/exec@7.1.0
+            @semantic-release/github@12.0.10
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # The binaries carry the dry run's version; a real run that disagrees (or released
@@ -254,9 +261,9 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/digests
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -278,6 +285,10 @@ jobs:
             -t "${IMAGE}:${VERSION}" \
             -t "${IMAGE}:${major}.${minor}" \
             -t "${IMAGE}:latest" \
+            --annotation "index:org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --annotation "index:org.opencontainers.image.revision=${{ github.sha }}" \
+            --annotation "index:org.opencontainers.image.version=${VERSION}" \
+            --annotation "index:org.opencontainers.image.licenses=MIT" \
             "${sources[@]}"
       - name: Check what came out
         run: |
