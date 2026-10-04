@@ -283,8 +283,13 @@ async fn me(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
 /// zones or CA problems); `{"mode": "off"}` when this process does not terminate TLS. The
 /// admin UI's overview reads it; `repos.tls()` in the SDK.
 async fn tls_status(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Err(e) = st.auth.require_admin(&headers).await {
-        return crate::web::api::auth_err(e).into_response();
+    // No credential is a 401 (a browser signs in, git asks its helper); a credential that is
+    // not an admin is a 403.
+    match st.auth.authenticate(&headers).await {
+        Ok(p) if p.admin => {}
+        Ok(p) if p.anonymous => return ApiError::Unauthorized.into_response(),
+        Ok(_) => return crate::web::api::auth_err(crate::auth::AuthError::Forbidden).into_response(),
+        Err(e) => return crate::web::api::auth_err(e).into_response(),
     }
     let body = st.tls.as_ref().map_or_else(
         || floe_tls::CertStatus {
