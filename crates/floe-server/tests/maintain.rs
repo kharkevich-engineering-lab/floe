@@ -789,6 +789,22 @@ async fn bundle_list_shows_a_bundle_right_after_this_host_builds_it() -> anyhow:
     Ok(())
 }
 
+/// A weekly schedule whose newest fire is three days ago at this hour, so no weekly slot falls in
+/// the last 72 hours. These tests cut their weekly at the last fire at or before `now - 36h` (or
+/// 48h) and expect the newest hourly slots to be judged against it. With the default weekly
+/// (Sunday 23:00 UTC) every run in the day and a half after a Sunday 23:00 saw a newer weekly slot
+/// nobody built ("too-small: 0 commits since base", closed hourlies left missing: CI, Sunday
+/// 23:06 UTC, 2026-10-04).
+fn weekly_away_from_now() -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let secs = floe_bundle::slots::epoch(std::time::SystemTime::now());
+    // 1970-01-01 was a Thursday (index 4).
+    let today = usize::try_from((secs / 86_400 + 4) % 7).unwrap_or(0);
+    let day = DAYS[(today + 7 - 3) % 7];
+    let hour = secs / 3600 % 24;
+    format!("0 0 {hour} * * {day}")
+}
+
 /// A hundred closed hourly slots with nothing to cut must not cost a hundred passes
 /// (closed = the slot's as-of instant has passed, whatever the strategy's period —
 /// a daily is final an hour after 23:00, not at the next 23:00):
@@ -812,6 +828,9 @@ async fn one_pass_settles_all_closed_empty_slots() -> anyhow::Result<()> {
                 if s.name == "hourly" {
                     s.base = Some("weekly".into());
                     s.backfill_max = 0;
+                }
+                if s.name == "weekly" {
+                    s.schedule = weekly_away_from_now();
                 }
             }
         })
@@ -1389,6 +1408,9 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
                 if s.name == "hourly" {
                     s.base = Some("weekly".into());
                     s.backfill_max = 0;
+                }
+                if s.name == "weekly" {
+                    s.schedule = weekly_away_from_now();
                 }
             }
         })
