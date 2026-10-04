@@ -412,9 +412,9 @@ Where the code differs from §A.1–§A.6 (the code wins):
 - A rejected publish (a ref moved under the round) is an `Ok` op result with `published = 0` and the conflicting
   refs in `refused` (outcome `refused`), as D33's per-ref rejections were; a refused-only plan (policy `refuse`)
   stays an op error (`failed` in the loop's report), as before.
-- Not wired yet, owned by other packages: `Recorder::record_sync_run` (§C.6, needs `floe-catalog`) and the
-  derived `token_env_by_host` default from `[github_mirror]` in `Config::load` (§B.4 config). Of the §A.6
-  integration tests, `tests/follow.rs` has `on_rewrite_refuse_keeps_d33_behaviour` (the old test) and
+- Wired once the stack merged (§D.8): follow records `sync_runs` through `AppState::recorder`
+  (`follow::record_run`, `kind = follow`), and `Config::load` derives the `token_env_by_host` default from
+  `[github_mirror]` (`Config::derive_mirror_token_env`). Of the §A.6 integration tests, `tests/follow.rs` has `on_rewrite_refuse_keeps_d33_behaviour` (the old test) and
   `upstream_globs_force_push_and_delete_are_archived_then_applied` (globs + negative, fast-forward not archived,
   force-push and delete archived in one entry, `follow.archived`, reachability, in-sync round); the rest
   (empty advertisement, concurrent writer, store op counts, nudge, events golden) are open.
@@ -934,11 +934,13 @@ floe --config floe.toml github status [--json]
 
 Where the code differs from §B.1–§B.14 (the code wins):
 
-- **Not landed**: wikis (`wikis` key, §B.10) are left out entirely rather than added as a refused key; the
-  `floe-catalog` `Recorder` is not on this branch, so `run_loop` takes an `on_pass: Fn(&PassReport)` hook and
-  `PassReport.changes` carries the inventory changes; `floe_server::mirror::run_loop` passes a no-op until the
-  catalog lands. `floe config check` does not print `[github_mirror]` yet. The end-to-end
-  `crates/floe-server/tests/mirror.rs` (mirror → nudge → follow) is open.
+- **Not landed**: wikis (`wikis` key, §B.10) are left out entirely rather than added as a refused key. The
+  end-to-end `crates/floe-server/tests/mirror.rs` (mirror → nudge → follow) is open.
+- **Telemetry seam**: `floe-mirror` does not depend on the catalog writer. `run_loop` takes an
+  `on_pass: Fn(&PassReport)` hook, and `PassReport.changes` carries the inventory changes. The server's
+  `floe_server::mirror::run_loop` passes `record_pass` over `AppState::recorder`. `floe github sync` passes the
+  same rows through `floe_server::mirror::PassTelemetry` (§D.8). `floe config check` prints `[github_mirror]`
+  (§D.8).
 - **Plan/apply shape**: the planner emits per-repository step lists (`Create { allow_create }`, `PutPolicy`,
   `Publish { reason }`, `Nudge`) instead of a flat `Vec<Action>` with `MarkStatus`; statuses are bookkeeping on
   the planned state. `Create { allow_create: false }` is the too-large handoff check (adopt a repository carrying
@@ -1482,8 +1484,12 @@ it neither the mirror nor the catalog has one.
 
 ### D.8 As landed (2026-10-04; the code wins)
 
-- **Telemetry wiring**: `AppState` carries `recorder` (the writer, or `NoopRecorder`), `catalog` (the writer, for the
-  final flush) and `catalog_tail`. The mirror's `on_pass` hook (§B.15) maps a `PassReport` to one `sync_runs` row
+- **Telemetry wiring** (supersedes the "not wired yet" notes that §A.7 and §B.15 carried while §C was on its
+  own branch): `AppState` carries `recorder` (the writer, or `NoopRecorder`), `catalog` (the writer, for the
+  final flush) and `catalog_tail`. `floe github sync` (CLI, no `AppState`) uses
+  `floe_server::mirror::PassTelemetry`: the writer from the same `[catalog]` section (fail closed without the
+  feature, as at startup), `record_pass` for each finished pass (`--once` and the foreground loop; not
+  `--dry-run`), and a final flush bounded by `server.drain_timeout`. The mirror's `on_pass` hook (§B.15) maps a `PassReport` to one `sync_runs` row
   (`kind = discovery`) and one `repo_inventory` change row per `changes` entry (`floe_server::mirror::record_pass`);
   a failed pass is reported to the hook too (`outcome = failed`, `PassReport::error` as detail).
   Follow records a `sync_runs` row for every round that did work, and for a refused or failed round whose
