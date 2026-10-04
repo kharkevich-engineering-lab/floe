@@ -129,11 +129,13 @@ pub async fn merge_into_ref(
         drop(guard);
         return Err(GhError::not_found(base_ref));
     };
-    if local
-        .is_ancestor(head, &base)
-        .await
-        .map_err(|e| GhError::Internal(format!("merge-base: {e}")))?
-    {
+    // A non-commit head makes `merge-base` exit 128: not up to date; the merge
+    // below then reports it as it did before `is_ancestor` returned `Err` for it.
+    if match local.is_ancestor(head, &base).await {
+        Ok(a) => a,
+        Err(floe_git::GitError::Subprocess { .. }) => false,
+        Err(e) => return Err(GhError::Internal(format!("merge-base: {e}"))),
+    } {
         drop(guard);
         return Ok(Outcome::UpToDate);
     }

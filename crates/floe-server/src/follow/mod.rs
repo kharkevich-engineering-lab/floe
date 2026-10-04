@@ -13,8 +13,9 @@
 //! entry receive-pack publishes, `principal = upstream`. With `on_rewrite =
 //! "archive"` (default) a rewritten or deleted ref's old tip is kept under
 //! `refs/archive/<unix-ts>/<ref>` **in that same entry** (`plan.rs`); nothing is
-//! lost. `"refuse"` is D33: rewinds and deletions are left as is and logged every
-//! round. Policy is not evaluated (follow is configuration, not a principal).
+//! lost. `"refuse"` is D33: rewinds and deletions are left as is and reported
+//! `refused` every round — without a task once the loop knows the op would refuse
+//! (a deletion, a tag move, a rewind already refused at the same oids). Policy is not evaluated (follow is configuration, not a principal).
 //!
 //! Its own loop, not a unit of the priority loop (`maintain.rs`): ingress must not
 //! wait behind a 30-minute base rebuild, and as the top unit it would starve the
@@ -29,6 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use floe_config::OnRewrite;
 use floe_config::refpattern::RefPatterns;
 use floe_git::{IngestOptions, RepoId};
 use floe_proto::v1::RefTransaction;
@@ -85,6 +87,10 @@ pub struct FollowStatus {
     /// When the round ended (`upstream.follow_interval`); not serialized.
     #[serde(skip)]
     pub finished: Instant,
+    /// Policy `refuse`: rewinds already refused at these exact old/new oids (the
+    /// loop does not start the op again for them); not serialized.
+    #[serde(skip)]
+    refused_rewinds: Vec<Change>,
 }
 
 /// Per-repo last-round status on this instance.
@@ -98,6 +104,21 @@ struct Round {
     upstream: HashMap<String, String>,
     ours: HashMap<String, String>,
     archived: Vec<String>,
+    /// Policy `refuse`: rewinds refused at these exact old/new oids.
+    refused_rewinds: Vec<Change>,
+}
+
+impl Round {
+    fn failed(detail: String) -> Self {
+        Round {
+            outcome: "failed",
+            detail,
+            upstream: HashMap::new(),
+            ours: HashMap::new(),
+            archived: Vec::new(),
+            refused_rewinds: Vec::new(),
+        }
+    }
 }
 
 impl FollowStatuses {
@@ -106,6 +127,13 @@ impl FollowStatuses {
     }
     fn finished(&self, repo: &str) -> Option<Instant> {
         self.0.lock().get(repo).map(|s| s.finished)
+    }
+    fn refused_rewinds(&self, repo: &str) -> Vec<Change> {
+        self.0
+            .lock()
+            .get(repo)
+            .map(|s| s.refused_rewinds.clone())
+            .unwrap_or_default()
     }
     fn set(&self, repo: &str, r: Round) {
         let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -119,6 +147,7 @@ impl FollowStatuses {
                 ours: r.ours,
                 archived: r.archived,
                 finished: Instant::now(),
+                refused_rewinds: r.refused_rewinds,
             },
         );
     }
@@ -136,8 +165,12 @@ pub struct FollowReport {
 }
 
 /// One round: for every assigned repository that follows an upstream, sync refs
-/// and probe upstream (no task, no Serve-level sync); when a matching ref differs
-/// (or HEAD wants a move), run the `follow` op on it.
+/// and probe upstream (no task, no Serve-level sync, no pack prefetch); when a
+/// matching ref differs (or HEAD wants a move), run the `follow` op on it. With
+/// `on_rewrite = "refuse"`, changes the op would refuse anyway (a deletion, a tag
+/// move, a rewind it already refused at the same old/new) are reported `refused`
+/// here, without a task. One repository's failure never ends the pass.
+#[allow(clippy::too_many_lines)] // one linear round per repository, kept in order
 pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<FollowReport> {
     let mut report = FollowReport::default();
     for id in state.registry.list().await? {
@@ -147,8 +180,22 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<FollowReport> {
         if floe_wal::tasks::draining() {
             break;
         }
-        let handle = state.registry.open(&id).await?;
-        drop(handle.sync_refs().await?); // the manifest carries the settings (D24)
+        let handle = match state.registry.open(&id).await {
+            Ok(h) => h,
+            Err(e) => {
+                report.failed += 1;
+                warn!(repo = %id, error = %e, "follow: opening the repository failed; next repository");
+                continue;
+            }
+        };
+        // Refs only, and no background pack prefetch: an in-sync round must not
+        // re-materialize the packs of a repository the LRU evicted. The manifest
+        // carries the settings (D24).
+        if let Err(e) = handle.sync_refs_only().await.map(drop) {
+            report.failed += 1;
+            warn!(repo = %id, error = %e, "follow: syncing refs failed; next repository");
+            continue;
+        }
         let cfg = handle.effective_config();
         let Some(upstream) = cfg.upstream.git.clone() else {
             continue;
@@ -191,36 +238,46 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<FollowReport> {
                 warn!(repo = %id, %upstream, error = format!("{e:#}"), elapsed_ms = elapsed_ms(t0), "follow: probing upstream failed");
                 state.follow.set(
                     &repo,
-                    Round {
-                        outcome: "failed",
-                        detail: format!("probe of {upstream} failed: {e:#}"),
-                        upstream: HashMap::new(),
-                        ours: HashMap::new(),
-                        archived: Vec::new(),
-                    },
+                    Round::failed(format!("probe of {upstream} failed: {e:#}")),
                 );
                 continue;
             }
         };
-        let (changes, notice) = plan::diff(&Observed {
+        let (mut changes, notice) = plan::diff(&Observed {
             have: &have,
             tips: &probe.tips,
             advertised_any: probe.advertised_any,
         });
+        // `refuse`: what the op would refuse without looking (deletions, tag moves)
+        // or already refused at these exact old/new oids is reported here; only the
+        // rest is worth a task and a Serve-level sync.
+        let mut refused: Vec<String> = notice.into_iter().collect();
+        let mut rewinds: Vec<Change> = Vec::new();
+        if cfg.upstream.on_rewrite == OnRewrite::Refuse {
+            let last = state.follow.refused_rewinds(&repo);
+            let (skip, rest): (Vec<Change>, Vec<Change>) = changes
+                .into_iter()
+                .partition(|c| c.fixed_kind() == Some(Kind::Rewrite) || last.contains(c));
+            changes = rest;
+            rewinds = skip.iter().filter(|c| last.contains(c)).cloned().collect();
+            let skip = skip.into_iter().map(|c| (c, Kind::Rewrite)).collect();
+            refused.extend(plan::build(skip, OnRewrite::Refuse, 0, None).refused);
+        }
         let head_moves = want
             .as_ref()
             .is_some_and(|h| h.target != h.current && h.exists_now);
         if changes.is_empty() && !head_moves {
             debug!(repo = %id, %upstream, elapsed_ms = elapsed_ms(t0), "follow: in sync");
-            let (outcome, detail) = match notice {
-                Some(n) => ("refused", n),
-                None => (
+            let (outcome, detail) = if refused.is_empty() {
+                (
                     "in-sync",
                     format!(
                         "{} up to date with {upstream}",
                         cfg.upstream.follow.join(", ")
                     ),
-                ),
+                )
+            } else {
+                ("refused", refused.join("; "))
             };
             state.follow.set(
                 &repo,
@@ -230,75 +287,115 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<FollowReport> {
                     upstream: probe.tips,
                     ours: have,
                     archived: Vec::new(),
+                    refused_rewinds: rewinds,
                 },
             );
             continue;
         }
         report.behind += 1;
         if !handle.packs_fit() {
+            report.failed += 1;
             warn!(repo = %id, "follow: the whole object set must be local on this host (negotiation + thin-pack bases); skipping");
+            state.follow.set(
+                &repo,
+                Round {
+                    upstream: probe.tips,
+                    ours: have,
+                    ..Round::failed(
+                        "behind upstream, but this repository's object set does not fit this host's cache (follow needs it local); skipped".into(),
+                    )
+                },
+            );
             continue;
         }
-        let round = if let Some(v) = run_op(state, &id, HashMap::new()).await {
-            let n = v
-                .get("published")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            if n > 0 {
-                report.published += 1;
+        let round = match run_op(state, &id, HashMap::new()).await {
+            Ok(v) => {
+                let n = v
+                    .get("published")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                if n > 0 {
+                    report.published += 1;
+                }
+                let seq = v.get("seq").and_then(serde_json::Value::as_u64);
+                let strings = |key: &str| -> Vec<String> {
+                    v.get(key)
+                        .and_then(|r| r.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                extend_unique(&mut refused, strings("refused"));
+                let archived = strings("archived");
+                let mut detail = match seq {
+                    Some(seq) => format!("{n} ref(s) published at seq {seq}"),
+                    None => "nothing published".to_string(),
+                };
+                if !archived.is_empty() {
+                    let _ = write!(detail, "; archived: {}", archived.join("; "));
+                }
+                if !refused.is_empty() {
+                    let _ = write!(detail, "; refused: {}", refused.join("; "));
+                }
+                let outcome = match (n > 0, archived.is_empty(), refused.is_empty()) {
+                    // The op's own probe found nothing to do (upstream moved back
+                    // between the loop's probe and the op's).
+                    (false, _, true) => {
+                        detail = format!(
+                            "{} up to date with {upstream}",
+                            cfg.upstream.follow.join(", ")
+                        );
+                        "in-sync"
+                    }
+                    (false, _, false) => "refused",
+                    (true, true, _) => "published",
+                    (true, false, _) => "archived",
+                };
+                Round {
+                    outcome,
+                    detail,
+                    upstream: probe.tips,
+                    ours: have,
+                    archived,
+                    refused_rewinds: rewinds,
+                }
             }
-            let seq = v
-                .get("seq")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let strings = |key: &str| -> Vec<String> {
-                v.get(key)
-                    .and_then(|r| r.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
-            let refused = strings("refused");
-            let archived = strings("archived");
-            let mut detail = format!("{n} ref(s) published at seq {seq}");
-            if !archived.is_empty() {
-                let _ = write!(detail, "; archived: {}", archived.join("; "));
-            }
-            if !refused.is_empty() {
-                let _ = write!(detail, "; refused: {}", refused.join("; "));
-            }
-            let outcome = match (n > 0, archived.is_empty()) {
-                (false, _) => "refused",
-                (true, true) => "published",
-                (true, false) => "archived",
-            };
-            Round {
-                outcome,
-                detail,
-                upstream: probe.tips,
-                ours: have,
-                archived,
-            }
-        } else {
-            report.failed += 1;
-            // The task's summary names the reason (rewind, unpack, ancestry, connectivity, publish).
-            let why = state
-                .registry
-                .tasks()
-                .recent(&repo)
-                .into_iter()
-                .find(|t| t.kind == "follow")
-                .map(|t| t.summary)
-                .unwrap_or_default();
-            Round {
-                outcome: "refused",
-                detail: why,
-                upstream: probe.tips,
-                ours: have,
-                archived: Vec::new(),
+            Err(why) => {
+                report.failed += 1;
+                // A plan that `refuse` left empty is a policy outcome; anything else
+                // (ancestry, fetch, unpack, connectivity, publish) is a failure.
+                if let Some(rest) = why.strip_prefix(NOTHING_PUBLISHABLE) {
+                    // Every change the op saw was refused: remember the rewinds so
+                    // the next rounds do not repeat the task while they stand.
+                    rewinds.extend(
+                        changes
+                            .into_iter()
+                            .filter(|c| matches!(c, Change::Update { .. })),
+                    );
+                    extend_unique(
+                        &mut refused,
+                        rest.trim_start_matches([' ', '—'])
+                            .split("; ")
+                            .map(String::from),
+                    );
+                    Round {
+                        outcome: "refused",
+                        detail: refused.join("; "),
+                        upstream: probe.tips,
+                        ours: have,
+                        archived: Vec::new(),
+                        refused_rewinds: rewinds,
+                    }
+                } else {
+                    Round {
+                        upstream: probe.tips,
+                        ours: have,
+                        ..Round::failed(why)
+                    }
+                }
             }
         };
         state.follow.set(&repo, round);
@@ -306,23 +403,28 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<FollowReport> {
     Ok(report)
 }
 
-/// Start the `follow` op as a task and wait for it; its result value, `None` = failed.
+/// The op's error when policy `refuse` left nothing to publish (the loop tells it
+/// apart from a failure by this prefix).
+const NOTHING_PUBLISHABLE: &str = "follow: nothing publishable";
+
+/// Start the `follow` op as a task and wait for it: its result value, or why it failed.
 async fn run_op(
     state: &Arc<AppState>,
     id: &RepoId,
     params: HashMap<String, String>,
-) -> Option<serde_json::Value> {
+) -> Result<serde_json::Value, String> {
     let task = match crate::ops::start(state.clone(), id.clone(), "follow", params).await {
         Ok(t) | Err(crate::ops::StartError::AlreadyRunning(t)) => t,
-        Err(crate::ops::StartError::UnknownOp) => return None,
+        Err(crate::ops::StartError::UnknownOp) => return Err("follow: unknown op".into()),
     };
     if !task.wait_done(std::time::Duration::from_hours(1)).await {
         warn!(repo = %id, "follow: op still running after 1h; moving on");
-        return None;
+        return Err("follow: op still running after 1h".into());
     }
     match task.outcome() {
-        Some(Ok(o)) => Some(o.value.unwrap_or(serde_json::Value::Null)),
-        _ => None,
+        Some(Ok(o)) => Ok(o.value.unwrap_or(serde_json::Value::Null)),
+        Some(Err((_, why))) => Err(why),
+        None => Err("follow: op finished without an outcome".into()),
     }
 }
 
@@ -474,10 +576,7 @@ pub(crate) async fn op(
     if planned.updates.is_empty() {
         delta.discard_pack().await;
         metrics::counter!("floe_follow_rounds_total", "repo" => id.to_string(), "outcome" => "refused").increment(1);
-        return Err(format!(
-            "follow: nothing publishable — {}",
-            refused.join("; ")
-        ));
+        return Err(format!("{NOTHING_PUBLISHABLE} — {}", refused.join("; ")));
     }
     let archived_meta = planned.archived_meta();
     let mut txn = RefTransaction {
@@ -571,6 +670,16 @@ pub(crate) async fn op(
         summary,
         serde_json::json!({"published": published, "seq": res.seq, "refused": refused, "archived": archived}),
     ))
+}
+
+/// Append the lines of `more` not already in `into` (the loop and the op build
+/// the same `refused` lines for the same change).
+fn extend_unique(into: &mut Vec<String>, more: impl IntoIterator<Item = String>) {
+    for l in more {
+        if !l.is_empty() && !into.contains(&l) {
+            into.push(l);
+        }
+    }
 }
 
 /// The WAL's refs matching `patterns` (from the synced local copy's snapshot).

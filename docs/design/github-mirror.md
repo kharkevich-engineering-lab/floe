@@ -416,6 +416,18 @@ Where the code differs from §A.1–§A.6 (the code wins):
   `upstream_globs_force_push_and_delete_are_archived_then_applied` (globs + negative, fast-forward not archived,
   force-push and delete archived in one entry, `follow.archived`, reachability, in-sync round); the rest
   (empty advertisement, concurrent writer, store op counts, nudge, events golden) are open.
+- Review fixes (2026-10-04): the loop syncs with `RepoHandle::sync_refs_only` (no background pack prefetch,
+  so an in-sync round never re-materializes an evicted repository: `in_sync_round_does_not_rematerialize_evicted_packs`).
+  With `refuse`, deletions, tag moves and a rewind already refused at the same old/new oids are reported
+  `refused` by the loop without a task (`on_rewrite_refuse_keeps_d33_behaviour` covers both); any other op
+  error is outcome `failed`, and an op that found nothing to do is `in-sync`. A repository whose object set
+  does not fit records a `failed` round (so `follow_interval` applies). One repository's open/sync error no
+  longer ends the pass. `archive_ts` ignores archive timestamps more than a day ahead of now and skips every
+  timestamp already used, so a pushed `refs/archive/<u64::MAX>/x` cannot pin it (the POLICY.md example
+  `archive-immutable` now restricts `create` too). The probe is bounded (`PROBE_TIMEOUT`, `kill_on_drop`,
+  `GIT_HTTP_LOW_SPEED_*`). `upstream.git`/`upstream.lfs` refuse userinfo, `?` and `#`; the authority for
+  `token_env_by_host` ends at the first `/`, `?` or `#`; the credential helper answers only for the
+  upstream's own `host[:port]`.
 
 ---
 

@@ -305,7 +305,7 @@ async fn reads_a_pushed_repository_in_github_shapes() -> TestResult {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn creates_and_deletes_refs() -> TestResult {
     let s = server().await?;
-    let (_src, head) = fixture(&s)?;
+    let (src, head) = fixture(&s)?;
 
     let created = client()
         .post(format!("{}/api/v3/repos/acme/docs/git/refs", s.base_url))
@@ -336,6 +336,22 @@ async fn creates_and_deletes_refs() -> TestResult {
         .send()
         .await?;
     assert_eq!(bad_sha.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A tree sha (exists, not a commit) on a non-force update: not a fast forward (422), not a 500.
+    let tree = git_in(src.path(), &["rev-parse", "HEAD^{tree}"])?
+        .trim()
+        .to_string();
+    let not_ff = client()
+        .patch(format!(
+            "{}/api/v3/repos/acme/docs/git/refs/heads/topic",
+            s.base_url
+        ))
+        .json(&serde_json::json!({ "sha": tree }))
+        .send()
+        .await?;
+    assert_eq!(not_ff.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let err: Value = not_ff.json().await?;
+    assert_eq!(err["message"], "Update is not a fast forward", "{err}");
 
     let r = ok(&s, "/api/v3/repos/acme/docs/git/ref/heads/topic").await?;
     assert_eq!(r["object"]["sha"], head);

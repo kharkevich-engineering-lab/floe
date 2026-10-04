@@ -208,7 +208,7 @@ Do not put secrets, signatures, or “required PR” in this file.
       "match": { "refs": ["refs/archive/**"] },
       "effect": {
         "protect": {
-          "restricts": ["update", "delete"],
+          "restricts": ["create", "update", "delete"],
           "bypass": ["group:admins"]
         }
       }
@@ -223,7 +223,8 @@ Do not put secrets, signatures, or “required PR” in this file.
 ```
 
 That is enough for a real host: lock the trunk, reserve bot namespaces, keep
-tags still, and keep the tips upstream follow archived (`refs/archive/`, D48) where they are. History / size rules can be added later without changing the
+tags still, and keep the tips upstream follow archived (`refs/archive/`, D48) where they are
+(follow is not a principal, so `create` here stops only pushers from forging archive names). History / size rules can be added later without changing the
 envelope; they will not change a verdict until this document says they do.
 
 ## Load rules

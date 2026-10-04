@@ -143,6 +143,23 @@ async fn on_rewrite_refuse_keeps_d33_behaviour() -> anyhow::Result<()> {
     assert_eq!(ls_remote(&fo_url)?.get("refs/heads/main"), Some(&c4));
     assert_eq!(h.manifest().head_seq, 2);
 
+    // The same rewind next round: still refused, but without another task (the
+    // op would refuse the same old/new again).
+    let follow_tasks = step!("tasks", fo.get_text("/o/r/api/tasks", &[]))?
+        .matches("\"follow\"")
+        .count();
+    let r = step!("round 4b", floe_server::follow::run_pass(&fo.state))?;
+    assert_eq!((r.behind, r.published, r.failed), (0, 0, 0), "{r:?}");
+    assert_eq!(
+        step!("tasks", fo.get_text("/o/r/api/tasks", &[]))?
+            .matches("\"follow\"")
+            .count(),
+        follow_tasks
+    );
+    let last = fo.state.follow.get("o/r").expect("a round ran");
+    assert_eq!(last.outcome, "refused", "{last:?}");
+    assert!(last.detail.contains("refs/heads/main"), "{last:?}");
+
     // Upstream goes forward again past our tip: followed.
     git_in(work.path(), &["reset", "-q", "--hard", &c4])?;
     let c5 = commit(work.path(), "e")?;
@@ -193,7 +210,85 @@ async fn on_rewrite_refuse_keeps_d33_behaviour() -> anyhow::Result<()> {
         git_in(&clone.path().join("c"), &["rev-list", "--count", "HEAD"])?.trim(),
         "5"
     );
+
+    // Upstream deletes the tag: refused every round, but in the loop alone — no
+    // task, no Serve-level sync, not a failure — and the tag stays.
+    git(&["push", "-q", &up_url, ":refs/tags/v1"], work.path())?;
+    let follow_tasks = step!("tasks", fo.get_text("/o/r/api/tasks", &[]))?
+        .matches("\"follow\"")
+        .count();
+    for round in ["round 6", "round 7"] {
+        let r = step!("round", floe_server::follow::run_pass(&fo.state))?;
+        assert_eq!(
+            (r.behind, r.published, r.failed),
+            (0, 0, 0),
+            "{round}: {r:?}"
+        );
+        let last = fo.state.follow.get("o/r").expect("a round ran");
+        assert_eq!(last.outcome, "refused", "{round}: {last:?}");
+        assert!(
+            last.detail.contains("refs/tags/v1: deleted upstream"),
+            "{round}: {last:?}"
+        );
+    }
+    assert_eq!(
+        step!("tasks", fo.get_text("/o/r/api/tasks", &[]))?
+            .matches("\"follow\"")
+            .count(),
+        follow_tasks
+    );
+    assert!(ls_remote(&fo_url)?.contains_key("refs/tags/v1"));
     let _ = c1;
+    Ok(())
+}
+
+/// An in-sync round reads refs only: it must not pull the packs of a repository
+/// the cache evicted (no background prefetch from the follow loop).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_sync_round_does_not_rematerialize_evicted_packs() -> anyhow::Result<()> {
+    let up = step!("start upstream", Server::start())?;
+    step!("put upstream repo", up.put_repo("u", "src"))?;
+    let up_url = up.repo_url("u", "src");
+    let work = tempfile::tempdir()?;
+    git_in(work.path(), &["init", "-q", "-b", "main"])?;
+    git_in(work.path(), &["config", "user.email", "t@t"])?;
+    git_in(work.path(), &["config", "user.name", "Tester"])?;
+    commit(work.path(), "a")?;
+    git(&["push", "-q", &up_url, "main"], work.path())?;
+    let fo = step!(
+        "start follower",
+        Server::start_with_tweak(|c| {
+            c.server.roles = vec![floe_config::Role::Serve, floe_config::Role::Maintain];
+            c.upstream.git = Some(up_url.clone());
+            c.upstream.follow = vec!["refs/heads/*".into()];
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.wal.snapshot_every_entries = 0;
+            c.wal.prefetch_packs = true;
+            // Evict every idle repository on demand.
+            c.cache.max_bytes = floe_config::ByteSize::b(0);
+            c.cache.evict_idle_after = std::time::Duration::ZERO;
+        })
+    )?;
+    step!("put follower repo", fo.put_repo("o", "r"))?;
+    let r = step!("round 1", floe_server::follow::run_pass(&fo.state))?;
+    assert_eq!((r.behind, r.published, r.failed), (1, 1, 0), "{r:?}");
+    assert!(fo.registry_has_packs("o", "r").await);
+
+    let evicted = step!("evict", fo.state.registry.evict_idle())?;
+    assert!(evicted.evicted >= 1, "{evicted:?}");
+    let r = step!("round 2", floe_server::follow::run_pass(&fo.state))?;
+    assert_eq!(
+        (r.repos, r.behind, r.published, r.failed),
+        (1, 0, 0, 0),
+        "{r:?}"
+    );
+    // A prefetch would be a background task: give it time to land.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(
+        !fo.registry_has_packs("o", "r").await,
+        "the in-sync round pulled the evicted pack set back"
+    );
     Ok(())
 }
 
@@ -308,7 +403,11 @@ async fn upstream_globs_force_push_and_delete_are_archived_then_applied() -> any
         "describe",
         fo.get_text("/o/r/api/settings/describe", &[])
     )?)?;
-    assert_eq!(d["upstream"]["last_round"]["outcome"], "archived", "{}", d["upstream"]);
+    assert_eq!(
+        d["upstream"]["last_round"]["outcome"], "archived",
+        "{}",
+        d["upstream"]
+    );
     assert_eq!(d["upstream"]["on_rewrite"], "archive");
 
     // A clone still reaches the rewritten commit through its archive ref.

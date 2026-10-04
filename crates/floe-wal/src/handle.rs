@@ -416,6 +416,13 @@ impl RepoHandle {
         Ok(guard)
     }
 
+    /// [`sync_refs`] without the background pack prefetch: for loops that only
+    /// read refs and settings (upstream follow's probe) and must not
+    /// re-materialize an evicted repository's packs every tick.
+    pub async fn sync_refs_only(&self) -> Result<crate::sync::ReadGuard<'_>, WalError> {
+        self.sync_level(SyncLevel::Refs).await
+    }
+
     /// Whether a refs-level sync should pull the serving copy in the background:
     /// configured, not yet reconciled, this host serves the repository's objects
     /// (placement — a host that does not never pulls its packs, not even in the

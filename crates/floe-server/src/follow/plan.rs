@@ -175,19 +175,37 @@ pub(crate) fn archive_ref(ts: u64, original: &str) -> String {
     format!("{ARCHIVE_PREFIX}{ts}/{original}")
 }
 
-/// The op's archive timestamp: `max(now, newest existing archive ts + 1)`, so it
-/// is strictly increasing per repository and no name the op picks exists in the
-/// snapshot it planned from. `names` = every ref name in that snapshot.
+/// How far ahead of `now` an existing archive's `<unix-ts>` may be and still count
+/// (clock skew between maintainers). Anything later was not written by follow —
+/// `refs/archive/` is an ordinary namespace a pusher can write to — and must not
+/// pin the timestamp (a forged `refs/archive/18446744073709551615/x` would
+/// otherwise make every later archive name collide, rejecting each round forever).
+const ARCHIVE_TS_SKEW: u64 = 24 * 60 * 60;
+
+/// The op's archive timestamp: `max(now, newest plausible archive ts + 1)`, then
+/// past any `<unix-ts>` already used in the snapshot, so it increases per repository
+/// and no name the op picks exists in the snapshot it planned from. `names` = every
+/// ref name in that snapshot.
 pub(crate) fn archive_ts<'a>(now: u64, names: impl Iterator<Item = &'a str>) -> u64 {
-    let newest = names
+    let used: std::collections::HashSet<u64> = names
         .filter_map(|n| n.strip_prefix(ARCHIVE_PREFIX))
         .filter_map(|rest| rest.split('/').next())
         .filter_map(|ts| ts.parse::<u64>().ok())
+        .collect();
+    let newest = used
+        .iter()
+        .copied()
+        .filter(|n| *n <= now.saturating_add(ARCHIVE_TS_SKEW))
         .max();
-    match newest {
-        Some(n) => now.max(n.saturating_add(1)),
-        None => now,
+    let mut ts = newest.map_or(now, |n| now.max(n.saturating_add(1)));
+    // Bounded by the snapshot's size: each step skips one used value.
+    while used.contains(&ts) {
+        match ts.checked_add(1) {
+            Some(next) => ts = next,
+            None => break,
+        }
     }
+    ts
 }
 
 /// The transaction for `changes` (each with its kind) under `policy`, archive
@@ -505,6 +523,28 @@ mod tests {
         assert_eq!(archive_ts(1000, refs.iter().copied()), 2001);
         assert_eq!(archive_ts(3000, refs.iter().copied()), 3000);
         assert_eq!(archive_ts(42, std::iter::empty()), 42);
+    }
+
+    #[test]
+    fn archive_ts_ignores_forged_future_archives_and_never_reuses_a_name() {
+        // A pushed `refs/archive/<u64::MAX>/...` must not pin ts (every later name would collide).
+        let refs = [
+            "refs/archive/18446744073709551615/x",
+            "refs/archive/1700/refs/heads/main",
+        ];
+        assert_eq!(archive_ts(1000, refs.iter().copied()), 1701);
+        // A value just past the skew window is skipped over, never reused.
+        let now = 1_000_000;
+        let edge = format!("refs/archive/{}/x", now + ARCHIVE_TS_SKEW);
+        let past = format!("refs/archive/{}/x", now + ARCHIVE_TS_SKEW + 1);
+        let refs = [edge.as_str(), past.as_str()];
+        assert_eq!(
+            archive_ts(now, refs.iter().copied()),
+            now + ARCHIVE_TS_SKEW + 2
+        );
+        // `now` itself already used: the next free second.
+        let taken = format!("refs/archive/{now}/x");
+        assert_eq!(archive_ts(now, std::iter::once(taken.as_str())), now + 1);
     }
 
     #[test]

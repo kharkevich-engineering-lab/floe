@@ -937,14 +937,16 @@ impl Config {
     /// for the URL's host (`host:port` first, then the bare host), else
     /// `upstream.token_env`, else none (unauthenticated). The one place every
     /// upstream caller (follow, LFS read-through, `repair`) resolves it.
+    ///
+    /// The authority ends at the first `/`, `?` or `#`, as git's and curl's URL
+    /// parsers end it. A URL with userinfo gets no token at all: `validate` refuses
+    /// one, and git and curl disagree on which `@` ends it, so no host-scoped token
+    /// could be sent to the host it is scoped to with certainty.
     pub fn upstream_token_env(&self, url: &str) -> Option<&str> {
-        let authority = url
-            .split_once("://")
-            .map_or(url, |(_, rest)| rest)
-            .split('/')
-            .next()
-            .unwrap_or_default();
-        let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        let authority = upstream_authority(url);
+        if authority.contains('@') {
+            return None;
+        }
         let host = authority.split(':').next().unwrap_or_default();
         let by_host = &self.upstream.token_env_by_host;
         by_host
@@ -1531,6 +1533,17 @@ impl Config {
                     "{key} must be an https:// URL (got {u})"
                 );
                 anyhow::ensure!(!u.ends_with('/'), "{key} must not end with '/' (got {u})");
+                // Credentials in the URL would land in logs, task output, the
+                // Settings tab and the WAL entry's meta; tokens go through
+                // `token_env` / `token_env_by_host`. `?`/`#` would let the host
+                // a token is scoped to differ from the one git connects to.
+                anyhow::ensure!(
+                    !upstream_authority(u).contains('@')
+                        && !u.contains(['?', '#'])
+                        && !u.chars().any(char::is_whitespace),
+                    "{key} must not carry credentials, a query or a fragment (got {}); put the token in an env var named by upstream.token_env / token_env_by_host",
+                    redact_userinfo(u)
+                );
             }
         }
         if !self.upstream.follow.is_empty() {
@@ -1813,6 +1826,22 @@ fn rewrite_origin_port(origin: &str, port: u16) -> String {
     }
 }
 
+/// The authority of an upstream URL (`host[:port]`, with any `user@`): after
+/// `scheme://`, up to the first `/`, `?` or `#` (as git and curl end it).
+pub fn upstream_authority(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#']).next().unwrap_or_default()
+}
+
+/// `url` with any userinfo replaced by `***` (for error messages).
+fn redact_userinfo(url: &str) -> String {
+    let authority = upstream_authority(url);
+    match authority.rsplit_once('@') {
+        Some((_, host)) => url.replacen(authority, &format!("***@{host}"), 1),
+        None => url.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1946,10 +1975,7 @@ mod tests {
         let ignored = c
             .apply_env_report(
                 vec![
-                    (
-                        "FLOE__CACHE__NOT_A_KEY_YET".to_string(),
-                        "0.9".to_string(),
-                    ),
+                    ("FLOE__CACHE__NOT_A_KEY_YET".to_string(), "0.9".to_string()),
                     (
                         "FLOE__WAL__MAX_BATCH".to_string(),
                         "not-a-number".to_string(),
@@ -1977,10 +2003,8 @@ mod tests {
         assert!(ignored[0].1.contains("unknown field"), "{:?}", ignored[0]);
         // Plain apply_env is the same, just warns.
         let mut c2 = Config::default();
-        c2.apply_env(
-            vec![("FLOE__CACHE__NOT_A_KEY_YET".to_string(), "1".to_string())].into_iter(),
-        )
-        .unwrap();
+        c2.apply_env(vec![("FLOE__CACHE__NOT_A_KEY_YET".to_string(), "1".to_string())].into_iter())
+            .unwrap();
     }
 
     #[test]
@@ -2078,9 +2102,33 @@ listen = \"0.0.0.0:1\"\n",
             Some("FLOE_GITHUB_TOKEN")
         );
         assert_eq!(
-            base.upstream_token_env("https://x@github.com:443/a/b.git"),
+            base.upstream_token_env("https://github.com:443/a/b.git"),
             Some("FLOE_GITHUB_TOKEN")
         );
+        // The authority ends where git's does: `?`/`#` cannot smuggle a scoped
+        // token to another host, and userinfo gets no token at all.
+        assert_eq!(
+            base.upstream_token_env("https://evil.example?@github.com/a/b"),
+            Some("FLOE_UPSTREAM_TOKEN")
+        );
+        assert_eq!(
+            base.upstream_token_env("https://evil.example#@github.com/a/b"),
+            Some("FLOE_UPSTREAM_TOKEN")
+        );
+        assert_eq!(
+            base.upstream_token_env("https://x@github.com/a/b.git"),
+            None
+        );
+        for bad in [
+            "[upstream]\ngit = \"https://user:ghp_secret@github.com/a/b\"\n",
+            "[upstream]\ngit = \"https://evil.example?@github.com/a/b\"\n",
+            "[upstream]\ngit = \"https://github.com/a/b#x\"\n",
+            "[upstream]\nlfs = \"https://u@github.com/a/b.git/info/lfs\"\n",
+        ] {
+            let err = base.with_settings(bad).err().map(|e| format!("{e:#}"));
+            assert!(err.is_some(), "{bad}");
+            assert!(!err.unwrap_or_default().contains("ghp_secret"), "{bad}");
+        }
         assert_eq!(
             base.upstream_token_env("https://gitlab.com/a/b.git"),
             Some("FLOE_UPSTREAM_TOKEN")

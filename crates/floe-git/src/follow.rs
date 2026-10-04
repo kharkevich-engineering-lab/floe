@@ -56,6 +56,9 @@ pub struct Probe {
     pub advertised_any: bool,
 }
 
+/// The longest a [`probe`] may take (one `ls-refs`; normally well under a second).
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
+
 /// One `git ls-remote <upstream>` (the same single `ls-refs` round trip a fetch's
 /// advertisement costs; no objects, no scratch), filtered by `patterns` in floe:
 /// `ls-remote`'s own patterns are tail matches, not refspecs.
@@ -64,10 +67,19 @@ pub async fn probe(
     token: Option<&str>,
     patterns: &RefPatterns,
 ) -> Result<Probe, GitError> {
-    let out = git_cmd(None, token)
-        .args(["-c", "protocol.version=2", "ls-remote", upstream])
-        .output()
+    // Bounded: the follow loop probes repositories one after another, and an
+    // upstream that accepts the connection but never answers must not stall it.
+    let mut cmd = git_cmd(None, upstream, token);
+    cmd.args(["-c", "protocol.version=2", "ls-remote", upstream])
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
         .await
+        .map_err(|_| {
+            GitError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("git ls-remote <upstream> gave no answer in {PROBE_TIMEOUT:?}"),
+            ))
+        })?
         .map_err(GitError::Io)?;
     let out = ok(out, "git ls-remote <upstream>")?;
     let mut probe = Probe::default();
@@ -102,7 +114,7 @@ pub async fn fetch_refs(
     scratch: &Path,
 ) -> Result<FetchedDelta, GitError> {
     let git = |args: &[&str]| {
-        let mut c = git_cmd(Some(scratch), token);
+        let mut c = git_cmd(Some(scratch), upstream, token);
         c.args(args);
         c
     };
@@ -213,10 +225,13 @@ pub async fn fetch_refs(
     read_scratch(scratch).await
 }
 
-/// `git` with `--git-dir` (when given), no terminal prompt, and the token (when
-/// given) through a one-shot credential helper that reads it from the environment:
-/// it appears neither on a command line nor in a config file.
-fn git_cmd(git_dir: Option<&Path>, token: Option<&str>) -> tokio::process::Command {
+/// `git` with `--git-dir` (when given), no terminal prompt, a stalled-transfer
+/// limit, and the token (when given) through a one-shot credential helper that
+/// reads it from the environment: it appears neither on a command line nor in a
+/// config file. The helper answers only `get` for the upstream's own authority
+/// (the `host=` line git passes, `host[:port]`), so a redirect or a URL parsed
+/// differently elsewhere never carries the token to another host.
+fn git_cmd(git_dir: Option<&Path>, upstream: &str, token: Option<&str>) -> tokio::process::Command {
     let mut c = tokio::process::Command::new("git");
     if let Some(d) = git_dir {
         c.arg("--git-dir").arg(d);
@@ -224,18 +239,31 @@ fn git_cmd(git_dir: Option<&Path>, token: Option<&str>) -> tokio::process::Comma
     c.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Abort an HTTP transfer slower than 1 KiB/s for a minute (a tarpit).
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "60");
     if let Some(t) = token {
         c.env("FLOE_UPSTREAM_TOKEN", t)
+            .env(
+                "FLOE_UPSTREAM_HOST",
+                floe_config::upstream_authority(upstream),
+            )
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "credential.helper")
-            .env(
-                "GIT_CONFIG_VALUE_0",
-                "!f() { echo username=x-access-token; echo \"password=$FLOE_UPSTREAM_TOKEN\"; }; f",
-            );
+            .env("GIT_CONFIG_VALUE_0", CREDENTIAL_HELPER);
     }
     c
 }
+
+/// `credential.helper` for [`git_cmd`]: reads git's request from stdin and
+/// prints the token only for `get` on `$FLOE_UPSTREAM_HOST`.
+const CREDENTIAL_HELPER: &str = concat!(
+    "!f() { test \"$1\" = get || return 0; h=; ",
+    "while IFS= read -r l && test -n \"$l\"; do case \"$l\" in host=*) h=\"${l#host=}\";; esac; done; ",
+    "test -n \"$h\" && test \"$h\" = \"$FLOE_UPSTREAM_HOST\" || return 0; ",
+    "echo username=x-access-token; echo \"password=$FLOE_UPSTREAM_TOKEN\"; }; f"
+);
 
 fn ok(out: std::process::Output, what: &str) -> Result<std::process::Output, GitError> {
     if out.status.success() {
@@ -317,6 +345,38 @@ mod tests {
             String::from_utf8_lossy(&o.stderr)
         );
         String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// `git credential fill` through [`git_cmd`]'s helper for a request to `host`.
+    async fn fill(upstream: &str, host: &str) -> String {
+        use tokio::io::AsyncWriteExt;
+        let mut c = git_cmd(None, upstream, Some("tok-secret"));
+        c.env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["credential", "fill"])
+            .stdin(Stdio::piped());
+        let mut child = c.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin
+            .write_all(format!("protocol=https\nhost={host}\n\n").as_bytes())
+            .await
+            .unwrap();
+        drop(stdin);
+        let out = child.wait_with_output().await.unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[tokio::test]
+    async fn credential_helper_answers_only_the_upstream_host() {
+        let ok = fill("https://github.com/a/b.git", "github.com").await;
+        assert!(ok.contains("password=tok-secret"), "{ok}");
+        assert!(ok.contains("username=x-access-token"), "{ok}");
+        let port = fill("https://h.example:8443/a/b", "h.example:8443").await;
+        assert!(port.contains("password=tok-secret"), "{port}");
+        // Another host (a redirect, a differently parsed URL): no token; with
+        // prompts disabled, git fails to fill instead.
+        let other = fill("https://github.com/a/b.git", "evil.example").await;
+        assert!(!other.contains("tok-secret"), "{other}");
     }
 
     fn pats(list: &[&str]) -> RefPatterns {
