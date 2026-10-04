@@ -345,15 +345,21 @@ lease_ttl = "2m"
                                   # sync_runs, repo_inventory). Derived, never a source of truth; an outage only adds
                                   # catalog lag. enabled = true needs a binary built with --features catalog.
 enabled = false
-# uri = "http://localhost:9000/iceberg"        # Iceberg REST endpoint (RustFS S3 Tables)
-# warehouse = "floe-catalog"
+# uri = "http://localhost:9000/iceberg"        # Iceberg REST endpoint (RustFS S3 Tables; AWS S3 Tables:
+#                                              # https://s3tables.<region>.amazonaws.com/iceberg)
+# warehouse = "floe-catalog"                   # RustFS: the table bucket's name; AWS: the table bucket ARN
 namespace = "floe"
-# token_env = "FLOE_CATALOG_TOKEN"             # env var with a bearer token
-# credential_env = "FLOE_CATALOG_CREDENTIAL"   # env var with "client_id:client_secret" (OAuth2 client credentials)
-# s3_endpoint = "http://localhost:9000"        # data files, when the catalog does not vend credentials
+auth = "none"                                  # D63: "none" | "bearer" (token_env or credential_env) |
+#                                              # "sigv4" (every catalog request signed with the s3_* credentials;
+#                                              # RustFS and AWS S3 Tables need it)
+sigv4_service = "s3"                           # signing name: "s3" for RustFS /iceberg, "s3tables" for AWS
+# sigv4_region = "us-east-1"                   # unset = s3_region
+# token_env = "FLOE_CATALOG_TOKEN"             # auth = "bearer": env var with a bearer token
+# credential_env = "FLOE_CATALOG_CREDENTIAL"   # auth = "bearer": env var with "client_id:client_secret" (OAuth2)
+# s3_endpoint = "http://localhost:9000"        # data files (parquet, metadata); unset = AWS S3
 s3_region = "us-east-1"
-s3_access_key_env = "AWS_ACCESS_KEY_ID"
-s3_secret_key_env = "AWS_SECRET_ACCESS_KEY"
+s3_access_key_env = "AWS_ACCESS_KEY_ID"        # D43: both set = static keys (+ AWS_SESSION_TOKEN); neither = the
+s3_secret_key_env = "AWS_SECRET_ACCESS_KEY"    # AWS credential chain (refreshed); one alone is an error
 s3_path_style = true
 flush_interval = "30s"            # max age of buffered rows before a commit
 flush_rows = 5000                 # commit a table at this many buffered rows

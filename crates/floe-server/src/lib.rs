@@ -156,7 +156,7 @@ fn catalog_writer(
         return Ok(None);
     }
     let committer = Arc::new(floe_catalog::iceberg::IcebergCommitter::new(cfg));
-    tracing::info!(uri = cfg.uri.as_deref().unwrap_or(""), namespace = %cfg.namespace, "catalog writer enabled");
+    tracing::info!(uri = cfg.uri.as_deref().unwrap_or(""), namespace = %cfg.namespace, auth = ?cfg.auth, "catalog writer enabled");
     Ok(Some(floe_catalog::CatalogWriter::start(
         committer,
         floe_catalog::FlushPolicy::from_config(cfg),

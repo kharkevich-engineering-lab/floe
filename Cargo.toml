@@ -126,6 +126,10 @@ google-cloud-auth = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 aws-smithy-types = "1"
+# SigV4 for the Iceberg REST catalog (floe-catalog `iceberg` feature, D63); both
+# already in the graph through aws-sdk-s3.
+aws-sigv4 = "1"
+aws-credential-types = "1"
 clap = { version = "4", features = ["derive", "env"] }
 rand = "0.9"
 sha1 = "0.10"
@@ -162,6 +166,8 @@ iceberg = "=0.10.1"
 iceberg-catalog-rest = "=0.10.1"
 iceberg-storage-opendal = { version = "=0.10.1", default-features = false, features = ["opendal-s3"] }
 arrow-array = "58"
+# The credential trait iceberg-storage-opendal's custom S3 loader takes (D63).
+reqsign-core = "3"
 # TLS (in-process termination)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
