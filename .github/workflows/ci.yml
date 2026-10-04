@@ -92,7 +92,7 @@ jobs:
         run: |
           cargo build --workspace --all-targets --locked
           # Package subsets resolve different dependency features than the workspace build.
-          cargo test -p floe-store -p floe-git -p floe-wal -p floe-bundle --tests --no-run --locked
+          cargo test -p floe-store -p floe-git -p floe-wal -p floe-bundle -p floe-tls --tests --no-run --locked
           cargo test -p floe-server --tests --no-run --locked
       - run: just test
       - run: just warnings
@@ -221,6 +221,85 @@ jobs:
         run: cargo test -p floe-catalog -p floe-server -p floe-cli --lib --features floe-cli/catalog,floe-catalog/iceberg --no-run --locked
       - run: just test-catalog-lib
       - run: just clippy-catalog
+
+  acme-pebble:
+    name: ACME against Pebble (${{ matrix.arch }})
+    # D59: the whole DNS-01 flow (account, order with a wildcard, TXT records, propagation check,
+    # finalize, sealed bucket state, a second instance picking the certificate up, renewal
+    # hot-swap, a verified handshake) against letsencrypt/pebble with pebble-challtestsrv as the
+    # DNS. Its own job: it compiles only floe-tls (+ the store's memory backend), not the server.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install the pinned Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            RUSTUP=1.29.1
+            case "$(uname -m)" in
+              aarch64) triple=aarch64-unknown-linux-gnu; sum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;;
+              x86_64) triple=x86_64-unknown-linux-gnu; sum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;;
+              *) echo "::error::no pinned rustup-init for $(uname -m)"; exit 1 ;;
+            esac
+            curl --proto '=https' --tlsv1.2 -sSfo "$RUNNER_TEMP/rustup-init" "https://static.rust-lang.org/rustup/archive/${RUSTUP}/${triple}/rustup-init"
+            echo "${sum}  $RUNNER_TEMP/rustup-init" | sha256sum -c -
+            chmod +x "$RUNNER_TEMP/rustup-init"
+            "$RUNNER_TEMP/rustup-init" -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show && cargo --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: acme-pebble-v1-${{ matrix.arch }}
+          cache-on-failure: true
+      - name: Compile the test binaries
+        timeout-minutes: 30
+        run: cargo test -p floe-tls --tests --no-run --locked
+      - name: Start Pebble and pebble-challtestsrv
+        run: |
+          # Host network: Pebble asks challtestsrv (127.0.0.1:8053) for _acme-challenge TXT records,
+          # the test publishes them through challtestsrv's management API (:8055) and checks
+          # propagation against the same DNS. No sleeps, no nonce rejection: deterministic.
+          docker run -d --name challtestsrv --network host ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1 \
+            -defaultIPv6 "" -defaultIPv4 127.0.0.1 -http01 "" -https01 "" -tlsalpn01 "" -doh "" \
+            -dnsserver 127.0.0.1:8053 -management 127.0.0.1:8055
+          docker run -d --name pebble --network host -e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 \
+            ghcr.io/letsencrypt/pebble:2.10.1 -config /test/config/pebble-config.json -dnsserver 127.0.0.1:8053
+          docker cp pebble:/test/certs/pebble.minica.pem "$RUNNER_TEMP/pebble.minica.pem"
+          for i in $(seq 1 30); do
+            curl -fsS --cacert "$RUNNER_TEMP/pebble.minica.pem" https://localhost:14000/dir >/dev/null && break
+            sleep 1
+          done
+          curl -fsS --cacert "$RUNNER_TEMP/pebble.minica.pem" https://localhost:14000/dir
+      - name: ACME flow against Pebble
+        timeout-minutes: 10
+        env:
+          FLOE_TEST_PEBBLE_DIRECTORY: https://localhost:14000/dir
+          FLOE_TEST_PEBBLE_MANAGEMENT: https://localhost:15000
+          FLOE_TEST_CHALLTESTSRV: http://127.0.0.1:8055
+          FLOE_TEST_PEBBLE_DNS: 127.0.0.1:8053
+        run: |
+          export FLOE_TEST_PEBBLE_CA="$RUNNER_TEMP/pebble.minica.pem"
+          cargo test -p floe-tls --locked --test pebble -- --ignored --nocapture
+      - name: Service logs
+        if: always()
+        run: |
+          docker logs pebble 2>&1 | tail -200 || true
+          docker logs challtestsrv 2>&1 | tail -100 || true
+      - name: Clean up
+        if: always()
+        run: docker rm -fv pebble challtestsrv || true
 
   container:
     name: release container (${{ matrix.arch }})
