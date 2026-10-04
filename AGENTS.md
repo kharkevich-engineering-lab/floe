@@ -31,7 +31,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. |
 | `docs/EVENTS.md` | Anyone changing WAL-derived ref events, the webhook bridge, consumer semantics or event cursors. |
 | `docs/GITHUB.md` | Anyone touching `crates/floe-server/src/github/*`, or pointing a GitHub-integrated app at floe for local development. The facade's trust boundary (it has none), URL conventions, the write primitive, known limits. |
-| `docs/design/github-mirror.md` | Anyone touching upstream follow patterns/archive (D48), `floe-mirror` (D49), `floe-catalog` (D50) or the push-to-upstream seam (D51). Design of record; dated "as landed" notes where the code won. |
+| `docs/design/github-mirror.md` | Anyone touching upstream follow patterns/archive (D48), `floe-mirror` (D49), `floe-catalog` (D50, SigV4 D63) or the push-to-upstream seam (D51). Design of record; dated "as landed" notes where the code won. |
 | `docs/CONTRACT.md` | When you touch a crate boundary. The cross-crate contract; *extend, don't rename*; code wins where they differ. |
 | `docs/reference/cursor-git-at-any-scale.md` | The source design, verbatim. Read once before touching WAL/publish/sync/placement. |
 | `docs/patches/README.md` | Git client patches (bundle filter matching) and the gate for advertising filtered bundle families together. |
@@ -523,6 +523,18 @@ so the rules are on record first: a ref is either followed or pushed, never both
 (`ls-remote` first), never forced unless `push_force`, and `refs/archive/*` is never pushed. Seam:
 `floe_server::push_back`, a per-repo cursor `repos/<o>/<r>/push/<remote>.json`. Design:
 `docs/design/github-mirror.md` §E.
+
+**D63 — The Iceberg catalog client signs SigV4 itself (2026-10-04).** `[catalog] auth = "none" | "bearer" |
+"sigv4"` (with `sigv4_service`, default `"s3"` = RustFS `/iceberg`, `"s3tables"` = AWS; `sigv4_region`, default
+`s3_region`), validated fail closed. Because `iceberg-catalog-rest` 0.10.1 has no request hook, `auth = "sigv4"`
+puts an in-process signing proxy (`floe_catalog::sigv4::SigningProxy`) between `RestCatalog` and the endpoint: an
+axum server on a Unix socket in a `0700` temp directory, reached only through the reqwest client handed to
+`RestCatalogBuilder::with_client`; it accepts only the configured host, signs with `aws-sigv4`
+(`x-amz-content-sha256`, `X-Amz-Date`, `X-Amz-Security-Token`) and forwards. No TCP listener, no state (the socket
+dies with the connection, so principle I holds). Credentials follow D43 (static env pair, else the AWS SDK chain,
+refreshed before expiry) and the same source is the data-file `FileIO`'s only credential provider. The module is
+self-contained for the shared Iceberg crate the code-intelligence design plans; when iceberg-rust's `AuthManager`
+(0.11) lands, it replaces the proxy behind the same config. Design: `docs/design/github-mirror.md` §C.9.
 
 ## 5. Working rules
 

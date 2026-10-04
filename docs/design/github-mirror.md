@@ -1002,8 +1002,10 @@ crates/floe-catalog/
 | `uri` | — (required when enabled) | Iceberg REST catalog base URL. RustFS S3 Tables: its Iceberg REST endpoint (see R6). |
 | `warehouse` | — (required) | Warehouse identifier (S3 Tables: the table bucket name/ARN the endpoint expects). |
 | `namespace` | `"floe"` | Iceberg namespace; created if absent. |
-| `token_env` | unset | Env var with a bearer token for the catalog (`Authorization: Bearer`). |
-| `credential_env` | unset | Env var with `client_id:client_secret` for the REST OAuth2 client-credentials flow. |
+| `auth` | `"none"` | *(Added 2026-10-04, §C.9.)* `"none"`, `"bearer"` (exactly one of `token_env`/`credential_env`) or `"sigv4"` (every request signed with the `s3_*` credentials). |
+| `sigv4_service` / `sigv4_region` | `"s3"` / `s3_region` | *(§C.9.)* SigV4 signing name (`s3` for RustFS `/iceberg`, `s3tables` for AWS) and region. |
+| `token_env` | unset | Env var with a bearer token for the catalog (`Authorization: Bearer`; `auth = "bearer"`). |
+| `credential_env` | unset | Env var with `client_id:client_secret` for the REST OAuth2 client-credentials flow (`auth = "bearer"`). |
 | `s3_endpoint` | unset | FileIO endpoint for data files when the catalog does not vend credentials (RustFS: `http://rustfs:9000`). |
 | `s3_region` | `"us-east-1"` | |
 | `s3_access_key_env` / `s3_secret_key_env` | `"AWS_ACCESS_KEY_ID"` / `"AWS_SECRET_ACCESS_KEY"` | Env var *names* (D43 style; never values in config). |
@@ -1296,6 +1298,59 @@ Where `crates/floe-catalog` differs from or pins down §C.1–§C.7:
   `flush_rows > 0` and `max_buffer_rows >= flush_rows` must hold, and `flush_interval`/`commit_timeout` must
   be non-zero. The `cfg!(feature = "catalog")` startup check stays §D's.
 
+### C.9 SigV4 (as landed 2026-10-04, D63; closes R6; the code wins)
+
+RustFS 1.0.1 (the pinned compose image) ships S3 Tables: the Iceberg REST catalog is at `<endpoint>/iceberg`
+(the client adds `/v1`), the warehouse is the table bucket's name, a bucket is enabled by a signed
+`PUT /iceberg/v1/buckets/<name>`, and **every catalog request must carry SigV4 with signing name `s3`** (S3
+canonicalization: the path as sent, and a signed `x-amz-content-sha256` of the body; RustFS also rejects unsigned
+`x-amz-*` headers). The `/_iceberg` alias and AWS S3 Tables use the name `s3tables` (double-encoded,
+normalized path). Sources: docs.rustfs.com `administration/data/s3-tables`, and RustFS's own
+`scripts/table-catalog/pyiceberg_smoke.py` at tag 1.0.1, which signs with botocore `S3SigV4Auth` for `/iceberg`.
+
+- **Config** (§C.2): `auth = "none" | "bearer" | "sigv4"`, `sigv4_service` (default `"s3"`), `sigv4_region`
+  (default `s3_region`, the data-file store's region). `Config::validate` fails closed: `bearer` needs exactly one
+  of `token_env`/`credential_env`, `none` and `sigv4` refuse both, the URI must be `http(s)` with no userinfo,
+  query or fragment, and the signing name and region must look like ones.
+- **The hook: an in-process signing proxy on a Unix socket** (`floe_catalog::sigv4::SigningProxy`).
+  `iceberg-catalog-rest` 0.10.1 has no request hook: `RestCatalogBuilder::with_client` takes a plain
+  `reqwest::Client`, reqwest 0.12 has no per-request middleware (its `connector_layer` wraps connection setup and
+  returns a type outside code cannot build), and `header.*` props are static. A `reqwest-middleware` client is
+  not accepted by the builder, and patching or forking iceberg-rust is more invasive than one module. So on
+  `connect` floe starts a tiny axum server on a socket in a fresh `0700` temp directory and gives `RestCatalog`
+  (a) a reqwest client built with `unix_socket(..)`, so every connection it makes goes to that socket and never to
+  the network, and (b) the catalog URI with an `http` scheme (same host and path). The proxy checks the `Host`
+  (a `/v1/config` that overrides `uri` to another host is answered 421, never signed), buffers the body (≤ 16
+  MiB; catalog bodies are small JSON), signs with the official `aws-sigv4` crate, and forwards over a normal
+  rustls client (no redirects followed) to the configured `http(s)` endpoint, streaming the answer back. The
+  proxy lives as long as the connection (`Connected`), so a reconnect gets a fresh one; nothing listens on TCP and
+  no other user can open the socket. Cost: one extra in-process hop per catalog request, nothing on the bucket.
+  *Not a TCP loopback port with a shared secret*: that would need a token in a `header.*` prop (which
+  `RestCatalog` prints in `Debug`), and any local process could reach it first.
+- **Credentials** (`CredentialSource`, D43, the S3 store's rules): both `s3_access_key_env`/`s3_secret_key_env`
+  set = static keys plus `AWS_SESSION_TOKEN` when set; neither = the AWS SDK default chain (`aws-config`, ECS/EC2
+  roles, SSO, profiles) in the signing region; one alone fails `connect`. Loaded once per writer, cached, and
+  reloaded 5 minutes before expiry (single flight). The same source is the data-file `FileIO`'s only credential
+  provider (`OpenDalStorageFactory::S3 { customized_credential_load }`), with the expiry, so parquet and metadata
+  writes use the same keys and refresh too; endpoint and path style still come from `s3_endpoint`/`s3_path_style`
+  (RustFS: `http://rustfs:9000`, path style). With `auth = "none"`/`"bearer"` the data-file credentials are
+  unchanged (static env keys if set, else whatever the catalog vends).
+- **No secrets in logs**: `Authorization`/token header values are marked sensitive, `CredentialSource` and
+  `SigningProxy` print no key material in `Debug`, errors carry provider messages only, and `floe config check`
+  prints the variable names, service and region.
+- **Reuse** (code-intelligence design §2.2/R1): `sigv4.rs` depends on nothing else in floe-catalog (aws-sigv4,
+  aws-credential-types, aws-config, axum, reqwest, tempfile), so `floe-ice` can lift it as is; the 0.11
+  `AuthManager` route remains the way to delete the proxy once iceberg-rust 0.11 is out.
+- **Tests** (in `just test-catalog-lib`, both arches in CI): AWS SigV4 suite vectors (`get-vanilla`,
+  `get-vanilla-with-session-token`, `post-x-www-form-urlencoded`) and the S3 documentation's GET Object example,
+  the S3/non-S3 path rule, D43 pairing, refresh before expiry; `every_catalog_request_is_sigv4_signed` runs
+  `IcebergCommitter::connect` against a recording fake catalog (config GET, namespace HEAD/POST, table HEAD/POST)
+  and checks every request carries `Authorization`, `X-Amz-Date`, `x-amz-content-sha256` and
+  `X-Amz-Security-Token`, all signed, and that the signature re-verifies against the request as received;
+  `signing_proxy_refuses_other_hosts`. The live suite (`just test-catalog`, `#[ignore]`) now defaults to RustFS
+  S3 Tables with `auth = "sigv4"`; `just test-catalog-fixture` runs it against the `iceberg-rest` fallback.
+  **Not verified in CI**: a live RustFS S3 Tables round trip (CI starts no catalog).
+
 ---
 
 ## D. Wiring
@@ -1518,7 +1573,9 @@ it neither the mirror nor the catalog has one.
   works with floe's writer is still R6 (SigV4).
   `create-table-bucket` creates the bucket and PUTs `/iceberg/v1/buckets/floe-catalog` with SigV4 (curl
   `--aws-sigv4`), falling back to a message; the `iceberg-rest` fixture is what the writer can reach today, since
-  `iceberg-catalog-rest` 0.10 does not sign SigV4.
+  `iceberg-catalog-rest` 0.10 does not sign SigV4. *Superseded (§C.9, D63):* floe signs itself, the profile's
+  primary target is RustFS S3 Tables (`create-table-bucket` sends the documented `x-amz-content-sha256` and fails
+  loudly instead of printing a fallback message), and `iceberg-rest` stays as the fallback.
 
 ## E. Push-to-GitHub seam (post-MVP, design only; D51)
 
@@ -1553,7 +1610,7 @@ it neither the mirror nor the catalog has one.
 | R3 | **Follow does not scale linearly**: one sequential loop (an `ls-refs` probe per repo per round; Serve-level sync and `packs_fit()` only for repos that moved), the whole object set local while a round publishes. Hundreds of repos are fine; thousands, or one huge repo, are not. | `max_repo_size` + `max_new_per_pass`; refs-first rounds (§A.4); nudges instead of tight polling; huge repos go through the too-large handoff (`floe import` on an SSD host, then the source marker, §B.7.1). A post-MVP item is a concurrency limit for follow ops. |
 | R4 | Archive refs grow the ref count forever (a repository force-pushed hourly gets about 8.7k archive refs a year), and `ls-refs` advertises them. | Acceptable at these sizes (refs are O(1) on hot paths). Post-MVP: optional `upstream.archive_retention` (still never auto-deletes by default), and hiding `refs/archive/` from v0 advertisement. |
 | R5 | **LFS is read-through, not prefetched**: an LFS object never downloaded before the GitHub repository disappears is lost. | Post-MVP `lfs_prefetch` unit. Call it out in README. |
-| R6 | **RustFS S3 Tables is preview**: exact REST path, warehouse identifier, and auth (SigV4 vs bearer/OAuth). `iceberg-catalog-rest` 0.10 is not known to sign SigV4. | Verify against the pinned RustFS release before §C lands. If SigV4 is mandatory, add a signing `reqwest` middleware or put the Iceberg REST fixture in front. The ignored test runs against either. |
+| R6 | **RustFS S3 Tables is preview**: exact REST path, warehouse identifier, and auth (SigV4 vs bearer/OAuth). `iceberg-catalog-rest` 0.10 is not known to sign SigV4. | Verify against the pinned RustFS release before §C lands. If SigV4 is mandatory, add a signing `reqwest` middleware or put the Iceberg REST fixture in front. The ignored test runs against either. **Resolved 2026-10-04 (§C.9, D63):** SigV4 (name `s3`) is mandatory; floe signs through an in-process proxy, since 0.10.1 accepts no middleware. A live RustFS round trip is still manual (`just test-catalog`). |
 | R7 | iceberg-rust 0.10 MSRV 1.94 > workspace 1.90; arrow/parquet 58 add compile time and binary size. | Feature-gated (iceberg's manifest enforces 1.94 only with the feature; no `rust-version` on `floe-catalog`, which the default build depends on); decide whether the release image enables `catalog` (recommend: yes for the image, no for `cargo build`). **Decided 2026-10-04:** the Containerfile build stage (image + release tarballs) uses `--features catalog`; plain `cargo build` stays featureless. |
 | R8 | Tokens: PAT only. GitHub App installation tokens expire hourly, and follow reads an env var. | Post-MVP `TokenProvider` (App JWT → installation token) behind `Source`/`upstream_token_env`; the seam is `Config::upstream_token_env`. |
 | R9 | GitHub `has_wiki` is true for empty wikis → a failing `ls-refs` per `follow_interval`. | `wikis = false` default. Post-MVP: the mirror marks the wiki `absent` after N failed follow rounds (needs follow status in the bucket or the catalog). |
