@@ -20,9 +20,11 @@ pub mod rows;
 pub mod iceberg;
 #[cfg(feature = "iceberg")]
 pub mod schema;
+#[cfg(feature = "iceberg")]
+pub mod sigv4;
 
 pub use buffer::{CatalogError, CatalogWriter, CommitError, Committer, FlushPolicy};
-pub use floe_config::CatalogConfig;
+pub use floe_config::{CatalogAuth, CatalogConfig};
 pub use rows::{
     ArchivedLine, FOLLOW_ARCHIVED_META, ForcePushRow, InventoryRecord, RefEventRow, RefTransition,
     Row, SyncRun, Table, Timestamp, parse_follow_archived, rows_for_entry,

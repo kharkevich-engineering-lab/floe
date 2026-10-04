@@ -968,14 +968,28 @@ pub struct CatalogConfig {
     pub warehouse: Option<String>,
     /// Iceberg namespace; created when absent (`create_tables`).
     pub namespace: String,
-    /// Env var holding a bearer token for the catalog. Never the value itself.
+    /// How floe authenticates to the REST catalog (D63): `none`, `bearer`
+    /// (`token_env` or `credential_env`), or `sigv4` (every request signed
+    /// with the data-file credentials; `RustFS` and AWS S3 Tables).
+    pub auth: CatalogAuth,
+    /// `SigV4` signing name: `s3` for `RustFS`'s `/iceberg` endpoint, `s3tables`
+    /// for AWS S3 Tables (and `RustFS`'s `/_iceberg` alias).
+    pub sigv4_service: String,
+    /// `SigV4` region; unset = `s3_region`.
+    pub sigv4_region: Option<String>,
+    /// Env var holding a bearer token for the catalog (`auth = "bearer"`).
+    /// Never the value itself.
     pub token_env: Option<String>,
-    /// Env var holding `client_id:client_secret` (REST `OAuth2` client credentials).
+    /// Env var holding `client_id:client_secret` (REST `OAuth2` client
+    /// credentials, `auth = "bearer"`).
     pub credential_env: Option<String>,
     /// `FileIO` endpoint for data files when the catalog does not vend credentials.
     pub s3_endpoint: Option<String>,
     pub s3_region: String,
-    /// Env var *names* for the data-file credentials (D43 style).
+    /// Env var *names* for the data-file credentials (D43: both set = static
+    /// keys, plus `AWS_SESSION_TOKEN` when set; neither = the AWS SDK default
+    /// chain; one alone is an error). With `auth = "sigv4"` the same
+    /// credentials sign the catalog requests.
     pub s3_access_key_env: String,
     pub s3_secret_key_env: String,
     /// Path-style addressing (`RustFS`/`MinIO`).
@@ -999,6 +1013,31 @@ pub struct CatalogConfig {
     pub create_tables: bool,
 }
 
+/// `[catalog] auth` (D63).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogAuth {
+    /// No `Authorization` header (the `iceberg-rest` fixture).
+    #[default]
+    None,
+    /// `Authorization: Bearer`, from `token_env` or the `OAuth2` client
+    /// credentials in `credential_env` (exactly one of them).
+    Bearer,
+    /// AWS Signature V4 on every catalog request (`sigv4_service`,
+    /// `sigv4_region`), with the data-file credentials (`s3_*_env`, D43).
+    Sigv4,
+}
+
+impl CatalogConfig {
+    /// The region `SigV4` signs for: `sigv4_region`, else `s3_region`.
+    pub fn sigv4_region(&self) -> &str {
+        self.sigv4_region
+            .as_deref()
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or(&self.s3_region)
+    }
+}
+
 impl Default for CatalogConfig {
     fn default() -> Self {
         CatalogConfig {
@@ -1006,6 +1045,9 @@ impl Default for CatalogConfig {
             uri: None,
             warehouse: None,
             namespace: "floe".into(),
+            auth: CatalogAuth::None,
+            sigv4_service: "s3".into(),
+            sigv4_region: None,
             token_env: None,
             credential_env: None,
             s3_endpoint: None,
@@ -1102,6 +1144,7 @@ impl CatalogConfig {
             !self.namespace.trim().is_empty(),
             "catalog.namespace must not be empty"
         );
+        self.validate_auth()?;
         anyhow::ensure!(self.flush_rows > 0, "catalog.flush_rows must be > 0");
         anyhow::ensure!(
             self.max_buffer_rows >= self.flush_rows,
@@ -1113,6 +1156,58 @@ impl CatalogConfig {
             !self.flush_interval.is_zero() && !self.commit_timeout.is_zero(),
             "catalog.flush_interval and catalog.commit_timeout must be > 0"
         );
+        Ok(())
+    }
+
+    /// `auth` and the keys it reads, fail closed: a key the mode does not use
+    /// is an error rather than silently ignored.
+    fn validate_auth(&self) -> Result<()> {
+        let set = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let uri = self.uri.as_deref().unwrap_or_default();
+        let (scheme_ok, rest) = match uri.split_once("://") {
+            Some(("http" | "https", rest)) => (true, rest),
+            _ => (false, ""),
+        };
+        anyhow::ensure!(
+            scheme_ok && !rest.is_empty() && !rest.contains(['@', '?', '#']),
+            "catalog.uri must be an http(s) URL without credentials, a query or a fragment (got {uri:?})"
+        );
+        match self.auth {
+            CatalogAuth::None => anyhow::ensure!(
+                !set(&self.token_env) && !set(&self.credential_env),
+                "catalog.token_env / catalog.credential_env need catalog.auth = \"bearer\""
+            ),
+            CatalogAuth::Bearer => anyhow::ensure!(
+                set(&self.token_env) != set(&self.credential_env),
+                "catalog.auth = \"bearer\" needs exactly one of catalog.token_env and catalog.credential_env"
+            ),
+            CatalogAuth::Sigv4 => {
+                anyhow::ensure!(
+                    !set(&self.token_env) && !set(&self.credential_env),
+                    "catalog.auth = \"sigv4\" signs with the s3_*_env credentials; unset catalog.token_env and catalog.credential_env"
+                );
+                let name_ok = |v: &str| {
+                    !v.is_empty()
+                        && v.bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                };
+                anyhow::ensure!(
+                    name_ok(&self.sigv4_service),
+                    "catalog.sigv4_service must be a signing name like \"s3\" or \"s3tables\" (got {:?})",
+                    self.sigv4_service
+                );
+                anyhow::ensure!(
+                    name_ok(self.sigv4_region()),
+                    "catalog.sigv4_region (or catalog.s3_region) must be a region like \"us-east-1\" (got {:?})",
+                    self.sigv4_region()
+                );
+                anyhow::ensure!(
+                    !self.s3_access_key_env.trim().is_empty()
+                        && !self.s3_secret_key_env.trim().is_empty(),
+                    "catalog.s3_access_key_env and catalog.s3_secret_key_env must name env vars"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -2709,6 +2804,26 @@ max_buffer_rows = 100
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("max_buffer_rows"), "{err}");
         c.catalog.max_buffer_rows = 100;
+        assert_eq!(c.catalog.auth, CatalogAuth::None);
+        c.catalog.uri = Some("ftp://x/iceberg".into());
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("catalog.uri"), "{err}");
+        c.catalog.uri = Some("http://key:secret@x/iceberg".into());
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("catalog.uri"), "{err}");
+        c.catalog.uri = Some("http://localhost:9000/iceberg".into());
+        c.catalog.token_env = Some("T".into());
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("bearer"), "{err}");
+        c.catalog.auth = CatalogAuth::Bearer;
+        c.validate().unwrap();
+        c.catalog.credential_env = Some("C".into());
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("exactly one"), "{err}");
+        c.catalog.token_env = None;
+        c.catalog.credential_env = None;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("exactly one"), "{err}");
         c.catalog.uri = None;
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("catalog.uri"), "{err}");
@@ -2717,6 +2832,49 @@ max_buffer_rows = 100
         c.validate().unwrap();
         let err = Config::parse("[catalog]\nbogus = 1\n").unwrap_err();
         assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
+    }
+
+    #[test]
+    fn catalog_sigv4_parses_and_fails_closed() {
+        let mut c = Config::parse(
+            r#"
+[store]
+bucket = "b"
+[catalog]
+enabled = true
+uri = "http://rustfs:9000/iceberg"
+warehouse = "floe-catalog"
+auth = "sigv4"
+s3_region = "eu-west-1"
+"#,
+        )
+        .unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.catalog.auth, CatalogAuth::Sigv4);
+        assert_eq!(c.catalog.sigv4_service, "s3");
+        // The region defaults to the data-file store's.
+        assert_eq!(c.catalog.sigv4_region(), "eu-west-1");
+        c.catalog.sigv4_region = Some("us-east-2".into());
+        assert_eq!(c.catalog.sigv4_region(), "us-east-2");
+        c.catalog.sigv4_service = "S3 Tables".into();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("sigv4_service"), "{err}");
+        c.catalog.sigv4_service = "s3tables".into();
+        c.validate().unwrap();
+        c.catalog.sigv4_region = Some("us east".into());
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("sigv4_region"), "{err}");
+        c.catalog.sigv4_region = None;
+        // A bearer token next to SigV4 would be ignored: refuse it.
+        c.catalog.token_env = Some("T".into());
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("sigv4"), "{err}");
+        c.catalog.token_env = None;
+        c.catalog.s3_secret_key_env = String::new();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("s3_secret_key_env"), "{err}");
+        let err = Config::parse("[catalog]\nauth = \"basic\"\n").unwrap_err();
+        assert!(format!("{err:#}").contains("unknown variant"), "{err:#}");
     }
 
     #[test]

@@ -17,6 +17,13 @@ iceberg = [
     "dep:iceberg-storage-opendal",
     "dep:arrow-array",
     "dep:reqwest",
+    "dep:aws-config",
+    "dep:aws-credential-types",
+    "dep:aws-sigv4",
+    "dep:axum",
+    "dep:http",
+    "dep:reqsign-core",
+    "dep:tempfile",
 ]
 
 [dependencies]
@@ -37,9 +44,18 @@ iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 iceberg-storage-opendal = { workspace = true, optional = true }
 arrow-array = { workspace = true, optional = true }
-# Not used directly: unifies rustls into the reqwest iceberg-catalog-rest builds
-# without a TLS backend, so an https catalog URI works.
+# Unifies rustls into the reqwest iceberg-catalog-rest builds without a TLS
+# backend, so an https catalog URI works; also the SigV4 proxy's clients.
 reqwest = { workspace = true, optional = true }
+# `auth = "sigv4"` (src/sigv4.rs, D63): signing, the D43 credential chain, the
+# in-process signing proxy on a Unix socket, and the FileIO credential loader.
+aws-config = { workspace = true, optional = true }
+aws-credential-types = { workspace = true, optional = true }
+aws-sigv4 = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+reqsign-core = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

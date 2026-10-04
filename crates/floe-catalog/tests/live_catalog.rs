@@ -1,18 +1,23 @@
-//! Against a live Iceberg REST catalog (`just test-catalog`; `RustFS` S3 Tables
-//! or the `iceberg-rest` fixture from `podman compose --profile catalog up`).
+//! Against a live Iceberg REST catalog (`just test-catalog`: `RustFS` S3 Tables
+//! with `SigV4`; `just test-catalog-fixture`: the `iceberg-rest` fixture; both
+//! from `podman compose --profile catalog up`).
 //! Ignored by default and compiled only with `--features iceberg`:
 //!
 //! ```text
-//! FLOE_TEST_CATALOG_URI=http://localhost:8181 FLOE_TEST_CATALOG_WAREHOUSE=s3://floe-test/warehouse \
-//! FLOE_TEST_CATALOG_S3_ENDPOINT=http://localhost:9000 AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… \
+//! FLOE_TEST_CATALOG_URI=http://localhost:9000/iceberg FLOE_TEST_CATALOG_WAREHOUSE=floe-catalog \
+//! FLOE_TEST_CATALOG_AUTH=sigv4 FLOE_TEST_CATALOG_S3_ENDPOINT=http://localhost:9000 \
+//! AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… \
 //!   cargo test -p floe-catalog --features iceberg --test live_catalog -- --ignored
 //! ```
+//!
+//! `FLOE_TEST_CATALOG_AUTH` is `sigv4` (default), `none`, or `bearer` (with
+//! `FLOE_TEST_CATALOG_TOKEN`); `FLOE_TEST_CATALOG_SIGV4_SERVICE` defaults to `s3`.
 //!
 //! Every run uses a fresh namespace, so runs never see each other's rows.
 #![cfg(feature = "iceberg")]
 // Helpers outside #[test] fns fail the test the same way (clippy.toml only
 // exempts the test functions themselves).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,8 +25,8 @@ use std::time::Duration;
 use chrono::Utc;
 use floe_catalog::iceberg::IcebergCommitter;
 use floe_catalog::{
-    CatalogConfig, CatalogWriter, Committer, FlushPolicy, ForcePushRow, InventoryRecord, Recorder,
-    RefEventRow, Row, SyncRun, Table,
+    CatalogAuth, CatalogConfig, CatalogWriter, Committer, FlushPolicy, ForcePushRow,
+    InventoryRecord, Recorder, RefEventRow, Row, SyncRun, Table,
 };
 use futures::TryStreamExt;
 
@@ -35,6 +40,13 @@ fn config() -> CatalogConfig {
         ),
         namespace: format!("floe_test_{}", uuid::Uuid::new_v4().simple()),
         s3_endpoint: env("FLOE_TEST_CATALOG_S3_ENDPOINT"),
+        auth: match env("FLOE_TEST_CATALOG_AUTH").as_deref() {
+            None | Some("sigv4") => CatalogAuth::Sigv4,
+            Some("none") => CatalogAuth::None,
+            Some("bearer") => CatalogAuth::Bearer,
+            Some(other) => panic!("FLOE_TEST_CATALOG_AUTH={other}: sigv4, none or bearer"),
+        },
+        sigv4_service: env("FLOE_TEST_CATALOG_SIGV4_SERVICE").unwrap_or_else(|| "s3".into()),
         token_env: env("FLOE_TEST_CATALOG_TOKEN").map(|_| "FLOE_TEST_CATALOG_TOKEN".into()),
         ..CatalogConfig::default()
     }

@@ -81,6 +81,14 @@ fn mirror_and_catalog(cfg: &Config, file_vars: &[(String, String)]) -> Result<()
         for var in vars.into_iter().flatten() {
             println!("# {}", env_line(var, file_vars));
         }
+        if cat.auth == floe_config::CatalogAuth::Sigv4 {
+            // D43/D63: neither key set = the AWS SDK credential chain signs.
+            println!(
+                "# sigv4: service {}, region {}",
+                cat.sigv4_service,
+                cat.sigv4_region()
+            );
+        }
     }
     Ok(())
 }
