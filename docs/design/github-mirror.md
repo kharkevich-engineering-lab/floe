@@ -1499,7 +1499,9 @@ it neither the mirror nor the catalog has one.
   `server.drain_timeout`.
 - **`floe config check`** prints the effective `[github_mirror]`/`[catalog]` when enabled and whether each env var
   they name is set (never the value); `catalog.enabled` without the feature fails there as at startup.
-- **compose (§D.4)**: `rustfs` stays on `latest` (no tagged release verified to ship S3 Tables, R6).
+- **compose (§D.4)**: `rustfs` is pinned to `1.0.1` (tag + index digest; 2026-10-04). That release contains
+  commit 7e0c6711 (S3 Tables). The CI container smoke job runs against it. Whether its Iceberg REST endpoint
+  works with floe's writer is still R6 (SigV4).
   `create-table-bucket` creates the bucket and PUTs `/iceberg/v1/buckets/floe-catalog` with SigV4 (curl
   `--aws-sigv4`), falling back to a message; the `iceberg-rest` fixture is what the writer can reach today, since
   `iceberg-catalog-rest` 0.10 does not sign SigV4.

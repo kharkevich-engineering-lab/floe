@@ -18,9 +18,11 @@
 
 services:
   rustfs:
-    # S3 Tables needs a build at or after commit 7e0c6711 (RustFS docs, reviewed 2026-09-08); no tagged
-    # release was verified to include it yet, so this stays on latest. Pin once one is (R6).
-    image: rustfs/rustfs:latest
+    # Pinned (tag + index digest, amd64 + arm64): CI's container smoke job runs against this exact
+    # build, so a new upstream `latest` cannot break it unannounced. 1.0.1 (2026-10-03) contains
+    # commit 7e0c6711, the S3 Tables (Iceberg REST) endpoint (R6; `gh api
+    # repos/rustfs/rustfs/compare/7e0c6711...1.0.1` → ahead). Bump tag and digest together.
+    image: rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
     ports:
       - "9000:9000"
       - "9001:9001"

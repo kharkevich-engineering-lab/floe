@@ -37,7 +37,7 @@
 //! objects (manifests, leases, bundle lists) are always small → single-shot
 //! PUT with conditional headers.
 //!
-//! ## rustfs compatibility (tested with rustfs/rustfs:latest)
+//! ## rustfs compatibility (tested with rustfs/rustfs:1.0.1, the tag compose.yaml pins)
 //!
 //! See the compatibility notes at the bottom of this file.
 
