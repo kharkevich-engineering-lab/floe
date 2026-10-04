@@ -5,6 +5,16 @@ name: CI
 # tiers AGENTS.md documents (warnings, clippy, test, e2e, and the catalog feature build) — split
 # into jobs, so CI and a contributor's laptop cannot drift.
 # The tier definitions live in the justfile, never duplicated here.
+#
+# A pull request runs only what its changed paths need (the `changes` job below; the table is
+# in AGENTS.md §5). Push to main and workflow_dispatch run everything. Branch protection
+# requires the one aggregate check, `CI result`, which passes when every job either succeeded
+# or was skipped by its path filter — so a skipped job never blocks a merge and never hides a
+# failure.
+#
+# Rust caches are written from main only (`save-if`) and restored everywhere: every PR push
+# saving ~5 GB of target/ blew through the repository's 10 GB cache budget, the LRU evicted
+# the next run's cache, and x86_64 recompiled the world cold (17 min) on most runs.
 
 on:
   push:
@@ -19,9 +29,84 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
+  # Which groups of jobs this change needs. On a pull request, from the PR's file list (the
+  # API, no checkout); on push to main and workflow_dispatch, everything.
+  changes:
+    name: changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      # Anything but docs: the Rust build, tests and contracts (the SPA is embedded, so web/ too).
+      code: ${{ github.event_name != 'pull_request' || steps.filter.outputs.code == 'true' }}
+      # The Rust sources and what compiles them: rustfmt, MSRV, the catalog feature build.
+      rust: ${{ github.event_name != 'pull_request' || steps.filter.outputs.rust == 'true' }}
+      # What the release image is built from.
+      container: ${{ github.event_name != 'pull_request' || steps.filter.outputs.container == 'true' }}
+      # floe-tls and the crates it compiles against (the ACME/Pebble job builds nothing else).
+      tls: ${{ github.event_name != 'pull_request' || steps.filter.outputs.tls == 'true' }}
+      deny: ${{ github.event_name != 'pull_request' || steps.filter.outputs.deny == 'true' }}
+      actions: ${{ github.event_name != 'pull_request' || steps.filter.outputs.actions == 'true' }}
+    steps:
+      - id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: |
+            code:
+              - '**'
+              - '!docs/**'
+              - '!**/*.md'
+              - '!site/**'
+              - '!LICENSE'
+              - '!NOTICE'
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - 'clippy.toml'
+              - 'justfile'
+              - '.github/workflows/**'
+            container:
+              - 'Containerfile'
+              - '.dockerignore'
+              - 'compose.yaml'
+              - 'deploy/**'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'web/package.json'
+              - 'web/pnpm-lock.yaml'
+              - 'scripts/**'
+              - '.github/workflows/**'
+            tls:
+              - 'crates/floe-tls/**'
+              - 'crates/floe-store/**'
+              - 'crates/floe-config/**'
+              - 'crates/floe-proto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - '.github/workflows/**'
+            deny:
+              - 'Cargo.lock'
+              - 'deny.toml'
+            actions:
+              - '.github/**'
+
   build-test:
     name: warnings + test (${{ matrix.arch }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # Native on both architectures floe ships for (see release.yml): one runner per arch,
     # never qemu. fail-fast off: a failure on one arch and not the other is the signal.
     strategy:
@@ -63,11 +148,17 @@ jobs:
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
           rustup show && cargo --version && git --version
+          # Only the pinned toolchain stays: rust-cache hashes every installed toolchain into its
+          # key, so the image's preinstalled `stable` would drop the whole cache on each image bump.
+          active="$(rustup show active-toolchain | cut -d' ' -f1)"
+          rustup toolchain list | cut -d' ' -f1 | grep -vxF "$active" | xargs -r -n1 rustup toolchain uninstall
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # Per arch: an x86_64 target/ restored onto arm64 is gigabytes of useless download.
           key: scoped-tests-v1-${{ matrix.arch }}
           cache-on-failure: true
+          # Written from main only, restored everywhere (see the header).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just
@@ -100,6 +191,8 @@ jobs:
 
   e2e:
     name: Git and editor contracts (${{ matrix.arch }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # Native on both architectures floe ships for (see release.yml): one runner per arch,
     # never qemu. fail-fast off: a failure on one arch and not the other is the signal.
     strategy:
@@ -135,10 +228,16 @@ jobs:
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
           rustup show && cargo --version && git --version
+          # Only the pinned toolchain stays: rust-cache hashes every installed toolchain into its
+          # key, so the image's preinstalled `stable` would drop the whole cache on each image bump.
+          active="$(rustup show active-toolchain | cut -d' ' -f1)"
+          rustup toolchain list | cut -d' ' -f1 | grep -vxF "$active" | xargs -r -n1 rustup toolchain uninstall
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: contracts-v1-${{ matrix.arch }}
           cache-on-failure: true
+          # Written from main only, restored everywhere (see the header).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just
@@ -155,7 +254,7 @@ jobs:
       - name: Compile cold contract binaries before timed tests
         id: contracts
         timeout-minutes: 45
-        run: cargo test -p floe-server --test e2e --test github --test github_reads --test github_graphql --test github_prs --test github_webhooks --test events --no-run --locked
+        run: cargo test -p floe-server --test e2e --test github --test github_reads --test github_graphql --test github_prs --test github_webhooks --test events --test sim --no-run --locked
       - name: Editor facade contracts
         shell: bash
         run: just test-editor 2>&1 | tee editor-contracts.log
@@ -163,6 +262,14 @@ jobs:
         if: ${{ !cancelled() && steps.contracts.outcome == 'success' }}
         shell: bash
         run: just e2e 2>&1 | tee git-contracts.log
+      # Principle IV's check (AGENTS.md §3): crash, partition, stale, lost-response and orphan
+      # scenarios over one truth store, with the default seeds (~25 s). Random seeds and the
+      # skipped test run nightly; drop the --skip when #12 (its >1 s cold refs read) is fixed.
+      - name: Simulation suite
+        if: ${{ !cancelled() && steps.contracts.outcome == 'success' }}
+        timeout-minutes: 10
+        shell: bash
+        run: just sim --skip sim_cache_pressure_keeps_pinned_repos_and_refuses_too_large 2>&1 | tee sim-contracts.log
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -172,6 +279,8 @@ jobs:
 
   catalog:
     name: catalog feature (${{ matrix.arch }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     # The release image and tarballs are built with `--features catalog` (Containerfile), so the
     # feature build is linted and tested here, natively per arch. Its own job and cache: arrow,
     # parquet and iceberg are a second dependency graph the default build never compiles. The
@@ -209,10 +318,16 @@ jobs:
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
           rustup show && cargo --version && git --version
+          # Only the pinned toolchain stays: rust-cache hashes every installed toolchain into its
+          # key, so the image's preinstalled `stable` would drop the whole cache on each image bump.
+          active="$(rustup show active-toolchain | cut -d' ' -f1)"
+          rustup toolchain list | cut -d' ' -f1 | grep -vxF "$active" | xargs -r -n1 rustup toolchain uninstall
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: catalog-v1-${{ matrix.arch }}
           cache-on-failure: true
+          # Written from main only, restored everywhere (see the header).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just
@@ -228,6 +343,8 @@ jobs:
     # finalize, sealed bucket state, a second instance picking the certificate up, renewal
     # hot-swap, a verified handshake) against letsencrypt/pebble with pebble-challtestsrv as the
     # DNS. Its own job: it compiles only floe-tls (+ the store's memory backend), not the server.
+    needs: changes
+    if: needs.changes.outputs.tls == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -259,10 +376,13 @@ jobs:
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
           rustup show && cargo --version
+          active="$(rustup show active-toolchain | cut -d' ' -f1)"
+          rustup toolchain list | cut -d' ' -f1 | grep -vxF "$active" | xargs -r -n1 rustup toolchain uninstall
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: acme-pebble-v1-${{ matrix.arch }}
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Compile the test binaries
         timeout-minutes: 30
         run: cargo test -p floe-tls --tests --no-run --locked
@@ -277,7 +397,7 @@ jobs:
           docker run -d --name pebble --network host -e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 \
             ghcr.io/letsencrypt/pebble:2.10.1 -config /test/config/pebble-config.json -dnsserver 127.0.0.1:8053
           docker cp pebble:/test/certs/pebble.minica.pem "$RUNNER_TEMP/pebble.minica.pem"
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl -fsS --cacert "$RUNNER_TEMP/pebble.minica.pem" https://localhost:14000/dir >/dev/null && break
             sleep 1
           done
@@ -303,6 +423,9 @@ jobs:
 
   container:
     name: release container (${{ matrix.arch }})
+    # On a PR only when what the image is built from changes; always on main and by hand.
+    needs: changes
+    if: needs.changes.outputs.container == 'true'
     # Both arches the release workflow publishes, each on a native runner: the release
     # run on main must never be the first time the Containerfile is built for arm64.
     strategy:
@@ -332,7 +455,9 @@ jobs:
           build-args: FLOE_BUILD_SHA=${{ github.sha }}
           tags: floe:smoke
           cache-from: type=gha,scope=ci-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=ci-${{ matrix.arch }}
+          # Written from main only, like the Rust caches: mode=max layers from every PR push
+          # crowd the 10 GB cache budget.
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=gha,mode=max,scope=ci-{0}', matrix.arch) || '' }}
       - name: Start S3-compatible test store
         run: |
           docker compose up -d --wait rustfs
@@ -371,3 +496,105 @@ jobs:
         run: |
           docker rm -fv floe-smoke || true
           docker compose down -v
+
+  fmt:
+    name: rustfmt
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The image ships rustup; rust-toolchain.toml pins the toolchain and lists rustfmt.
+      - name: Install the pinned Rust toolchain
+        run: rustup show && cargo fmt --version
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: just
+      - run: just fmt-check
+
+  msrv:
+    name: MSRV (x86_64)
+    # `cargo check` on the workspace's rust-version (Cargo.toml, the one home of the number), so
+    # a newer std API cannot land under a floor that claims otherwise. One arch: the MSRV is a
+    # property of the source, not of the target.
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # Before rust-cache, so its key covers the MSRV toolchain.
+      - name: Install the MSRV toolchain
+        run: |
+          msrv="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$msrv"
+          rustup toolchain install "$msrv" --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: msrv-v1
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: just
+      - run: just msrv
+
+  deny:
+    name: cargo-deny
+    # Advisories, licences, bans and sources (deny.toml). On a PR only when the dependency
+    # graph or the policy changes; the nightly workflow runs it daily for new advisories.
+    needs: changes
+    if: needs.changes.outputs.deny == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: just,cargo-deny@0.20.2
+      - run: just deny
+
+  actionlint:
+    name: actionlint
+    needs: changes
+    if: needs.changes.outputs.actions == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A fixed release checked against a hash pinned here. Bump VERSION and the hash together
+      # (actionlint_<v>_checksums.txt). shellcheck, preinstalled on the image, lints run: blocks.
+      - name: Install actionlint
+        env:
+          VERSION: 1.7.12
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          tarball="actionlint_${VERSION}_linux_amd64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -sSfLo "$RUNNER_TEMP/$tarball" "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/${tarball}"
+          echo "${SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
+      - run: '"$RUNNER_TEMP/actionlint" -color'
+
+  # The one check branch protection requires. Green when every job succeeded or was skipped by
+  # its path filter; red on any failure or cancellation — including `changes` itself failing,
+  # which would otherwise skip everything downstream and look like a docs-only PR.
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [changes, fmt, build-test, e2e, catalog, acme-pebble, container, msrv, deny, actionlint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed or was skipped by design
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad="$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key) (\(.value.result))"] | join(", ")')"
+          if [ -n "$bad" ]; then
+            echo "::error::not green: ${bad}"
+            exit 1
+          fi
