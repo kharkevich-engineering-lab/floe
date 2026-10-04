@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use floe_config::AcmeConfig;
-use floe_store::{DynStore, ObjectStore, ObjectStoreExt, memory::MemoryStore};
+use floe_store::{DynStore, ObjectStoreExt, memory::MemoryStore};
 use futures::StreamExt;
 use floe_tls::acme::{AcmeManager, Tick};
 use floe_tls::dns::{DnsProvider, TxtRecord};
@@ -184,7 +184,7 @@ async fn pebble_dns01_order_share_and_renew() {
 
     // Instance A orders the first certificate.
     let ra = CertResolver::new();
-    let a = manager(&e, &store, ra.clone(), &http, Duration::from_secs(30 * 86_400));
+    let a = manager(&e, &store, ra.clone(), &http, Duration::from_secs(86_400));
     assert!(a.due(), "nothing loaded yet");
     assert!(!a.status().loaded);
     let t = a.tick(&LogNarrator).await.unwrap();
@@ -193,7 +193,13 @@ async fn pebble_dns01_order_share_and_renew() {
     let mut sans = la.info.sans.clone();
     sans.sort();
     assert_eq!(sans, vec!["*.floe.test", "floe.test"]);
-    assert!(!a.due(), "a fresh 90-day certificate is not due");
+    // Pebble's validity depends on its profile (90 days, or 6 for `shortlived`); one day of
+    // renew_before is inside either.
+    eprintln!(
+        "issued: {} .. {} by {}",
+        la.info.not_before, la.info.not_after, la.info.issuer
+    );
+    assert!(!a.due(), "a fresh certificate is not due with renew_before = 1 day");
     let st = a.status();
     assert!(st.loaded && st.last_error.is_none() && st.last_renewal_at.is_some(), "{st:?}");
 
@@ -236,7 +242,7 @@ async fn pebble_dns01_order_share_and_renew() {
 
     // Instance B (same bucket) picks it up by conditional GET; it does not order.
     let rb = CertResolver::new();
-    let b = manager(&e, &store, rb.clone(), &http, Duration::from_secs(30 * 86_400));
+    let b = manager(&e, &store, rb.clone(), &http, Duration::from_secs(86_400));
     assert_eq!(b.tick(&LogNarrator).await.unwrap(), Tick::Fresh);
     assert_eq!(rb.current().unwrap().info.fingerprint, la.info.fingerprint);
     assert!(!b.refresh().await.unwrap(), "unchanged object: 304, nothing installed");
