@@ -69,9 +69,10 @@ pub const OPS: &[OpSpec] = &[
     OpSpec {
         id: "follow",
         label: "Follow upstream",
-        description: "Bring the refs in upstream.follow up to upstream.git's now: fetch the delta over this copy's \
-                      objects, ingest it like a push, fast-forward only, one PUSH entry (principal=upstream). The \
-                      maintaining host runs this every maintenance.follow_interval when a ref moved.",
+        description: "Bring the refs matching upstream.follow up to upstream.git's now: fetch the delta over this \
+                      copy's objects, ingest it like a push, one PUSH entry (principal=upstream). A rewritten or \
+                      deleted ref is archived under refs/archive/<ts>/<ref> in the same entry (on_rewrite = \"archive\") \
+                      or left as is (\"refuse\"). The maintaining host runs this when its probe sees a ref moved.",
         params: &[],
         mutating: true,
     },
@@ -327,7 +328,7 @@ async fn run(
                     fsck.missing_total
                 ));
             }
-            let token = match cfg.upstream.token_env.as_deref() {
+            let token = match cfg.upstream_token_env(&upstream) {
                 Some(name) => Some(
                     state
                         .lfs_upstream

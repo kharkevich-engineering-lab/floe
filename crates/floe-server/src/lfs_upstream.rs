@@ -8,7 +8,8 @@
 //! sha256-verified read). Pushes through floe upload straight into our store,
 //! so the upstream only ever serves history.
 //!
-//! Token: `upstream.token_env` names an environment variable on the maintaining
+//! Token: `Config::upstream_token_env` (`upstream.token_env_by_host` for the URL's
+//! host, else `upstream.token_env`) names an environment variable on the maintaining
 //! host holding the token (settings are published to the bucket, so never the
 //! token itself); sent as HTTP Basic `x-access-token:<token>` (GitHub's LFS
 //! endpoint). Unset = unauthenticated upstream (tests).
@@ -210,13 +211,14 @@ impl Upstream {
         Ok((len, stream))
     }
 
-    /// The upstream token: the value of the environment variable `upstream.token_env` names.
+    /// The upstream token: the value of the environment variable
+    /// `Config::upstream_token_env` names.
     pub async fn secret(&self, env_name: &str) -> anyhow::Result<String> {
         let v = std::env::var(env_name).map_err(|_| {
-            anyhow::anyhow!("upstream.token_env {env_name:?} is not set in this host's environment")
+            anyhow::anyhow!("upstream token env var {env_name:?} is not set in this host's environment")
         })?;
         let v = v.trim().to_string();
-        anyhow::ensure!(!v.is_empty(), "upstream.token_env {env_name:?} is empty");
+        anyhow::ensure!(!v.is_empty(), "upstream token env var {env_name:?} is empty");
         Ok(v)
     }
 }

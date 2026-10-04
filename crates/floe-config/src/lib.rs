@@ -2,7 +2,9 @@
 //! `FLOE__SECTION__KEY=value` (double underscore = nesting), applied after
 //! the file is parsed. `PORT` (a serverless host) overrides `server.listen` port.
 
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, time::Duration};
+
+pub mod refpattern;
 
 use anyhow::{Context, Result};
 pub use bytesize::ByteSize;
@@ -672,14 +674,46 @@ pub struct UpstreamConfig {
     pub lfs: Option<String>,
     /// Name of an environment variable on the maintaining host that holds the token
     /// (settings live in the bucket, so never the token itself); sent as HTTP Basic
-    /// `x-access-token:<token>` (GitHub). Unset = unauthenticated.
+    /// `x-access-token:<token>` (GitHub). Unset = unauthenticated. Host-only; see
+    /// [`Config::upstream_token_env`] for the resolution order.
     pub token_env: Option<String>,
-    /// Refs kept equal to the upstream's (`["refs/heads/main"]`): the host that
-    /// maintains the repository (D28: its writer) fetches the delta from `git`
-    /// every `maintenance.follow_interval` and publishes it through the WAL as
-    /// an ordinary push (fast-forward only; a rewound upstream is refused and
-    /// logged until a human decides). Empty = off.
+    /// Ref patterns kept equal to the upstream's (D48, [`refpattern`]: git refspec
+    /// sources, `refs/heads/*`, `^refs/heads/x/*`): the host that maintains the
+    /// repository (D28: its writer) fetches the delta from `git` and publishes it
+    /// through the WAL as an ordinary push. Empty = follow off; checked before, and
+    /// instead of, `RefPatterns::parse`, so `follow = []` is always valid.
     pub follow: Vec<String>,
+    /// What follow does when upstream rewrites (non-fast-forward, or any tag move)
+    /// or deletes a followed ref.
+    pub on_rewrite: OnRewrite,
+    /// Desired symbolic target of HEAD (`refs/heads/main`): follow retargets HEAD
+    /// when the WAL's differs and the target exists. Unset = follow never touches HEAD.
+    pub head: Option<String>,
+    /// Per-repository minimum pause between follow rounds (the loop still ticks
+    /// every `maintenance.follow_interval`; a repository whose last round is younger
+    /// than this is skipped). Unset = every tick.
+    #[serde(default, with = "humantime_serde::option")]
+    pub follow_interval: Option<Duration>,
+    /// Opaque provenance label (`github:123456789`): who manages this `[upstream]`.
+    /// Follow only logs it.
+    pub source: Option<String>,
+    /// Host-only: env var name per upstream host (`"github.com" = "FLOE_GITHUB_TOKEN"`);
+    /// beats `token_env` for URLs on that host. Refused in settings and stripped from
+    /// the public effective config, exactly like `token_env`.
+    pub token_env_by_host: BTreeMap<String, String>,
+}
+
+/// D48: what follow does when upstream rewrites or deletes a followed ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OnRewrite {
+    /// Keep the old tip under `refs/archive/<unix-ts>/<ref>`, then apply upstream's
+    /// state, in one WAL entry. Nothing is lost.
+    #[default]
+    Archive,
+    /// D33 behaviour: refuse non-fast-forwards and leave refs deleted upstream as
+    /// they are; logged every round.
+    Refuse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -862,10 +896,12 @@ impl Config {
             );
         }
         if let Some(toml::Value::Table(u)) = overrides.get("upstream") {
-            anyhow::ensure!(
-                !u.contains_key("token_env"),
-                "settings: upstream.token_env is host-only (it names an env var on the maintaining host)"
-            );
+            for key in ["token_env", "token_env_by_host"] {
+                anyhow::ensure!(
+                    !u.contains_key(key),
+                    "settings: upstream.{key} is host-only (it names env vars on the maintaining host)"
+                );
+            }
         }
         let mut doc: toml::Table = toml::Table::try_from(self).context("serializing config")?;
         fn merge(into: &mut toml::Table, from: &toml::Table) {
@@ -886,14 +922,36 @@ impl Config {
     }
 
     /// The effective config a reader may see: only [`SETTINGS_SECTIONS`], and
-    /// never `upstream.token_env` (that name is host-only).
+    /// never `upstream.token_env` / `token_env_by_host` (those names are host-only).
     pub fn public_settings_toml(&self) -> Result<String> {
         let mut doc: toml::Table = toml::Table::try_from(self).context("serializing config")?;
         doc.retain(|k, _| SETTINGS_SECTIONS.iter().any(|s| *s == k));
         if let Some(toml::Value::Table(u)) = doc.get_mut("upstream") {
             u.remove("token_env");
+            u.remove("token_env_by_host");
         }
         toml::to_string_pretty(&doc).context("encoding settings")
+    }
+
+    /// The env var naming the token for an upstream URL: `upstream.token_env_by_host`
+    /// for the URL's host (`host:port` first, then the bare host), else
+    /// `upstream.token_env`, else none (unauthenticated). The one place every
+    /// upstream caller (follow, LFS read-through, `repair`) resolves it.
+    pub fn upstream_token_env(&self, url: &str) -> Option<&str> {
+        let authority = url
+            .split_once("://")
+            .map_or(url, |(_, rest)| rest)
+            .split('/')
+            .next()
+            .unwrap_or_default();
+        let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        let host = authority.split(':').next().unwrap_or_default();
+        let by_host = &self.upstream.token_env_by_host;
+        by_host
+            .get(authority)
+            .or_else(|| by_host.get(host))
+            .or(self.upstream.token_env.as_ref())
+            .map(String::as_str)
     }
 
     /// D25: the effective on-disk budget — `cache.max_bytes` in budget mode,
@@ -1480,12 +1538,28 @@ impl Config {
                 self.upstream.git.is_some(),
                 "upstream.follow needs upstream.git (the host to follow)"
             );
-            for r in &self.upstream.follow {
-                anyhow::ensure!(
-                    r.starts_with("refs/") && !r.ends_with('/') && !r.contains('*'),
-                    "upstream.follow entries are full ref names (refs/heads/main), got {r:?}"
-                );
-            }
+            refpattern::RefPatterns::parse(&self.upstream.follow)?;
+        }
+        if let Some(h) = &self.upstream.head {
+            anyhow::ensure!(
+                h.starts_with("refs/heads/")
+                    && !h.contains('*')
+                    && refpattern::check_refspec_pattern(h).is_ok(),
+                "upstream.head must be a branch ref (refs/heads/main), got {h:?}"
+            );
+        }
+        for (host, var) in &self.upstream.token_env_by_host {
+            anyhow::ensure!(
+                !host.is_empty()
+                    && !host.contains('/')
+                    && !host.contains('@')
+                    && !host.chars().any(char::is_whitespace),
+                "upstream.token_env_by_host keys are bare hostnames (github.com), got {host:?}"
+            );
+            anyhow::ensure!(
+                !var.is_empty(),
+                "upstream.token_env_by_host.{host:?} names no environment variable"
+            );
         }
         for o in &self.server.cors_origins {
             let host = o
@@ -1963,6 +2037,59 @@ listen = \"0.0.0.0:1\"\n",
         assert!(!pub_toml.contains("session_secret"), "{pub_toml}");
         assert!(!pub_toml.contains("[server]"), "{pub_toml}");
         assert!(!pub_toml.contains("token_env"), "{pub_toml}");
+    }
+
+    #[test]
+    fn upstream_follow_keys_validate_and_redact() {
+        let mut base = Config::default();
+        base.upstream.token_env = Some("FLOE_UPSTREAM_TOKEN".into());
+        base.upstream
+            .token_env_by_host
+            .insert("github.com".into(), "FLOE_GITHUB_TOKEN".into());
+        base.validate().unwrap();
+        // `follow = []` is follow off and always publishes (the mirror's freeze).
+        let c = base.with_settings("[upstream]\nfollow = []\n").unwrap();
+        assert!(c.upstream.follow.is_empty());
+        let c = base
+            .with_settings(
+                "[upstream]\ngit = \"https://github.com/a/b.git\"\nfollow = [\"refs/heads/*\", \"^refs/heads/wip/*\"]\non_rewrite = \"refuse\"\nhead = \"refs/heads/main\"\nfollow_interval = \"10m\"\nsource = \"github:1\"\n",
+            )
+            .unwrap();
+        assert_eq!(c.upstream.on_rewrite, OnRewrite::Refuse);
+        assert_eq!(c.upstream.follow_interval, Some(Duration::from_mins(10)));
+        assert_eq!(Config::default().upstream.on_rewrite, OnRewrite::Archive);
+        for bad in [
+            "[upstream]\ngit = \"https://h/a\"\nfollow = [\"refs/archive/*\"]\n",
+            "[upstream]\ngit = \"https://h/a\"\nfollow = [\"^refs/heads/x\"]\n",
+            "[upstream]\nfollow = [\"refs/heads/*\"]\n",
+            "[upstream]\nhead = \"main\"\n",
+            "[upstream]\non_rewrite = \"overwrite\"\n",
+            "[upstream.token_env_by_host]\n\"github.com\" = \"AWS_SECRET_ACCESS_KEY\"\n",
+        ] {
+            assert!(base.with_settings(bad).is_err(), "{bad}");
+        }
+        let pub_toml = base.public_settings_toml().unwrap();
+        assert!(!pub_toml.contains("token_env"), "{pub_toml}");
+        assert!(!pub_toml.contains("FLOE_GITHUB_TOKEN"), "{pub_toml}");
+
+        // Token resolution: host entry beats token_env; other hosts fall back.
+        assert_eq!(
+            base.upstream_token_env("https://github.com/a/b.git"),
+            Some("FLOE_GITHUB_TOKEN")
+        );
+        assert_eq!(
+            base.upstream_token_env("https://x@github.com:443/a/b.git"),
+            Some("FLOE_GITHUB_TOKEN")
+        );
+        assert_eq!(
+            base.upstream_token_env("https://gitlab.com/a/b.git"),
+            Some("FLOE_UPSTREAM_TOKEN")
+        );
+        let mut bad = base.clone();
+        bad.upstream
+            .token_env_by_host
+            .insert("https://github.com".into(), "X".into());
+        assert!(bad.validate().is_err());
     }
 
     #[test]

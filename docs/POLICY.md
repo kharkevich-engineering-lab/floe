@@ -204,6 +204,16 @@ Do not put secrets, signatures, or “required PR” in this file.
       }
     },
     {
+      "name": "archive-immutable",
+      "match": { "refs": ["refs/archive/**"] },
+      "effect": {
+        "protect": {
+          "restricts": ["update", "delete"],
+          "bypass": ["group:admins"]
+        }
+      }
+    },
+    {
       "name": "reserve-queue-ns",
       "match": { "refs": ["refs/heads/mq/**"] },
       "effect": { "protect": { "bypass": ["group:queue", "group:admins"] } }
@@ -213,7 +223,7 @@ Do not put secrets, signatures, or “required PR” in this file.
 ```
 
 That is enough for a real host: lock the trunk, reserve bot namespaces, keep
-tags still. History / size rules can be added later without changing the
+tags still, and keep the tips upstream follow archived (`refs/archive/`, D48) where they are. History / size rules can be added later without changing the
 envelope; they will not change a verdict until this document says they do.
 
 ## Load rules

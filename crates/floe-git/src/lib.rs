@@ -1901,11 +1901,21 @@ impl LocalRepo {
         cmd.output().await.map_err(GitError::Io)
     }
 
-    /// `git merge-base --is-ancestor old new`: true when `new` is a descendant of `old`.
-    /// Missing objects or non-commit oids return `Ok(false)` (treat as not fast-forward).
+    /// `git merge-base --is-ancestor old new`: `Ok(true)` when `new` is a descendant
+    /// of `old` (exit 0), `Ok(false)` when it is not (exit 1). Anything else — a
+    /// missing object, an oid that is not a commit — is an `Err` with git's stderr:
+    /// "cannot tell" must never read as "rewritten" (follow would archive on it, D48).
     pub async fn is_ancestor(&self, old: &str, new: &str) -> Result<bool, GitError> {
         let out = self.git(&["merge-base", "--is-ancestor", old, new]).await?;
-        Ok(out.status.success())
+        match out.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            status => Err(GitError::Subprocess {
+                cmd: format!("git merge-base --is-ancestor {old} {new}"),
+                status,
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            }),
+        }
     }
 
     pub async fn repack(&self, opts: RepackOptions) -> Result<RepackResult, GitError> {

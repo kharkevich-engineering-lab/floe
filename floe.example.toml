@@ -257,8 +257,17 @@ max_object_bytes = "16GiB"
 # git = "https://github.com/acme/monorepo.git"           # source for the maintainer's `repair` unit (objects fsck found missing; wants by SHA)
 # lfs = "https://github.com/acme/monorepo.git/info/lfs"  # read-through for LFS objects we lack (batch upload → "present", download/GET → stream + persist)
 # token_env = "FLOE_UPSTREAM_TOKEN"                     # env var on the maintaining host holding the token; Basic x-access-token:<token>
-# follow = ["refs/heads/main"]                            # refs kept equal to upstream's by the maintaining host: fetched every
-                                                          # maintenance.follow_interval, published through the WAL as a push; fast-forward only
+# follow = ["refs/heads/*", "refs/tags/*"]  # ref patterns kept equal to upstream's by the maintaining host (D48: git refspec
+#                                           # globs: one `*`, crosses `/`; `^` excludes); probed every
+#                                           # maintenance.follow_interval, published through the WAL as a push;
+#                                           # refs/archive/* and refs/follow/* are never followed
+# on_rewrite = "archive"                    # upstream force-push/tag move/delete: keep the old tip at
+#                                           # refs/archive/<unix-ts>/<ref> then apply | "refuse" (leave as is, log)
+# head = "refs/heads/main"                  # retarget HEAD to this when it exists (the GitHub mirror sets it)
+# follow_interval = "10m"                   # per-repo minimum pause between follow rounds (unset = every tick)
+# source = "github:123"                     # provenance label written by the mirror; informational
+# [upstream.token_env_by_host]              # host-only: env var per upstream host (beats token_env)
+# "github.com" = "FLOE_GITHUB_TOKEN"
 
 [git]
 binary = "git"                    # path to upstream git binary (>= 2.47 recommended: pack.writeReverseIndex, bundle-uri)

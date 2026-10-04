@@ -397,6 +397,26 @@ upstream):
 
 `tests/events.rs`: one golden test that a rewrite yields `create(refs/archive/…)` + `update` with the same seq.
 
+### A.7 As landed (2026-10-04)
+
+Where the code differs from §A.1–§A.6 (the code wins):
+
+- `floe_git::follow::fetch_refs(upstream, token, serving_objects, have, patterns, probe, scratch)` takes the
+  op's fresh `Probe` and drops the exact entries it did not see itself (`RefPatterns::refspecs(skip)`), instead of
+  the caller filtering. `RefPatterns::exact()` replaces `is_exact()`. `refspecs()` returns nothing when no
+  positive entry is left, and the fetch is skipped.
+- A round whose diff is empty but whose `have` would lose refs to the empty-advertisement guard reports
+  outcome `refused` with the guard's notice (not `in-sync`), so the Settings tab shows why nothing moved.
+- A rejected publish (a ref moved under the round) is an `Ok` op result with `published = 0` and the conflicting
+  refs in `refused` (outcome `refused`), as D33's per-ref rejections were; a refused-only plan (policy `refuse`)
+  stays an op error (`failed` in the loop's report), as before.
+- Not wired yet, owned by other packages: `Recorder::record_sync_run` (§C.6, needs `floe-catalog`) and the
+  derived `token_env_by_host` default from `[github_mirror]` in `Config::load` (§B.4 config). Of the §A.6
+  integration tests, `tests/follow.rs` has `on_rewrite_refuse_keeps_d33_behaviour` (the old test) and
+  `upstream_globs_force_push_and_delete_are_archived_then_applied` (globs + negative, fast-forward not archived,
+  force-push and delete archived in one entry, `follow.archived`, reachability, in-sync round); the rest
+  (empty advertisement, concurrent writer, store op counts, nudge, events golden) are open.
+
 ---
 
 ## B. `floe-mirror` (D49)

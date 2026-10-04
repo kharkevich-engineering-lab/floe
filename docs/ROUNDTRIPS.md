@@ -54,6 +54,8 @@ right shape. This document is the thinking tool; apply it to every protocol chan
 | GitHub integration setup | registry GET → CAS PUT; bounded conflict retry | 2 per successful update | `github/integrations.rs`; setup only, no Git request overhead |
 | GitHub webhook catch-up | registry GET → per-target cursor/manifest/log reads → one objects view per repo/batch → webhook → cursor CAS | first use walks the checkpoint chain to find its initial boundary and adds one cursor Create; a lagging cursor adds one GET per traversed checkpoint plus archived segments; normal caught-up reads unchanged, no LIST | `bridge.rs`; independent installation cursors, push budget unchanged |
 | S3 transient faults (2026-09-17) | unchanged healthy path; SDK errors now retain retryability for existing WAL backoff/re-read handling after a failed request | 0 added healthy requests; extra retries only after transient failure | `floe-store/src/s3.rs` |
+| Follow round, nothing moved (D48, 2026-10-04) | refs-level only: conditional manifest GET (+ checkpoint/log tail GETs on a cold handle); no pack GETs, even for a repository the LRU evicted (was: a Serve-level `sync()` every round). Upstream: one `ls-refs` (the probe) | 1 warm | `follow/mod.rs::run_pass` |
+| Follow round, something moved (D48) | Serve-level `sync()` (pack GETs only for packs not local) → push publish (log PUT + manifest CAS); archive refs ride in the same txn. Upstream: probe `ls-refs` + fetch | push shape | `follow/mod.rs::op` |
 | Orphan log slot (failure path only) | +1 fresh manifest GET, +HEAD per probe, +Create at next seq | — | `publish.rs::claim_log_slot` |
 
 `healthy_request_round_trip_budgets` in `crates/floe-server/tests/sim.rs` pins the healthy MemoryStore

@@ -55,6 +55,12 @@ Only `ref` events exist. Not events: push denials and auth failures (metrics + l
 
 **Dedup key (normative): `(repo, _floe.seq, ref_name)`.** **Order: by `seq` per repo.** Nothing else is promised.
 
+**Upstream rewrites (D48).** `refs/archive/` is reserved for upstream follow. When an upstream force-pushes, moves
+a tag or deletes a followed ref, follow (`on_rewrite = "archive"`) publishes one entry, so a consumer sees **two
+events with the same `_floe.seq`**: a `create` of `refs/archive/<unix-ts>/<ref>` at the old tip and the `update`
+(or `delete`) of `<ref>`, both with `pusher = "upstream"`. The entry's `meta["follow.archived"]` lists them
+(`<archive_ref> <original_ref> <old_oid> <new_oid|->` per line). No schema change (`schema_version` stays 1).
+
 ## Delivery: the webhook
 
 Each catch-up `POST`s one JSON **array** of events (a batch: everything in `(cursor, head_seq]`) to

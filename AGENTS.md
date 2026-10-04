@@ -158,9 +158,11 @@ rejected push leaves nothing behind) → connectivity per config (`spawn_blockin
 Hosts that maintain nothing may forward receive-pack to a **push broker** (`wal.push_broker_url`) so one warm
 writer batches the CAS; fallback to the local path if the broker is down. Publish is CAS-safe, so disjoint writer
 sets are correct by construction; the broker is an optimization, never a dependency. Never ACK before the bucket
-ACKs. **Upstream follow** (`floe_server::follow`, D33) is the second writer shape: refs in a repo's `[upstream]
-follow` are brought up to `upstream.git`'s by the maintaining host every `maintenance.follow_interval` through the
-same ingest → connectivity → fast-forward → `publish_push` path, `principal = upstream`.
+ACKs. **Upstream follow** (`floe_server::follow`, D33/D48) is the second writer shape: refs matching a repo's
+`[upstream] follow` patterns are brought up to `upstream.git`'s by the maintaining host (a refs-level probe every
+`maintenance.follow_interval`; Serve-level work only when something moved) through the same ingest → classify →
+connectivity → `publish_push` path, `principal = upstream`; rewritten/deleted tips are kept under
+`refs/archive/<unix-ts>/<ref>` in the same entry.
 
 ### 2.3 Read path — sync levels (`RepoHandle::sync_*`, `floe-wal/src/handle.rs`, `sync.rs`)
 Every request: conditional GET of `manifest.pb` (skippable for `wal.freshness_ttl`) → 304 serve / 200 apply.
@@ -466,6 +468,17 @@ and its preceding checkpoint. The bridge traverses that immutable index when its
 `min_seq`, and fails without acknowledging if indexed history is unavailable. Keep those checkpoint/log
 objects; unreferenced log objects are not evidence of a committed write. This adds no publish/checkpoint
 round trips and no object-store LIST.
+
+**D48 — Follow patterns and archive-on-rewrite (2026-10-04).** `[upstream] follow` takes git refspec patterns
+(one `*` crossing `/`, `^` negatives; `refs/archive/` and `refs/follow/` are never followed;
+`floe_config::refpattern`). With `on_rewrite = "archive"` (default), a non-fast-forward, a tag move, or a
+deletion upstream publishes **one** PUSH entry that creates `refs/archive/<unix-ts>/<original-ref>` at the old tip
+(`old_oid = ""`, never overwritten) and applies upstream's state, with `meta["follow.archived"]`. The round is one
+atomic transaction: any ref that moved under it rejects the whole round, which the next round re-plans. An upstream
+that advertises no refs at all never causes deletions. A round probes refs first and does Serve-level work only
+when something moved. `"refuse"` is D33's behaviour. Follow still bypasses policy. Upstream tokens resolve through
+`Config::upstream_token_env` (`upstream.token_env_by_host`, host-only, then `token_env`). Supersedes D33's
+"fast-forward only" clause; the rest of D33 stands. Design: `docs/design/github-mirror.md` §A.
 
 ## 5. Working rules
 

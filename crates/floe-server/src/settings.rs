@@ -296,7 +296,8 @@ fn describe_json(
         let host_map: std::collections::HashMap<String, toml::Value> =
             host_flat.into_iter().collect();
         for (k, v) in eff_flat {
-            if k.ends_with("token_env") {
+            // `token_env` and `token_env_by_host.<host>`: host-only names.
+            if k.contains("token_env") {
                 continue;
             }
             // Array-of-tables (strategies) count as set when the document has the array.
@@ -332,8 +333,11 @@ fn describe_json(
         "upstream": {
             "git": effective.upstream.git,
             "lfs": effective.upstream.lfs,
-            "token_env": effective.upstream.token_env.is_some(),
+            "token_env": effective.upstream.git.as_deref().and_then(|g| effective.upstream_token_env(g)).is_some(),
             "follow": effective.upstream.follow,
+            "on_rewrite": effective.upstream.on_rewrite,
+            "head": effective.upstream.head,
+            "source": effective.upstream.source,
             "follow_interval_secs": st.cfg.maintenance.follow_interval.as_secs(),
             "last_round": st.follow.get(&h.id().to_string()),
         },
@@ -499,7 +503,8 @@ pub async fn http_policy_dry_run(
         if policy.has_protect() {
             for u in &txn.updates {
                 if crate::policy::classify(&u.old_oid, &u.new_oid) == crate::policy::RefOp::Update
-                    && matches!(local.is_ancestor(&u.old_oid, &u.new_oid).await, Ok(false))
+                    // Cannot tell (missing object) counts as a force, as on receive-pack.
+                    && !matches!(local.is_ancestor(&u.old_oid, &u.new_oid).await, Ok(true))
                 {
                     forces.insert(u.name.clone());
                 }
