@@ -1,3 +1,13 @@
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 mod harness;
 
 use anyhow::Result;
@@ -55,7 +65,12 @@ async fn assets_have_content_type_and_immutable_cache() -> Result<()> {
     let marker = "/_ui/assets/";
     let asset = index
         .split('"')
-        .find(|part| part.starts_with(marker) && part.ends_with(".js"))
+        .find(|part| {
+            part.starts_with(marker)
+                && std::path::Path::new(part)
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("js"))
+        })
         .expect("built index references a JavaScript asset");
     let response = client
         .get(format!("{}{}", server.base_url, asset))

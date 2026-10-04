@@ -33,13 +33,23 @@ COPY crates ./crates
 COPY --from=web /src/web/dist ./web/dist
 ARG FLOE_BUILD_SHA=dev
 ENV FLOE_BUILD_SHA=${FLOE_BUILD_SHA}
+# The release workflow passes the version semantic-release is about to tag; empty = the
+# workspace version from Cargo.toml. `floe --version` prints "<version> (<sha>)".
+ARG FLOE_VERSION=
+ENV FLOE_VERSION=${FLOE_VERSION}
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p floe-cli \
     && install -D target/release/floe /out/bin/floe \
     && install -D target/release/floe-server /out/bin/floe-server
 
-# ---- 3. runtime -----------------------------------------------------------------------------
+# ---- 3. bare binaries (release tarballs) ---------------------------------------------------
+# `docker buildx build --target binaries --output type=local,dest=out .` exports floe and
+# floe-server from the same build the image uses, so a release compiles once per arch.
+FROM scratch AS binaries
+COPY --from=build /out/bin/ /
+
+# ---- 4. runtime -----------------------------------------------------------------------------
 # trixie ships git 2.47+: floe wants >= 2.47 on the server (pack.writeReverseIndex, bundle-uri,
 # `index-pack --rev-index`); clients need >= 2.46.
 FROM docker.io/library/debian:trixie-slim

@@ -3,6 +3,13 @@
 //! Schema lives in `proto/floe/v1/wal.proto`; it is the contract between
 //! every floe instance and must only evolve backward-compatibly.
 
+// prost-generated code: not ours to restyle, so the workspace lint set stops at this module.
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::restriction,
+    reason = "prost-build output, regenerated on every build"
+)]
 pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/floe.v1.rs"));
 }
@@ -95,7 +102,7 @@ pub mod keys {
 /// Appendable objects grow by appending frames; readers stop at the first
 /// incomplete trailing frame.
 pub mod frame {
-    use bytes::{Buf, Bytes, BytesMut};
+    use bytes::{Bytes, BytesMut};
     use prost::Message;
 
     use crate::v1::LogEntry;
@@ -104,6 +111,7 @@ pub mod frame {
         let len = e.encoded_len();
         prost::encoding::encode_varint(len as u64, out);
         out.reserve(len);
+        #[allow(clippy::expect_used, reason = "BytesMut grows on demand and capacity was reserved above")]
         e.encode(out).expect("BytesMut has capacity");
     }
 
@@ -120,16 +128,17 @@ pub mod frame {
     pub fn decode_entries(buf: &[u8]) -> Result<(Vec<LogEntry>, usize), prost::DecodeError> {
         let mut out = Vec::new();
         let mut pos = 0usize;
-        loop {
-            let mut probe = &buf[pos..];
+        while let Some(mut probe) = buf.get(pos..) {
             let Ok(len) = prost::encoding::decode_varint(&mut probe) else {
                 break;
             };
-            let len = len as usize;
-            if probe.remaining() < len {
+            let Ok(len) = usize::try_from(len) else {
                 break;
-            }
-            out.push(LogEntry::decode(&probe[..len])?);
+            };
+            let Some(body) = probe.get(..len) else {
+                break;
+            };
+            out.push(LogEntry::decode(body)?);
             pos = buf.len() - probe.len() + len;
         }
         Ok((out, pos))
@@ -146,12 +155,16 @@ pub mod time {
     pub fn from_system(t: SystemTime) -> prost_types::Timestamp {
         let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
         prost_types::Timestamp {
-            seconds: d.as_secs() as i64,
-            nanos: d.subsec_nanos() as i32,
+            seconds: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+            // subsec_nanos() < 1e9, always fits.
+            nanos: i32::try_from(d.subsec_nanos()).unwrap_or(i32::MAX),
         }
     }
     pub fn to_system(t: &prost_types::Timestamp) -> SystemTime {
-        UNIX_EPOCH + Duration::new(t.seconds.max(0) as u64, t.nanos.max(0) as u32)
+        // Negative values clamp to zero.
+        let secs = u64::try_from(t.seconds).unwrap_or(0);
+        let nanos = u32::try_from(t.nanos).unwrap_or(0);
+        UNIX_EPOCH + Duration::new(secs, nanos)
     }
 }
 

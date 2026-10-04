@@ -93,7 +93,9 @@ fn read_marker(path: &Path) -> Option<Marker> {
 }
 
 fn write_marker(path: &Path, m: &Marker) -> anyhow::Result<()> {
-    std::fs::create_dir_all(path.parent().unwrap())?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(m)?)?;
     std::fs::rename(&tmp, path)?;
@@ -130,15 +132,22 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<u64> {
     Ok(bytes)
 }
 
+#[allow(unsafe_code, reason = "statvfs has no safe std wrapper; the two calls below are the whole unsafe surface")]
+#[allow(
+    clippy::useless_conversion,
+    reason = "statvfs field widths differ per platform (u32 on macOS, u64 on Linux)"
+)]
 fn disk_avail(path: &Path) -> Option<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `statvfs` is a plain C struct of integers, for which all-zero bytes are a valid value.
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+    // SAFETY: `c` is a NUL-terminated path alive for the call and `st` is a writable `statvfs`.
+    if unsafe { libc::statvfs(c.as_ptr(), &raw mut st) } != 0 {
         return None;
     }
-    Some(st.f_bavail as u64 * st.f_frsize as u64)
+    Some(u64::from(st.f_bavail) * u64::from(st.f_frsize))
 }
 
 /// Hard-link (or copy) every side-file of `pack` from `from` into `into`'s pack dir; existing
@@ -150,7 +159,9 @@ fn install_pack(
 ) -> anyhow::Result<()> {
     let src = from.pack_path(pack);
     let dst = into.pack_path(pack);
-    std::fs::create_dir_all(dst.parent().unwrap())?;
+    if let Some(dir) = dst.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     for ext in ["pack", "idx", "rev", "bitmap", "commit-graph", "history"] {
         let s = src.with_extension(ext);
         if !s.exists() {
@@ -353,7 +364,7 @@ pub async fn rebuild_base(
         if let Some(p) = already
             && p.tier == 2
             && (p.has_bitmap || info.history_of.is_some())
-            && supersedes_left.as_ref().is_none_or(|s| s.is_empty())
+            && supersedes_left.as_ref().is_none_or(Vec::is_empty)
         {
             log(format!(
                 "pack {hex} is already live as tier 2: not re-published"

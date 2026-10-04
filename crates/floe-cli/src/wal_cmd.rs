@@ -31,18 +31,18 @@ pub async fn run(action: WalAction, cfg: &Arc<Config>) -> Result<()> {
             }
 
             println!(
-                "{:<6} {:<10} {:<12} {:<10} {}",
-                "seq", "kind", "pack", "supersedes", "refs"
+                "{:<6} {:<10} {:<12} {:<10} refs",
+                "seq", "kind", "pack", "supersedes"
             );
             for e in &entries {
                 let kind = format!("{:?}", e.kind);
                 let pack = e
                     .pack
                     .as_ref()
-                    .map(|p| p.checksum[..12].to_string())
+                    .map(|p| p.checksum.get(..12).unwrap_or(p.checksum.as_str()).to_string())
                     .unwrap_or_default();
                 let supersedes = e.supersedes.len();
-                let ref_count = e.txn.as_ref().map(|t| t.updates.len()).unwrap_or(0);
+                let ref_count = e.txn.as_ref().map_or(0, |t| t.updates.len());
                 println!(
                     "{:<6} {:<10} {:<12} {:<10} {}",
                     e.seq, kind, pack, supersedes, ref_count
@@ -95,7 +95,7 @@ pub async fn run(action: WalAction, cfg: &Arc<Config>) -> Result<()> {
             println!(
                 "{} ({} bytes) in {:.1}s",
                 out.display(),
-                std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0),
+                std::fs::metadata(&out).map_or(0, |m| m.len()),
                 t0.elapsed().as_secs_f64()
             );
         }
@@ -114,7 +114,7 @@ pub async fn run(action: WalAction, cfg: &Arc<Config>) -> Result<()> {
             if let Some(g) = &commit_graph {
                 let head = std::fs::read(g)?;
                 anyhow::ensure!(
-                    head.len() > 8 && &head[..4] == b"CGPH",
+                    head.len() > 8 && head.starts_with(b"CGPH"),
                     "{} is not a commit-graph file",
                     g.display()
                 );
@@ -148,14 +148,13 @@ pub async fn run(action: WalAction, cfg: &Arc<Config>) -> Result<()> {
             println_kv("writer", &entry.writer);
             println_kv(
                 "created_at",
-                &entry
-                    .created_at
-                    .as_ref()
-                    .map(|t| {
+                entry.created_at.as_ref().map_or_else(
+                    || "(none — predates the field)".into(),
+                    |t| {
                         humantime::format_rfc3339_seconds(floe_proto::time::to_system(t))
                             .to_string()
-                    })
-                    .unwrap_or_else(|| "(none — predates the field)".into()),
+                    },
+                ),
             );
 
             if let Some(pack) = &entry.pack {
@@ -214,7 +213,10 @@ pub async fn materialize_at(
     at_seq: u64,
     out: &std::path::Path,
 ) -> Result<()> {
-    let handle = registry.open(&id).await?;
+    use floe_proto::prost::Message;
+    use floe_store::ObjectStoreExt;
+
+    let handle = registry.open(id).await?;
 
     // Read log entries up to at_seq and replay into a fresh LocalRepo.
     if out.exists() {
@@ -229,9 +231,7 @@ pub async fn materialize_at(
         other => bail!("unknown object format in manifest: {other}"),
     };
 
-    let local = floe_git::LocalRepo::init(out, &id, format)?;
-    use floe_proto::prost::Message;
-    use floe_store::ObjectStoreExt;
+    let local = floe_git::LocalRepo::init(out, id, format)?;
 
     // Start from the newest checkpoint at or before `at_seq` when the
     // log before it has been folded (min_seq), else from seq 0.
@@ -273,7 +273,7 @@ pub async fn materialize_at(
             match handle.store().get_bytes(&key).await? {
                 Some((_, bytes)) => {
                     let (es, _) = floe_proto::frame::decode_entries(&bytes)?;
-                    let last = es.last().map(|e| e.seq).unwrap_or(seq);
+                    let last = es.last().map_or(seq, |e| e.seq);
                     found.extend(es);
                     seq = last + 1;
                 }
@@ -283,8 +283,7 @@ pub async fn materialize_at(
                     manifest
                         .checkpoint
                         .as_ref()
-                        .map(|c| c.seq)
-                        .unwrap_or(manifest.min_seq)
+                        .map_or(manifest.min_seq, |c| c.seq)
                 ),
             }
         }
@@ -316,8 +315,10 @@ pub async fn materialize_at(
         if src.is_file() && !src.is_symlink() {
             for ext in ["pack", "idx", "rev", "bitmap", "commit-graph"] {
                 let f = src.with_extension(ext);
-                if f.is_file() {
-                    std::fs::copy(&f, tmp.join(f.file_name().unwrap()))?;
+                if f.is_file()
+                    && let Some(file_name) = f.file_name()
+                {
+                    std::fs::copy(&f, tmp.join(file_name))?;
                 }
             }
             println!("pack {}: copied from the local copy", p.checksum);
@@ -532,6 +533,6 @@ mod tests {
                 .success()
         );
         // The writer's live copy kept its packs.
-        assert!(handle.local().packs().unwrap().len() >= 1);
+        assert!(!handle.local().packs().unwrap().is_empty());
     }
 }

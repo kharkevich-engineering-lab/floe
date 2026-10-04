@@ -1,12 +1,23 @@
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 mod common;
 
+use std::fmt::Write as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 use floe_git::{LocalRepo, ObjectFormat, RepoId, gix_hash};
 
 /// Compare identical cold installs; excludes fixture creation and copying.
-/// Run with FLOE_BENCH_PACKS=3801 cargo test -p floe-git --test pack_install -- --ignored --nocapture.
+/// Run with `FLOE_BENCH_PACKS=3801 cargo test -p floe-git --test pack_install -- --ignored --nocapture`.
 #[tokio::test]
 #[ignore = "cold pack install benchmark"]
 async fn cold_pack_install_benchmark() {
@@ -33,7 +44,7 @@ async fn cold_pack_install_benchmark() {
             .unwrap();
         let mut revisions = format!("{commit}\n");
         if !previous.is_empty() {
-            revisions.push_str(&format!("^{previous}\n"));
+            let _ = writeln!(revisions, "^{previous}");
         }
         child
             .stdin

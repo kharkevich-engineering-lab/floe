@@ -2,6 +2,16 @@
 //! Mintlify server sends, verbatim, against a
 //! repository pushed with real `git` — including the write path, which is
 //! verified by fetching the commit back with `git`.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 mod harness;
 
@@ -484,6 +494,8 @@ async fn pull_request_mutations_move_state_in_the_bucket() -> TestResult {
 /// id and must resolve the pull request behind it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rest_review_is_the_node_graphql_hangs_a_thread_off() -> TestResult {
+    use floe_server::github::pr_store::NodeId;
+
     let s = server().await?;
     let (tmp, _head) = fixture(&s, "acme", "docs")?;
     branch(tmp.path(), "editor/quickstart")?;
@@ -504,7 +516,6 @@ async fn a_rest_review_is_the_node_graphql_hangs_a_thread_off() -> TestResult {
     let review_node = review["node_id"].as_str().unwrap_or_default().to_string();
 
     // It decodes to the PR the REST call was made against.
-    use floe_server::github::pr_store::NodeId;
     let parsed = NodeId::parse(&review_node)
         .ok_or_else(|| anyhow::anyhow!("review node id {review_node} does not parse"))?;
     assert_eq!(parsed.target().1, number);
@@ -531,7 +542,7 @@ async fn a_rest_review_is_the_node_graphql_hangs_a_thread_off() -> TestResult {
         Value::Null,
     )
     .await?;
-    anyhow::ensure!(stored["number"] == Value::from(number), "{stored}");
+    anyhow::ensure!(stored["number"] == number, "{stored}");
     Ok(())
 }
 

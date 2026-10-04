@@ -1,0 +1,301 @@
+name: Release
+on:
+  push:
+    branches: [main]
+  # Run by hand when GitHub drops the push event for a merge. A manual run releases
+  # exactly what a push would: semantic-release versions from the conventional commits
+  # since the last tag, and does nothing when none of them is a feat/fix.
+  workflow_dispatch:
+
+# One release at a time: the `version` job bakes the next version into the binaries
+# *before* release.sh publishes it, and two interleaved runs could bake one push's
+# version into another push's build. Never cancel a run in progress — a cancelled
+# release can leave a tag without its assets or its image.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # GHCR names must be lowercase; the repository is kharkevich-engineering-lab/floe.
+  IMAGE: ghcr.io/kharkevich-engineering-lab/floe
+
+jobs:
+  # The version this push will release, before anything is built with it. floe bakes
+  # its version in at compile time (FLOE_VERSION, read by the build.rs of floe-server
+  # and floe-git); the version lives only in the tag and in FLOE_VERSION, never in a
+  # commit (Cargo.toml stays at its placeholder), so the build must be told up front.
+  version:
+    name: Work out the next version
+    runs-on: ubuntu-latest
+    # `contents: write`, for a job that writes nothing: semantic-release proves it
+    # *could* push the tag (`git push --dry-run`) before it works out a version, in
+    # dry-run mode too, and a read-only token fails that with EGITNOPERMISSION.
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
+    outputs:
+      version: ${{ steps.next.outputs.new_release_version }}
+      published: ${{ steps.next.outputs.new_release_published }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Dry-run semantic-release
+        id: next
+        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
+        with:
+          dry_run: true
+          # Exactly the versions of the real run below (keep the two blocks identical):
+          # the dry run decides the version baked into the binaries, so it must resolve
+          # the same code as the run that tags. A dry run runs no prepareCmd, so
+          # release.sh never executes here.
+          semantic_version: 25.0.9
+          extra_plugins: |
+            @semantic-release/commit-analyzer@13.0.1
+            @semantic-release/release-notes-generator@14.1.1
+            @semantic-release/exec@7.1.0
+            @semantic-release/github@12.0.10
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Binaries and the container image, built natively per architecture: one runner per
+  # target, no qemu, no binfmt, no cross toolchain. The image build *is* the compile —
+  # the tarball's binaries are exported from the Containerfile's `binaries` stage of the
+  # very same build, so each leg compiles floe exactly once.
+  build:
+    name: Build (${{ matrix.target }})
+    needs: version
+    if: needs.version.outputs.published == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: amd64
+            platform: linux/amd64
+            runs-on: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            platform: linux/arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Pushed untagged, by digest only: the `image` job stitches both arches into one
+      # tagged manifest after the release exists, so a failed release tags nothing.
+      - name: Build and push the image (${{ matrix.platform }})
+        id: image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          build-args: |
+            FLOE_BUILD_SHA=${{ github.sha }}
+            FLOE_VERSION=${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.licenses=MIT
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
+      # Same builder, same build args: every layer up to `binaries` is a cache hit.
+      - name: Export the binaries from the same build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          target: binaries
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          build-args: |
+            FLOE_BUILD_SHA=${{ github.sha }}
+            FLOE_VERSION=${{ env.VERSION }}
+          outputs: type=local,dest=out/bin
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+      - name: Check what came out
+        run: |
+          set -euo pipefail
+          for binary in out/bin/floe out/bin/floe-server; do
+            file "$binary"
+            # It must run nowhere but on its target, so assert the architecture the
+            # tarball's name will claim.
+            case "${{ matrix.target }}" in
+              aarch64-*) file "$binary" | grep -q "ARM aarch64" ;;
+              x86_64-*) file "$binary" | grep -q "x86-64" ;;
+            esac
+            # Native runner, so the binary can run here: it must report the version
+            # about to be tagged, not the placeholder in Cargo.toml.
+            chmod +x "$binary"
+            "$binary" --version
+            "$binary" --version | grep -qF " ${VERSION} ("
+          done
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="floe-${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          install -m 0755 out/bin/floe out/bin/floe-server "dist/${name}/"
+          cp LICENSE NOTICE README.md "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          cat "dist/${name}.tar.gz.sha256"
+      - name: Upload the tarball
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tarball-${{ matrix.target }}
+          path: |
+            dist/floe-*.tar.gz
+            dist/floe-*.tar.gz.sha256
+          if-no-files-found: error
+      - name: Record the image digest
+        run: |
+          set -euo pipefail
+          digest="${{ steps.image.outputs.digest }}"
+          test -n "$digest"
+          mkdir -p "${{ runner.temp }}/digests"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+      - name: Upload the image digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          # As long as a "Re-run failed jobs" of `image` is a plausible recovery: a rerun
+          # of the whole workflow will not rebuild once the tag exists.
+          retention-days: 14
+
+  release:
+    name: Release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # @semantic-release/github opens an issue when a release fails (failComment).
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      # Into dist/, where release.sh checks them and .releaserc's assets pick them up.
+      - name: Collect the tarballs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: tarball-*
+          merge-multiple: true
+          path: dist
+      - name: Check the tarballs arrived
+        run: ls -l dist/
+      - name: Run semantic-release
+        id: release
+        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
+        with:
+          # Pinned identically to the dry run in the `version` job.
+          semantic_version: 25.0.9
+          extra_plugins: |
+            @semantic-release/commit-analyzer@13.0.1
+            @semantic-release/release-notes-generator@14.1.1
+            @semantic-release/exec@7.1.0
+            @semantic-release/github@12.0.10
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The binaries carry the dry run's version; a real run that disagrees (or released
+      # nothing) would ship artefacts lying about what they are.
+      - name: Check the release matches the baked version
+        env:
+          PUBLISHED: ${{ steps.release.outputs.new_release_published }}
+          RELEASED: ${{ steps.release.outputs.new_release_version }}
+          EXPECTED: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISHED" != "true" ] || [ "$RELEASED" != "$EXPECTED" ]; then
+            echo "::error::released '${RELEASED}' (published=${PUBLISHED}), but the binaries were built as '${EXPECTED}'"
+            exit 1
+          fi
+
+  # One multi-arch manifest from the per-arch digests, tagged only once the release exists.
+  image:
+    name: Publish the multi-arch image
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Collect the digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/digests
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create and push the manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          sources=()
+          for digest in *; do
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
+          if [ "${#sources[@]}" -ne 2 ]; then
+            echo "::error::expected 2 per-arch digests, found ${#sources[@]}"
+            exit 1
+          fi
+          IFS=. read -r major minor _ <<<"${VERSION}"
+          docker buildx imagetools create \
+            -t "${IMAGE}:${VERSION}" \
+            -t "${IMAGE}:${major}.${minor}" \
+            -t "${IMAGE}:latest" \
+            --annotation "index:org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --annotation "index:org.opencontainers.image.revision=${{ github.sha }}" \
+            --annotation "index:org.opencontainers.image.version=${VERSION}" \
+            --annotation "index:org.opencontainers.image.licenses=MIT" \
+            "${sources[@]}"
+      - name: Check what came out
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+          raw=$(docker buildx imagetools inspect --raw "${IMAGE}:${VERSION}")
+          for arch in amd64 arm64; do
+            echo "$raw" | python3 -c "import json,sys; m=json.load(sys.stdin)['manifests']; sys.exit(0 if any(x['platform']['architecture']=='$arch' for x in m) else 1)" \
+              || { echo "::error::${IMAGE}:${VERSION} has no linux/${arch} manifest"; exit 1; }
+          done

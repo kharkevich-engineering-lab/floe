@@ -1,6 +1,6 @@
 //! Bundle serving: `GET /{repo}/bundles/list` (git bundle-list text, no-cache)
 //! and `GET|HEAD /{repo}/bundles/{strategy}/{name}` (streamed bundle with
-//! strong ETag = store version, immutable caching, Range/If-Range,
+//! strong `ETag` = store version, immutable caching, Range/If-Range,
 //! If-None-Match, HEAD — `static_object`).
 
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -96,17 +96,17 @@ fn render_bundle_list_response(text: String) -> Response {
     let h = resp.headers_mut();
     h.insert(
         axum::http::header::CONTENT_TYPE,
-        "text/plain; charset=utf-8".parse().unwrap(),
+        axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
     );
     h.insert(
         axum::http::header::CACHE_CONTROL,
-        "no-cache".parse().unwrap(),
+        axum::http::HeaderValue::from_static("no-cache"),
     );
     resp
 }
 
 /// `GET|HEAD /{repo}/bundles/{strategy}/{name}` — streamed from the store
-/// with the full immutable-object contract (strong ETag, 304, Range/If-Range,
+/// with the full immutable-object contract (strong `ETag`, 304, Range/If-Range,
 /// HEAD, Content-Length); see `static_object`.
 pub async fn object(
     st: &AppState,
@@ -145,6 +145,7 @@ pub async fn object(
     .await
 }
 
+#[allow(clippy::needless_pass_by_value, reason = "used as a `map_err` adapter")]
 fn auth_err(e: crate::auth::AuthError) -> ApiError {
     match e {
         crate::auth::AuthError::Invalid | crate::auth::AuthError::Unauthorized => {
@@ -156,6 +157,7 @@ fn auth_err(e: crate::auth::AuthError) -> ApiError {
         }
     }
 }
+#[allow(clippy::needless_pass_by_value, reason = "used as a `map_err` adapter")]
 fn bundle_err(e: floe_bundle::BundleError) -> ApiError {
     ApiError::Internal(format!("bundle: {e}"))
 }
@@ -182,12 +184,13 @@ pub async fn compose_full_from_base(
     // The base is the tier-2 pack that is not a derived history pack (D18:
     // `compact --base` publishes both at tier 2; the weekly composes the base).
     let bases = floe_wal::base_packs(&manifest);
-    anyhow::ensure!(
-        bases.len() == 1,
-        "compose needs exactly one tier-2 base pack (found {}; history packs excluded): an imported pack set — the base rebuild unit (`compact --base`) collapses it first",
-        bases.len()
-    );
-    let base = bases[0].clone();
+    let [base] = bases.as_slice() else {
+        anyhow::bail!(
+            "compose needs exactly one tier-2 base pack (found {}; history packs excluded): an imported pack set — the base rebuild unit (`compact --base`) collapses it first",
+            bases.len()
+        );
+    };
+    let base = (*base).clone();
     let seq = base.seq;
     let store = handle.store();
     // Refs at the base's seq: the checkpoint there when one exists (the rebuild checkpoints right
@@ -196,18 +199,17 @@ pub async fn compose_full_from_base(
     // rig's weekly compose failed every pass for as long as the churn kept refs moving, 2026-08-22);
     // only a log folded away below the base's seq with no checkpoint before it is unrecoverable.
     let refs_key = floe_proto::keys::checkpoint_refs_key(seq);
-    let snap = match store.get_bytes(&refs_key).await? {
-        Some((_, bytes)) => floe_proto::v1::RefSnapshot::decode(bytes.as_ref())?,
-        None => {
-            info!(
-                base_seq = seq,
-                head = manifest.head_seq,
-                "no checkpoint at the base's seq: replaying the refs at that seq from the WAL for the compose"
-            );
-            handle.refs_at_seq(seq).await.map_err(|e| {
-                anyhow::anyhow!("refs at the base's seq {seq} (head {}): {e} — run `floe compact --base` again so a checkpoint exists at the base", manifest.head_seq)
-            })?
-        }
+    let snap = if let Some((_, bytes)) = store.get_bytes(&refs_key).await? {
+        floe_proto::v1::RefSnapshot::decode(bytes.as_ref())?
+    } else {
+        info!(
+            base_seq = seq,
+            head = manifest.head_seq,
+            "no checkpoint at the base's seq: replaying the refs at that seq from the WAL for the compose"
+        );
+        handle.refs_at_seq(seq).await.map_err(|e| {
+            anyhow::anyhow!("refs at the base's seq {seq} (head {}): {e} — run `floe compact --base` again so a checkpoint exists at the base", manifest.head_seq)
+        })?
     };
     let list = floe_bundle::ops::read_list(store)
         .await?
@@ -225,15 +227,16 @@ pub async fn compose_full_from_base(
         .iter()
         .find(|s| s.name == strategy)
         .and_then(|s| s.filter.clone());
-    let pack = match &filter {
-        Some(_) => manifest
+    let pack = if filter.is_some() {
+        manifest
             .packs
             .iter()
             .filter(|p| p.kind == floe_proto::v1::PackKind::History as i32 && p.derived_from == base.checksum)
             .max_by_key(|p| p.seq)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("strategy {strategy} is filtered but base {} has no history pack (D18) to compose; rebuild the base with git.history_pack on", &base.checksum[..12]))?,
-        None => base.clone(),
+            .ok_or_else(|| anyhow::anyhow!("strategy {strategy} is filtered but base {} has no history pack (D18) to compose; rebuild the base with git.history_pack on", base.checksum.get(..12).unwrap_or(base.checksum.as_str())))?
+    } else {
+        base.clone()
     };
     let pack_path = handle
         .local()

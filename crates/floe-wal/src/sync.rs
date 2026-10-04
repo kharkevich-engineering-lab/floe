@@ -1,4 +1,4 @@
-//! sync() implementation: freshness check, catch-up, materialization.
+//! `sync()` implementation: freshness check, catch-up, materialization.
 
 use std::sync::Arc;
 
@@ -11,13 +11,13 @@ use floe_proto::v1::{EntryKind, LogEntry, Manifest, PackRef, RefSnapshot};
 use floe_store::{GetOptions, GetResult, ObjectStore, Prefixed, Version};
 
 /// A read guard held for the lifetime of a request. While any guard is alive
-/// no pack is removed locally (the inner RwLock read guard prevents it).
+/// no pack is removed locally (the inner `RwLock` read guard prevents it).
 pub struct ReadGuard<'a> {
     pub(crate) _guard: tokio::sync::RwLockReadGuard<'a, ()>,
     pub(crate) handle: &'a super::handle::RepoHandle,
 }
 
-impl<'a> ReadGuard<'a> {
+impl ReadGuard<'_> {
     pub fn manifest(&self) -> Arc<Manifest> {
         self.handle.manifest.read().clone()
     }
@@ -82,28 +82,28 @@ pub(crate) enum SyncOutcome {
     Unchanged,
     Changed {
         meta_version: Version,
-        manifest: Manifest,
+        manifest: Box<Manifest>,
     },
 }
 
 /// Perform a conditional GET on manifest.pb and return the outcome.
 pub(crate) async fn freshness_check(
     store: &Prefixed,
-    known: &Option<Version>,
+    known: Option<&Version>,
 ) -> Result<SyncOutcome, WalError> {
     match known {
         Some(v) => match get_message_if_changed::<Manifest>(store, keys::MANIFEST, v).await? {
             None => Ok(SyncOutcome::Unchanged),
             Some((meta, manifest)) => Ok(SyncOutcome::Changed {
                 meta_version: meta.version,
-                manifest,
+                manifest: Box::new(manifest),
             }),
         },
         None => match get_message::<Manifest>(store, keys::MANIFEST).await? {
             None => Err(WalError::NotFound),
             Some((meta, manifest)) => Ok(SyncOutcome::Changed {
                 meta_version: meta.version,
-                manifest,
+                manifest: Box::new(manifest),
             }),
         },
     }
@@ -314,7 +314,7 @@ fn side_files(pack: &PackRef) -> [(bool, &'static str, String); 3] {
 /// NIC's worth), with bounded memory (PAR * CHUNK).
 /// `progress(delta_bytes, total_bytes)` is called as chunks land (callers
 /// throttle). `known_size` skips the happy-path HEAD (ROUNDTRIPS: HEAD ≈ GET;
-/// PackRef already carries pack/idx sizes).
+/// `PackRef` already carries pack/idx sizes).
 pub(crate) type ProgressFn<'a> = &'a (dyn Fn(u64, u64) + Send + Sync);
 
 fn nonzero(n: u64) -> Option<u64> {
@@ -374,7 +374,9 @@ pub(crate) async fn download_object(
     let file = std::fs::File::create(dest)?;
     file.set_len(size)?;
     let file = std::sync::Arc::new(file);
-    let starts: Vec<u64> = (0..size).step_by(CHUNK as usize).collect();
+    // CHUNK (32 MiB) fits a usize on every supported target.
+    let step = usize::try_from(CHUNK).unwrap_or(usize::MAX);
+    let starts: Vec<u64> = (0..size).step_by(step).collect();
     let report = &report;
     futures::stream::iter(starts)
         .map(|start| {
@@ -396,7 +398,8 @@ pub(crate) async fn download_object(
                         return Err(WalError::Corrupt(format!("unexpected 304 for {key}")));
                     }
                 };
-                let bytes = floe_store::util::collect(body, (end - start) as usize).await?;
+                let hint = usize::try_from(end - start).unwrap_or(0);
+                let bytes = floe_store::util::collect(body, hint).await?;
                 if bytes.len() as u64 != end - start {
                     return Err(WalError::Corrupt(format!(
                         "short range read for {key}: {}..{} got {}",
@@ -432,7 +435,7 @@ pub(crate) async fn apply_delta(
 
     // If we have a checkpoint and haven't loaded it yet, load its refs. Its
     // packs are a subset of `Manifest.packs` and are reconciled below.
-    let checkpoint_seq = new_manifest.checkpoint.as_ref().map(|c| c.seq).unwrap_or(0);
+    let checkpoint_seq = new_manifest.checkpoint.as_ref().map_or(0, |c| c.seq);
     let need_checkpoint_load = checkpoint_seq > 0 && current_state.applied_seq < checkpoint_seq;
 
     // The checkpoint's times feed `first_state_time` / `refs_as_of`; old refs
@@ -557,10 +560,10 @@ pub(crate) async fn reconcile_packs_inner(
     }
     {
         let mut st = handle.state.lock();
-        st.remote_served = remote_served.clone();
+        st.remote_served.clone_from(&remote_served);
     }
     let remote_set: std::collections::HashSet<&str> =
-        remote_served.iter().map(|s| s.as_str()).collect();
+        remote_served.iter().map(String::as_str).collect();
 
     // History packs (D18) are an accelerator, not a requirement: a fetch can
     // be served from the linked/remote base right away. They are installed by
@@ -607,7 +610,7 @@ pub(crate) async fn reconcile_packs_inner(
                     tracing::info!(repo = %handle.id, pack = %p.checksum, ext, "side-file installed for an installed pack");
                 }
                 Err(e) => {
-                    tracing::warn!(repo = %handle.id, pack = %p.checksum, ext, error = %e, "side-file download failed")
+                    tracing::warn!(repo = %handle.id, pack = %p.checksum, ext, error = %e, "side-file download failed");
                 }
             }
         }
@@ -678,7 +681,10 @@ pub(crate) async fn reconcile_packs_inner(
         let link_to = link_target(&p);
         tasks.push(tokio::spawn(
             async move {
-                let _permit = sem.acquire().await.unwrap();
+                let _permit = sem
+                    .acquire()
+                    .await
+                    .map_err(|e| WalError::Corrupt(format!("download semaphore: {e}")))?;
                 // Per-object progress arrives as absolute (done,total); turn it
                 // into deltas for the shared counter.
                 let cb = |delta: u64, _t: u64| {
@@ -733,19 +739,16 @@ pub(crate) async fn reconcile_packs_inner(
         })
         .collect::<Result<_, _>>()?;
     if !to_remove.is_empty() {
-        match handle.rw.try_write() {
-            Ok(_w) => {
-                for (_, oid) in &to_remove {
-                    if local.pack_path(oid).exists() {
-                        local.remove_pack(oid)?;
-                        removed += 1;
-                    }
+        if let Ok(_w) = handle.rw.try_write() {
+            for (_, oid) in &to_remove {
+                if local.pack_path(oid).exists() {
+                    local.remove_pack(oid)?;
+                    removed += 1;
                 }
             }
-            Err(_) => {
-                tracing::info!(repo = %handle.id, packs = to_remove.len(), "superseded packs kept for now: readers active; retried on the next sync");
-                still_pending.extend(to_remove.iter().map(|(s, _)| s.clone()));
-            }
+        } else {
+            tracing::info!(repo = %handle.id, packs = to_remove.len(), "superseded packs kept for now: readers active; retried on the next sync");
+            still_pending.extend(to_remove.iter().map(|(s, _)| s.clone()));
         }
     }
     span.record("removed", removed);
@@ -788,10 +791,10 @@ pub(crate) async fn maintain_commit_graph(
                 Ok(Ok(true)) => base_changed = true,
                 Ok(Ok(false)) => {}
                 Ok(Err(e)) => {
-                    tracing::warn!(pack = %p.checksum, error = %e, "commit-graph base install failed")
+                    tracing::warn!(pack = %p.checksum, error = %e, "commit-graph base install failed");
                 }
                 Err(e) => {
-                    tracing::warn!(pack = %p.checksum, error = %e, "commit-graph base install task failed")
+                    tracing::warn!(pack = %p.checksum, error = %e, "commit-graph base install task failed");
                 }
             }
         }
@@ -827,11 +830,12 @@ pub(crate) async fn maintain_commit_graph(
     {
         tracing::warn!(repo = %handle.id, error = %e, "commit-graph update failed");
     } else {
-        tracing::info!(repo = %handle.id, packs = packs.len(), ms = started.elapsed().as_millis() as u64, "commit-graph updated");
+        let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::info!(repo = %handle.id, packs = packs.len(), ms, "commit-graph updated");
     }
 }
 
-/// Replay log entries in (from_seq, to_seq] from the manifest's log segments.
+/// Replay log entries in (`from_seq`, `to_seq`] from the manifest's log segments.
 pub(crate) async fn replay_log(
     handle: &super::handle::RepoHandle,
     manifest: &Manifest,
@@ -864,7 +868,8 @@ pub(crate) async fn replay_log(
                     let res = store.get(&key, GetOptions::default()).await?;
                     Ok::<Option<bytes::Bytes>, WalError>(match res {
                         GetResult::Object { meta, body } => {
-                            Some(floe_store::util::collect(body, meta.size as usize).await?)
+                            let hint = usize::try_from(meta.size).unwrap_or(0);
+                            Some(floe_store::util::collect(body, hint).await?)
                         }
                         GetResult::NotModified { .. } => None,
                     })
@@ -942,9 +947,8 @@ pub(crate) fn apply_entries(
             EntryKind::Compact => {
                 supersedes.extend(entry.supersedes.iter().cloned());
             }
-            EntryKind::Checkpoint => {}
             // Settings live on the manifest; the entry is history only.
-            EntryKind::Settings => {}
+            EntryKind::Checkpoint | EntryKind::Settings => {}
             EntryKind::Unspecified => {
                 tracing::warn!(seq = entry.seq, "unspecified log entry kind, skipping");
             }
@@ -988,47 +992,6 @@ pub(crate) async fn materialize_from_scratch(
         .await
 }
 
-#[cfg(test)]
-mod download_tests {
-    use super::download_object;
-    use floe_store::{ObjectStoreExt, Prefixed, PutMode, memory::MemoryStore};
-
-    #[tokio::test]
-    async fn striped_download_matches_source() {
-        // > CHUNK (32 MiB) so the ranged/striped path runs, with a ragged tail.
-        let size = 70 * 1024 * 1024 + 12345;
-        let mut data = vec![0u8; size];
-        let mut x: u64 = 0x9E3779B97F4A7C15;
-        for b in data.iter_mut() {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            *b = x as u8;
-        }
-        let store = MemoryStore::shared();
-        store
-            .put_bytes("p/big.pack", data.clone(), PutMode::Create)
-            .await
-            .unwrap();
-        store
-            .put_bytes("p/small.pack", b"tiny".to_vec(), PutMode::Create)
-            .await
-            .unwrap();
-        let prefixed = Prefixed::new(store, "p/");
-        let dir = tempfile::tempdir().unwrap();
-        let big = dir.path().join("big.pack");
-        download_object(&prefixed, "big.pack", &big, Some(size as u64), None)
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read(&big).unwrap(), data);
-        let small = dir.path().join("small.pack");
-        download_object(&prefixed, "small.pack", &small, None, None)
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read(&small).unwrap(), b"tiny");
-    }
-}
-
 /// The **bulk runtime**: a small dedicated tokio runtime (own worker threads)
 /// that runs pack materialization (striped downloads, 32 MiB chunk copies,
 /// tmpfs writes, install renames, gix reopen, commit-graph/midx subprocess
@@ -1040,6 +1003,10 @@ mod download_tests {
 /// candidates; isolation makes the question moot).
 static BULK_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
 
+#[allow(
+    clippy::expect_used,
+    reason = "building the runtime only fails when the OS cannot spawn threads"
+)]
 fn bulk_runtime() -> &'static tokio::runtime::Runtime {
     BULK_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -1064,4 +1031,45 @@ pub(crate) async fn on_bulk_runtime<T: Send + 'static>(
     });
     rx.await
         .map_err(|_| WalError::Corrupt("bulk runtime task dropped".into()))?
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::download_object;
+    use floe_store::{ObjectStoreExt, Prefixed, PutMode, memory::MemoryStore};
+
+    #[tokio::test]
+    async fn striped_download_matches_source() {
+        // > CHUNK (32 MiB) so the ranged/striped path runs, with a ragged tail.
+        let size = 70 * 1024 * 1024 + 12345;
+        let mut data = vec![0u8; size];
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for b in &mut data {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = x.to_le_bytes()[0];
+        }
+        let store = MemoryStore::shared();
+        store
+            .put_bytes("p/big.pack", data.clone(), PutMode::Create)
+            .await
+            .unwrap();
+        store
+            .put_bytes("p/small.pack", b"tiny".to_vec(), PutMode::Create)
+            .await
+            .unwrap();
+        let prefixed = Prefixed::new(store, "p/");
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.pack");
+        download_object(&prefixed, "big.pack", &big, Some(size as u64), None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&big).unwrap(), data);
+        let small = dir.path().join("small.pack");
+        download_object(&prefixed, "small.pack", &small, None, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&small).unwrap(), b"tiny");
+    }
 }

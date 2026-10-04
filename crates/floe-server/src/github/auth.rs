@@ -61,8 +61,13 @@ pub async fn app(State(st): State<Arc<AppState>>, headers: HeaderMap) -> GhResul
         .config;
     let urls = Urls::from_request(&st, &headers);
     let mut app = models::app(&urls);
-    app["id"] = serde_json::json!(app_id);
-    app["installations_count"] = serde_json::json!(config.installations.len());
+    if let Some(obj) = app.as_object_mut() {
+        obj.insert("id".to_string(), serde_json::json!(app_id));
+        obj.insert(
+            "installations_count".to_string(),
+            serde_json::json!(config.installations.len()),
+        );
+    }
     Ok(axum::Json(app).into_response())
 }
 

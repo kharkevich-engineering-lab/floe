@@ -1,6 +1,16 @@
 //! `/api/v1` (D20): the versioned programmatic surface, its browser-lane alias
 //! (`/api-browser`), CORS for foreign origins, discovery, `me`, repo summary and
 //! admin, and the SDK artefact route.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 mod harness;
 
@@ -76,6 +86,10 @@ fn fixture(server: &Server) -> anyhow::Result<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::many_single_char_names,
+    reason = "short status/header bindings mirror the HTTP tuple"
+)]
 async fn v1_surface_and_browser_lane() -> TestResult {
     let server = Server::start_with_tweak(|c| {
         c.server.cors_origins = vec!["https://*.docs.example.com".into()];
@@ -336,6 +350,10 @@ async fn v1_surface_and_browser_lane() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::many_single_char_names,
+    reason = "short status/header bindings mirror the HTTP tuple"
+)]
 async fn no_cors_without_config() -> TestResult {
     let server = Server::start().await?;
     let (st, _, h) = req(
@@ -366,6 +384,7 @@ async fn no_cors_without_config() -> TestResult {
 /// admin/settings surface at `/{o}/{r}/api[/policy|/settings…]`, and the
 /// same under the browser lane `/{o}/{r}/api-browser/…`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::many_single_char_names, reason = "short request/response bindings in a linear test")]
 async fn d26_prefix_form_matches_v1_alias() -> TestResult {
     let server = Server::start().await?;
     let c = reqwest::Client::new();

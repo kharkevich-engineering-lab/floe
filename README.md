@@ -177,6 +177,25 @@ web/              React SPA (Vite) + sdk/repos.ts, built into the binary; the wi
 docs/             BUNDLE_URI_DESIGN, ROUNDTRIPS (the cost model), POLICY, LFS, INTEGRITY, EVENTS, CONTRACT, patches/
 ```
 
+## Releases
+
+Versions come from the commits: every push to `main` runs [semantic-release](https://semantic-release.gitbook.io/)
+over the [conventional commits](https://www.conventionalcommits.org/) since the last tag — `fix:` is a patch,
+`feat:` a minor, a `BREAKING CHANGE:` footer (or `feat!:`) a major; `perf:` is a patch too, `revert:` follows the
+reverted type; `docs:`, `ci:`, `chore:`, `build:`, `test:`, `refactor:` release nothing. PR titles are checked against the same types, since a squash merge makes the title the commit.
+
+Each release is built natively on an x86_64 and an arm64 runner (no emulation) and publishes:
+
+* GitHub release assets `floe-<version>-x86_64-unknown-linux-gnu.tar.gz` and
+  `floe-<version>-aarch64-unknown-linux-gnu.tar.gz` (each with a `.sha256`), holding `floe` and `floe-server`
+  (glibc ≥ 2.36: Debian 12+, Ubuntu 23.04+).
+* A multi-arch image `ghcr.io/kharkevich-engineering-lab/floe`, tagged `<version>`, `<major>.<minor>` and `latest`.
+
+`floe --version` (and the git `agent=` capability) report `<version> (<commit>)`. The version lives only in
+the release tag: `Cargo.toml` keeps a placeholder that no release rewrites, so a build from source, even of a
+tagged commit, reports that placeholder unless `FLOE_VERSION` is set at build time
+(`FLOE_VERSION=1.4.0 cargo build …`, or `--build-arg FLOE_VERSION=…` for the `Containerfile`).
+
 ## Invariants worth memorising
 
 * The manifest CAS is the only commit point; everything before it is invisible, everything after it is

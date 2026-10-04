@@ -8,7 +8,17 @@
 //!
 //! The suite is executed against `MemoryStore` always, and against `S3Store`
 //! when `FLOE_TEST_S3_ENDPOINT` is set. `GcsStore` is tested when
-//! `FLOE_TEST_GCS_BUCKET` is set (StoreGcs adds that wrapper).
+//! `FLOE_TEST_GCS_BUCKET` is set (`StoreGcs` adds that wrapper).
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -56,7 +66,7 @@ async fn test_compose(store: &DynStore, key: &str) {
     let header = Bytes::from_static(b"# v3 git bundle\n@object-format=sha1\n\n");
     let mut body = vec![0u8; 6 * 1024 * 1024 + 12345];
     for (i, b) in body.iter_mut().enumerate() {
-        *b = (i % 251) as u8;
+        *b = u8::try_from(i % 251).unwrap();
     }
     let body = Bytes::from(body);
     let h = format!("{key}.hdr");
@@ -117,11 +127,11 @@ async fn test_compose(store: &DynStore, key: &str) {
 
 // ---- helpers -----------------------------------------------------------
 
-/// Collect a GetResult body into Bytes, asserting it's an Object.
+/// Collect a `GetResult` body into Bytes, asserting it's an Object.
 async fn collect_body(r: GetResult) -> (floe_store::ObjectMeta, Bytes) {
     match r {
         GetResult::Object { meta, body } => {
-            let collected = floe_store::util::collect(body, meta.size as usize)
+            let collected = floe_store::util::collect(body, usize::try_from(meta.size).unwrap())
                 .await
                 .expect("body collect");
             (meta, collected)
@@ -189,7 +199,7 @@ async fn test_put_create_wins_once(store: &DynStore, key: &str) {
     let _ = store.delete(key, None).await;
 }
 
-/// Update CAS: winner updates, loser gets PreconditionFailed.
+/// Update CAS: winner updates, loser gets `PreconditionFailed`.
 async fn test_update_cas(store: &DynStore, key: &str) {
     let _ = store.delete(key, None).await;
 
@@ -266,7 +276,7 @@ async fn test_update_cas(store: &DynStore, key: &str) {
     let _ = store.delete(key, None).await;
 }
 
-/// if_none_match: NotModified when unchanged, Object when changed.
+/// `if_none_match`: `NotModified` when unchanged, Object when changed.
 async fn test_get_if_none_match(store: &DynStore, key: &str) {
     let _ = store.delete(key, None).await;
 
@@ -306,7 +316,7 @@ async fn test_get_if_none_match(store: &DynStore, key: &str) {
     let _ = store.delete(key, None).await;
 }
 
-/// if_match mismatch → PreconditionFailed.
+/// `if_match` mismatch → `PreconditionFailed`.
 async fn test_get_if_match_mismatch(store: &DynStore, key: &str) {
     let _ = store.delete(key, None).await;
 
@@ -463,7 +473,7 @@ async fn test_delete(store: &DynStore, key: &str) {
     );
 }
 
-/// list: ordering, start_after, prefix isolation.
+/// list: ordering, `start_after`, prefix isolation.
 async fn test_list(store: &DynStore, base: &str) {
     // Clean up any previous data under base.
     let existing: Vec<_> = store.list(base, None).collect::<Vec<_>>().await;
@@ -555,6 +565,8 @@ async fn test_list(store: &DynStore, base: &str) {
 
 /// 8 MiB streamed put/get roundtrip with checksum.
 async fn test_large_streamed_roundtrip(store: &DynStore, key: &str) {
+    use sha1::{Digest, Sha1};
+
     let _ = store.delete(key, None).await;
 
     // 8 MiB of pseudo-random but deterministic data.
@@ -571,7 +583,6 @@ async fn test_large_streamed_roundtrip(store: &DynStore, key: &str) {
     let data = Bytes::from(data);
 
     // Checksum (SHA-1).
-    use sha1::{Digest, Sha1};
     let mut hasher = Sha1::new();
     hasher.update(&data);
     let expected_checksum = hasher.finalize();
@@ -614,8 +625,8 @@ async fn test_large_streamed_roundtrip(store: &DynStore, key: &str) {
 }
 
 /// Multipart path: put an object above the threshold, verify roundtrip.
-/// For MemoryStore this exercises the same code path (no multipart).
-/// For S3Store with a small threshold, this triggers multipart upload.
+/// For `MemoryStore` this exercises the same code path (no multipart).
+/// For `S3Store` with a small threshold, this triggers multipart upload.
 async fn test_multipart_path(store: &DynStore, key: &str) {
     let _ = store.delete(key, None).await;
 
@@ -667,12 +678,9 @@ async fn memory_contract() {
 #[cfg(feature = "s3")]
 #[tokio::test]
 async fn s3_contract() {
-    let endpoint = match std::env::var("FLOE_TEST_S3_ENDPOINT") {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("skipping s3_contract: FLOE_TEST_S3_ENDPOINT not set");
-            return;
-        }
+    let Ok(endpoint) = std::env::var("FLOE_TEST_S3_ENDPOINT") else {
+        eprintln!("skipping s3_contract: FLOE_TEST_S3_ENDPOINT not set");
+        return;
     };
     let bucket = std::env::var("FLOE_TEST_BUCKET").unwrap_or_else(|_| "floe-test".into());
     let _access_key =
@@ -723,12 +731,9 @@ async fn s3_contract() {
 #[cfg(feature = "gcs")]
 #[tokio::test]
 async fn gcs_contract() {
-    let bucket = match std::env::var("FLOE_TEST_GCS_BUCKET") {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("skipping gcs_contract: FLOE_TEST_GCS_BUCKET not set");
-            return;
-        }
+    let Ok(bucket) = std::env::var("FLOE_TEST_GCS_BUCKET") else {
+        eprintln!("skipping gcs_contract: FLOE_TEST_GCS_BUCKET not set");
+        return;
     };
 
     // Install the rustls crypto provider (required for TLS with google-cloud-storage).
@@ -776,6 +781,7 @@ async fn gcs_contract() {
 /// stay under 2 s. `FLOE_TEST_GCS_BUCKET=floe-store FLOE_TEST_GCS_BIG_KEY=<key under prefix>`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gcs_control_plane_not_starved_by_bulk() {
+    const CHUNK: u64 = 32 * 1024 * 1024;
     let (Ok(bucket), Ok(big_key)) = (
         std::env::var("FLOE_TEST_GCS_BUCKET"),
         std::env::var("FLOE_TEST_GCS_BIG_KEY"),
@@ -820,13 +826,12 @@ async fn gcs_control_plane_not_starved_by_bulk() {
         .await;
     eprintln!("baseline probe {:?}", t.elapsed());
     let total = (1u64 << 30).min(size);
-    const CHUNK: u64 = 32 * 1024 * 1024;
     let bulk = {
         let store = store.clone();
         let big_key = big_key.clone();
         tokio::spawn(async move {
             let t = std::time::Instant::now();
-            let starts: Vec<u64> = (0..total).step_by(CHUNK as usize).collect();
+            let starts: Vec<u64> = (0..total).step_by(usize::try_from(CHUNK).unwrap()).collect();
             let n = futures::stream::iter(starts)
                 .map(|start| {
                     let store = store.clone();
@@ -844,12 +849,12 @@ async fn gcs_control_plane_not_starved_by_bulk() {
                             .unwrap();
                         match r {
                             GetResult::Object { body, .. } => {
-                                floe_store::util::collect(body, CHUNK as usize)
+                                floe_store::util::collect(body, usize::try_from(CHUNK).unwrap())
                                     .await
                                     .unwrap()
                                     .len()
                             }
-                            _ => 0,
+                            GetResult::NotModified { .. } => 0,
                         }
                     }
                 })
@@ -902,11 +907,13 @@ async fn gcs_control_plane_not_starved_by_bulk() {
         probes += 1;
     }
     let (bytes, took) = bulk.await.unwrap();
+    #[allow(clippy::cast_precision_loss, reason = "log-only throughput figure")]
+    let mb_per_s = bytes as f64 / 1e6 / took.as_secs_f64();
     eprintln!(
         "bulk {} MiB in {:.1}s ({:.0} MB/s); {probes} probes, worst {:?}",
         bytes >> 20,
         took.as_secs_f64(),
-        bytes as f64 / 1e6 / took.as_secs_f64(),
+        mb_per_s,
         worst
     );
     assert!(probes >= 4);

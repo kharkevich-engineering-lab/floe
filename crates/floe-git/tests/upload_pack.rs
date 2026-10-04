@@ -1,3 +1,13 @@
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 mod common;
 
 use floe_git::pkt::Protocol;
@@ -672,10 +682,10 @@ async fn fetch_skips_gitlink_entries() {
         // present.
         let (_blobs, commits, trees, _tags) = cm::pack_object_types(&pack);
         assert_eq!(commits, 2, "unexpected commit count ({filter:?})");
-        if filter != Some("tree:0") {
-            assert!(trees >= 1, "tree missing ({filter:?})");
-        } else {
+        if filter == Some("tree:0") {
             assert_eq!(trees, 0, "tree:0 sends no trees");
+        } else {
+            assert!(trees >= 1, "tree missing ({filter:?})");
         }
         let tmp = cm::fresh_bare();
         let pack_path = tmp.path().join("objects/pack/pack-test.pack");
@@ -699,7 +709,7 @@ async fn fetch_skips_gitlink_entries() {
 /// diff-sized fetch (want HEAD, have HEAD~50) and a full clone, both engines.
 /// `cargo test -p floe-git --test upload_pack bench_fetch_engines -- --ignored --nocapture`
 #[tokio::test]
-#[ignore]
+#[ignore = "benchmark; needs FLOE_BENCH_REPO"]
 async fn bench_fetch_engines() {
     let Ok(src_path) = std::env::var("FLOE_BENCH_REPO") else {
         eprintln!("FLOE_BENCH_REPO not set; skipping");
@@ -737,7 +747,7 @@ async fn bench_fetch_engines() {
     for ent in std::fs::read_dir(&pack_dir).unwrap() {
         let p = ent.unwrap().path();
         let name = p.file_name().unwrap().to_string_lossy().to_string();
-        if name.ends_with(".pack") {
+        if p.extension().is_some_and(|e| e == "pack") {
             let idx = p.with_extension("idx");
             let tmp = root.path().join("tmp");
             std::fs::create_dir_all(&tmp).unwrap();

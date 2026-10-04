@@ -29,10 +29,18 @@ impl Inflight {
     pub fn get(&self) -> u64 {
         self.0.load(Ordering::Relaxed)
     }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "metrics gauge value; precision loss above 2^52 is irrelevant"
+    )]
     fn enter(&self) {
         let n = self.0.fetch_add(1, Ordering::Relaxed) + 1;
         ::metrics::gauge!("floe_http_inflight").set(n as f64);
     }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "metrics gauge value; precision loss above 2^52 is irrelevant"
+    )]
     fn leave(&self) {
         let n = self.0.fetch_sub(1, Ordering::Relaxed) - 1;
         ::metrics::gauge!("floe_http_inflight").set(n as f64);
@@ -86,8 +94,7 @@ pub async fn request_id(
         .get(REQUEST_ID_HEADER)
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+        .map_or_else(|| Uuid::new_v4().to_string(), ToString::to_string);
     if let Ok(hv) = HeaderValue::from_str(&id) {
         req.headers_mut().insert(REQUEST_ID_HEADER, hv);
     }
@@ -159,6 +166,7 @@ impl RepoSemaphores {
 
     /// Acquire a permit for `repo_key`. The permit guards the git operation; drop
     /// it to release the slot.
+    #[allow(clippy::expect_used, reason = "the semaphore is never closed")]
     pub async fn acquire(&self, repo_key: &str) -> tokio::sync::OwnedSemaphorePermit {
         let sem = self
             .map

@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Keeps every action at its latest release; pins stay SHA + version comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

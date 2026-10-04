@@ -1,4 +1,14 @@
 //! web/API.md §6 conformance for the read-only JSON API.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 mod harness;
 
@@ -21,7 +31,7 @@ async fn get(
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(ToString::to_string);
     let text = resp.text().await?;
     Ok((status, text, ct))
 }
@@ -112,6 +122,10 @@ fn fixture(server: &Server) -> anyhow::Result<std::path::PathBuf> {
 
 /// web/API.md §6 against one server (called for the local-packs instance and
 /// for a sibling that serves the same repo remotely).
+#[allow(
+    clippy::many_single_char_names,
+    reason = "status/text/header tuples mirror the HTTP response"
+)]
 async fn conformance(
     server: &Server,
     src: &std::path::Path,

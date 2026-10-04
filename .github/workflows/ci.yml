@@ -20,32 +20,61 @@ env:
 
 jobs:
   build-test:
-    name: warnings + test
-    runs-on: ubuntu-latest
+    name: warnings + test (${{ matrix.arch }})
+    # Native on both architectures floe ships for (see release.yml): one runner per arch,
+    # never qemu. fail-fast off: a failure on one arch and not the other is the signal.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # prost-build does not vendor protoc; without it the proto crate fails with NotFound.
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       # No toolchain version here on purpose: rust-toolchain.toml pins it (and its components).
-      # `rustup show` installs exactly that, so the pin has one home.
+      # `rustup show` installs exactly that, so the pin has one home. The arm64 runner image
+      # may lack rustup, so bootstrap it (no default toolchain) when it is missing.
       - name: Install the pinned Rust toolchain
-        run: rustup show && cargo --version && git --version
-      - uses: Swatinem/rust-cache@v2
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            # A fixed rustup-init checked against a hash pinned here, never `curl | sh` of
+            # whatever sh.rustup.rs serves today. Bump RUSTUP and both hashes together.
+            RUSTUP=1.29.1
+            case "$(uname -m)" in
+              aarch64) triple=aarch64-unknown-linux-gnu; sum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;;
+              x86_64) triple=x86_64-unknown-linux-gnu; sum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;;
+              *) echo "::error::no pinned rustup-init for $(uname -m)"; exit 1 ;;
+            esac
+            curl --proto '=https' --tlsv1.2 -sSfo "$RUNNER_TEMP/rustup-init" "https://static.rust-lang.org/rustup/archive/${RUSTUP}/${triple}/rustup-init"
+            echo "${sum}  $RUNNER_TEMP/rustup-init" | sha256sum -c -
+            chmod +x "$RUNNER_TEMP/rustup-init"
+            "$RUNNER_TEMP/rustup-init" -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show && cargo --version && git --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: scoped-tests-v1
+          # Per arch: an x86_64 target/ restored onto arm64 is gigabytes of useless download.
+          key: scoped-tests-v1-${{ matrix.arch }}
           cache-on-failure: true
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
@@ -69,25 +98,53 @@ jobs:
       - run: just clippy
 
   e2e:
-    name: Git and editor contracts
-    runs-on: ubuntu-latest
+    name: Git and editor contracts (${{ matrix.arch }})
+    # Native on both architectures floe ships for (see release.yml): one runner per arch,
+    # never qemu. fail-fast off: a failure on one arch and not the other is the signal.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Install the pinned Rust toolchain
-        run: rustup show && cargo --version && git --version
-      - uses: Swatinem/rust-cache@v2
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            # A fixed rustup-init checked against a hash pinned here, never `curl | sh` of
+            # whatever sh.rustup.rs serves today. Bump RUSTUP and both hashes together.
+            RUSTUP=1.29.1
+            case "$(uname -m)" in
+              aarch64) triple=aarch64-unknown-linux-gnu; sum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;;
+              x86_64) triple=x86_64-unknown-linux-gnu; sum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;;
+              *) echo "::error::no pinned rustup-init for $(uname -m)"; exit 1 ;;
+            esac
+            curl --proto '=https' --tlsv1.2 -sSfo "$RUNNER_TEMP/rustup-init" "https://static.rust-lang.org/rustup/archive/${RUSTUP}/${triple}/rustup-init"
+            echo "${sum}  $RUNNER_TEMP/rustup-init" | sha256sum -c -
+            chmod +x "$RUNNER_TEMP/rustup-init"
+            "$RUNNER_TEMP/rustup-init" -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show && cargo --version && git --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          key: contracts-v1-${{ matrix.arch }}
           cache-on-failure: true
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
@@ -105,31 +162,45 @@ jobs:
         if: ${{ !cancelled() && steps.contracts.outcome == 'success' }}
         shell: bash
         run: just e2e 2>&1 | tee git-contracts.log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: contract-test-logs
+          name: contract-test-logs-${{ matrix.arch }}
           path: '*-contracts.log'
           retention-days: 14
 
   container:
-    name: release container
-    runs-on: blacksmith-4vcpu-ubuntu-2204
+    name: release container (${{ matrix.arch }})
+    # Both arches the release workflow publishes, each on a native runner: the release
+    # run on main must never be the first time the Containerfile is built for arm64.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runs-on: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v5
-      - uses: useblacksmith/setup-docker-builder@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build release image without publishing
-        uses: useblacksmith/build-push-action@v2
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Containerfile
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: false
           load: true
           provenance: false
           build-args: FLOE_BUILD_SHA=${{ github.sha }}
           tags: floe:smoke
+          cache-from: type=gha,scope=ci-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.arch }}
       - name: Start S3-compatible test store
         run: |
           docker compose up -d --wait rustfs
@@ -157,10 +228,10 @@ jobs:
           mkdir -p smoke-logs
           docker logs floe-smoke > smoke-logs/facade.log 2>&1 || true
           docker compose logs rustfs > smoke-logs/store.log 2>&1 || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: editor-container-logs
+          name: editor-container-logs-${{ matrix.arch }}
           path: smoke-logs/
           retention-days: 14
       - name: Clean up

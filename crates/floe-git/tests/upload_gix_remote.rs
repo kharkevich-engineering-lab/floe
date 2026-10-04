@@ -3,6 +3,16 @@
 //! index, object enumeration by tree diff against parents, base objects
 //! faulted in per tree level. Mirrors a serverless instance serving acme/monorepo
 //! with the remote reader and no store mount.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 mod common;
 

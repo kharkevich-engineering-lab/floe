@@ -108,8 +108,9 @@ impl FaultPlan {
             ..Default::default()
         }
     }
+    #[must_use]
     pub fn with_only(mut self, keys: &[&str]) -> Self {
-        self.only_keys = Some(keys.iter().map(|s| s.to_string()).collect());
+        self.only_keys = Some(keys.iter().map(ToString::to_string).collect());
         self
     }
 }
@@ -168,6 +169,7 @@ impl Rng {
         self.0 = x;
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
+    #[allow(clippy::cast_precision_loss, reason = "53-bit values are exact in f64")]
     fn f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
@@ -267,6 +269,7 @@ impl FaultStore {
     ) -> Decision {
         self.stats.ops.fetch_add(1, Ordering::Relaxed);
         let plan = self.plan.lock().clone();
+        #[allow(clippy::panic, reason = "injecting a crash is this fault's purpose")]
         if let Some(p) = plan
             .panic_once_keys
             .iter()
@@ -300,8 +303,8 @@ impl FaultStore {
             return Decision::Denied;
         }
         if let Some((lo, hi)) = plan.delay {
-            let span = hi.saturating_sub(lo).as_micros() as u64;
-            let extra = self.rng.lock().below(span + 1);
+            let span = u64::try_from(hi.saturating_sub(lo).as_micros()).unwrap_or(u64::MAX);
+            let extra = self.rng.lock().below(span.saturating_add(1));
             tokio::time::sleep(lo + Duration::from_micros(extra)).await;
         }
         if !Self::in_scope(&plan, key) {
@@ -311,7 +314,8 @@ impl FaultStore {
             let mut r = self.rng.lock();
             (
                 [r.f64(), r.f64(), r.f64(), r.f64(), r.f64(), r.f64()],
-                r.below(1 << 20) as usize,
+                // below(2^20) always fits in usize.
+                usize::try_from(r.below(1 << 20)).unwrap_or(0),
             )
         };
         let d = if roll[0] < plan.p_hang {
@@ -543,6 +547,39 @@ pub async fn truth_bytes(store: &DynStore, key: &str) -> Result<Option<Bytes>> {
     Ok(store.get_bytes(key).await?.map(|(_, b)| b))
 }
 
+impl FaultStore {
+    async fn get_inner(&self, key: &str, opts: GetOptions, conditional: bool) -> Result<GetResult> {
+        match self.decide("get", key, false, conditional, true).await {
+            Decision::Hang => hang_forever().await,
+            Decision::ErrBefore => Err(self.retryable("get", key, "before")),
+            Decision::Denied => Err(StoreError::NotFound { key: key.into() }),
+            Decision::Stale => match opts.if_none_match.clone() {
+                Some(version) => Ok(GetResult::NotModified { version }),
+                // Not a conditional GET after all: nothing to answer 304 to.
+                None => self.inner.get(key, opts).await,
+            },
+            Decision::Truncate(at) => match self.inner.get(key, opts).await? {
+                GetResult::Object { meta, body } => {
+                    let size = usize::try_from(meta.size).unwrap_or(usize::MAX);
+                    let at = if size == 0 { 0 } else { at % size };
+                    let msg = format!(
+                        "fault-store[{}]: injected truncation of {key} at {at}/{size}",
+                        self.name
+                    );
+                    Ok(GetResult::Object {
+                        meta,
+                        body: truncate_stream(body, at, msg),
+                    })
+                }
+                r @ GetResult::NotModified { .. } => Ok(r),
+            },
+            Decision::Proceed | Decision::ErrAfter | Decision::CasFail => {
+                self.inner.get(key, opts).await
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,36 +646,5 @@ mod tests {
         link.set(FaultPlan::black_hole());
         let r = tokio::time::timeout(Duration::from_millis(50), link.head("k")).await;
         assert!(r.is_err());
-    }
-}
-
-impl FaultStore {
-    async fn get_inner(&self, key: &str, opts: GetOptions, conditional: bool) -> Result<GetResult> {
-        match self.decide("get", key, false, conditional, true).await {
-            Decision::Hang => hang_forever().await,
-            Decision::ErrBefore => Err(self.retryable("get", key, "before")),
-            Decision::Denied => Err(StoreError::NotFound { key: key.into() }),
-            Decision::Stale => Ok(GetResult::NotModified {
-                version: opts.if_none_match.clone().unwrap(),
-            }),
-            Decision::Truncate(at) => match self.inner.get(key, opts).await? {
-                GetResult::Object { meta, body } => {
-                    let size = meta.size as usize;
-                    let at = if size == 0 { 0 } else { at % size };
-                    let msg = format!(
-                        "fault-store[{}]: injected truncation of {key} at {at}/{size}",
-                        self.name
-                    );
-                    Ok(GetResult::Object {
-                        meta,
-                        body: truncate_stream(body, at, msg),
-                    })
-                }
-                r => Ok(r),
-            },
-            Decision::Proceed | Decision::ErrAfter | Decision::CasFail => {
-                self.inner.get(key, opts).await
-            }
-        }
     }
 }

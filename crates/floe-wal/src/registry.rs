@@ -1,4 +1,4 @@
-//! Registry: process-wide map of RepoId -> Arc<RepoHandle>.
+//! Registry: process-wide map of `RepoId` -> `Arc<RepoHandle>`.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -95,18 +95,17 @@ impl Registry {
         let prefixed = Prefixed::new(self.store.clone(), prefix);
 
         // Read manifest (NotFound if absent)
-        let (meta, manifest) = match get_message::<Manifest>(&prefixed, keys::MANIFEST).await? {
-            Some(v) => v,
-            None => return Err(WalError::NotFound),
+        let Some((meta, manifest)) = get_message::<Manifest>(&prefixed, keys::MANIFEST).await?
+        else {
+            return Err(WalError::NotFound);
         };
 
         // Open or init local repo (LocalRepo joins owner/name.git onto the root).
-        let local = match LocalRepo::open(&self.cache_root, id)? {
-            Some(l) => l,
-            None => {
-                let format = parse_object_format(&manifest.object_format);
-                LocalRepo::init(&self.cache_root, id, format)?
-            }
+        let local = if let Some(l) = LocalRepo::open(&self.cache_root, id)? {
+            l
+        } else {
+            let format = parse_object_format(&manifest.object_format);
+            LocalRepo::init(&self.cache_root, id, format)?
         };
 
         // Load state
@@ -183,7 +182,7 @@ impl Registry {
         Ok(())
     }
 
-    /// CAS-create manifest.pb (PutMode::Create). Err(AlreadyExists) on 412.
+    /// CAS-create `manifest.pb` (`PutMode::Create`). Err(AlreadyExists) on 412.
     pub async fn create(
         &self,
         id: &RepoId,
@@ -341,7 +340,11 @@ impl Registry {
         Ok(repos)
     }
 
-    /// Disk cache maintenance: evict idle repos beyond cache.max_bytes / evict_idle_after.
+    /// Disk cache maintenance: evict idle repos beyond `cache.max_bytes` / `evict_idle_after`.
+    #[allow(
+        clippy::unused_async,
+        reason = "public async API awaited by callers in other crates"
+    )]
     pub async fn evict_idle(&self) -> Result<EvictReport, WalError> {
         let evict_after = self.cfg.cache.evict_idle_after;
         // D25: budget mode evicts past `cache.max_bytes`; disk mode only under
@@ -350,11 +353,23 @@ impl Registry {
         let max_bytes = if self.cfg.cache_is_disk() {
             match disk_usage(&self.cfg.cache.dir) {
                 Some((used, total)) if total > 0 && self.cfg.cache.disk_high_watermark > 0.0 => {
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "disk usage fraction; precision loss above 2^52 is irrelevant"
+                    )]
                     let frac = used as f64 / total as f64;
                     metrics::gauge!("floe_cache_disk_used_fraction").set(frac);
                     if frac <= self.cfg.cache.disk_high_watermark {
                         return Ok(EvictReport::default());
                     }
+                    // Non-negative (clamped) and at most `total`: the cast neither
+                    // wraps nor meaningfully truncates.
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "bounded byte target derived from a fraction of `total`"
+                    )]
                     let low = ((self.cfg.cache.disk_high_watermark - 0.10).max(0.0) * total as f64)
                         as u64;
                     // Other data on the filesystem counts against us: target =
@@ -385,7 +400,7 @@ impl Registry {
 
         // Collect idle repos. In-use checks happen again while evicting: a
         // request may acquire a ReadGuard after this snapshot.
-        for entry in self.repos.iter() {
+        for entry in &self.repos {
             let handle = entry.value();
             let last_access = handle.last_access();
             if now.duration_since(last_access) > evict_after {
@@ -465,15 +480,25 @@ fn dir_size(path: &std::path::Path) -> u64 {
 }
 
 /// (used, total) bytes of the filesystem holding `path` (statvfs).
+#[allow(unsafe_code, reason = "statvfs has no safe std wrapper; the two calls below are the whole unsafe surface")]
 fn disk_usage(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `statvfs` is a plain C struct of integers, for which all-zero bytes are a valid value.
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+    // SAFETY: `c` is a NUL-terminated path alive for the call and `st` is a writable `statvfs`.
+    if unsafe { libc::statvfs(c.as_ptr(), &raw mut st) } != 0 {
         return None;
     }
-    let total = st.f_blocks as u64 * st.f_frsize as u64;
-    let avail = st.f_bavail as u64 * st.f_frsize as u64;
+    // The statvfs field widths differ per platform (u32 on macOS, u64 on Linux).
+    #[allow(
+        clippy::useless_conversion,
+        reason = "statvfs field widths are platform-dependent"
+    )]
+    let (total, avail) = (
+        u64::from(st.f_blocks) * u64::from(st.f_frsize),
+        u64::from(st.f_bavail) * u64::from(st.f_frsize),
+    );
     Some((total.saturating_sub(avail), total))
 }

@@ -183,9 +183,9 @@ impl RepoPolicy {
             if !rule_names.insert(&r.name) {
                 return Err(format!("rules: duplicate name {:?}", r.name));
             }
-            let n = r.effect.protect.is_some() as u8
-                + r.effect.history.is_some() as u8
-                + r.effect.size.is_some() as u8;
+            let n = u8::from(r.effect.protect.is_some())
+                + u8::from(r.effect.history.is_some())
+                + u8::from(r.effect.size.is_some());
             if n != 1 {
                 return Err(format!(
                     "rule {:?}: effect must have exactly one of protect, history, size",
@@ -218,7 +218,7 @@ impl RepoPolicy {
 fn valid_name(s: &str) -> bool {
     let b = s.as_bytes();
     (1..=63).contains(&b.len())
-        && b[0].is_ascii_lowercase()
+        && b.first().is_some_and(u8::is_ascii_lowercase)
         && b.iter()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
@@ -232,22 +232,27 @@ fn check_overlap_bypass(p: &RepoPolicy) -> Result<(), String> {
         .filter(|r| r.effect.protect.is_some())
         .collect();
     for (i, a) in protect.iter().enumerate() {
-        for b in &protect[i + 1..] {
+        for b in protect.iter().skip(i + 1) {
             if !ref_patterns_may_overlap(&a.match_.refs, &b.match_.refs) {
                 continue;
             }
-            let ra = restrict_set(a.effect.protect.as_ref().unwrap());
-            let rb = restrict_set(b.effect.protect.as_ref().unwrap());
+            // `protect` holds only rules whose protect effect is set.
+            let (Some(pa), Some(pb)) = (a.effect.protect.as_ref(), b.effect.protect.as_ref())
+            else {
+                continue;
+            };
+            let ra = restrict_set(pa);
+            let rb = restrict_set(pb);
             if ra.is_disjoint(&rb) {
                 continue;
             }
-            let ba = &a.effect.protect.as_ref().unwrap().bypass;
-            let bb = &b.effect.protect.as_ref().unwrap().bypass;
+            let ba = &pa.bypass;
+            let bb = &pb.bypass;
             if ba.is_empty() || bb.is_empty() {
                 continue;
             }
-            let set_a: HashSet<&str> = ba.iter().map(|s| s.as_str()).collect();
-            let set_b: HashSet<&str> = bb.iter().map(|s| s.as_str()).collect();
+            let set_a: HashSet<&str> = ba.iter().map(String::as_str).collect();
+            let set_b: HashSet<&str> = bb.iter().map(String::as_str).collect();
             if set_a.is_disjoint(&set_b) {
                 return Err(format!(
                     "protect rules {:?} and {:?} overlap with disjoint bypass lists",
@@ -322,54 +327,64 @@ pub fn glob_match(pat: &str, text: &str) -> bool {
 }
 
 fn glob_bytes(pat: &[u8], text: &[u8]) -> bool {
-    let mut pi = 0;
-    let mut ti = 0;
-    while pi < pat.len() {
-        if pat[pi] == b'*' && pi + 1 < pat.len() && pat[pi + 1] == b'*' {
-            let mut rest = &pat[pi + 2..];
-            if rest.first() == Some(&b'/') {
-                rest = &rest[1..];
-            }
-            if rest.is_empty() {
-                return true;
-            }
-            let mut i = ti;
-            loop {
-                if glob_bytes(rest, &text[i..]) {
+    let mut pat = pat;
+    let mut text = text;
+    loop {
+        match pat {
+            [] => return text.is_empty(),
+            [b'*', b'*', rest @ ..] => {
+                let rest = rest.strip_prefix(b"/").unwrap_or(rest);
+                if rest.is_empty() {
                     return true;
                 }
-                if i >= text.len() {
+                let mut t = text;
+                loop {
+                    if glob_bytes(rest, t) {
+                        return true;
+                    }
+                    let Some((_, tail)) = t.split_first() else {
+                        return false;
+                    };
+                    t = tail;
+                }
+            }
+            [b'*', rest @ ..] => {
+                let mut t = text;
+                if glob_bytes(rest, t) {
+                    return true;
+                }
+                while let Some((&c, tail)) = t.split_first()
+                    && c != b'/'
+                {
+                    t = tail;
+                    if glob_bytes(rest, t) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            [b'?', rest @ ..] => {
+                let Some((&c, tail)) = text.split_first() else {
+                    return false;
+                };
+                if c == b'/' {
                     return false;
                 }
-                i += 1;
+                pat = rest;
+                text = tail;
             }
-        } else if pat[pi] == b'*' {
-            let rest = &pat[pi + 1..];
-            if glob_bytes(rest, &text[ti..]) {
-                return true;
-            }
-            while ti < text.len() && text[ti] != b'/' {
-                ti += 1;
-                if glob_bytes(rest, &text[ti..]) {
-                    return true;
+            [p, rest @ ..] => {
+                let Some((&c, tail)) = text.split_first() else {
+                    return false;
+                };
+                if c != *p {
+                    return false;
                 }
+                pat = rest;
+                text = tail;
             }
-            return false;
-        } else if pat[pi] == b'?' {
-            if ti >= text.len() || text[ti] == b'/' {
-                return false;
-            }
-            ti += 1;
-            pi += 1;
-        } else {
-            if ti >= text.len() || text[ti] != pat[pi] {
-                return false;
-            }
-            ti += 1;
-            pi += 1;
         }
     }
-    ti == text.len()
 }
 
 /// Inclusion OR, then minus any `^` exclusion. Empty inclusion list = match all.
@@ -434,9 +449,10 @@ fn actor_list_matches(
         if let Some(rest) = p.strip_prefix('^') {
             let mut seen = HashSet::new();
             // Unresolvable exclude still excludes: treat missing group as hit.
-            if rest.starts_with("group:") && !groups.contains_key(&rest[6..]) {
-                exc = true;
-            } else if principal_matches(rest, principal, groups, &mut seen) {
+            let missing_group = rest
+                .strip_prefix("group:")
+                .is_some_and(|g| !groups.contains_key(g));
+            if missing_group || principal_matches(rest, principal, groups, &mut seen) {
                 exc = true;
             }
         } else {
@@ -657,7 +673,7 @@ pub async fn http_get(
     route: &RepoRoute,
     headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
-    let _ = st.auth.require_read(headers).await.map_err(auth_err)?;
+    let _ = st.auth.require_read(headers).await.map_err(|e| auth_err(&e))?;
     ensure_repo(st, route).await?;
     let policy = load(&st.store, &route.id).await.map_err(store_err)?;
     let body = serde_json::to_vec_pretty(&policy)
@@ -679,7 +695,7 @@ pub async fn http_put(
     headers: &HeaderMap,
     body: axum::body::Body,
 ) -> Result<Response, ApiError> {
-    let _ = st.auth.require_admin(headers).await.map_err(auth_err)?;
+    let _ = st.auth.require_admin(headers).await.map_err(|e| auth_err(&e))?;
     ensure_repo(st, route).await?;
     let bytes = crate::collect_body(body).await?;
     let policy = parse_bytes(&bytes).map_err(store_err)?;
@@ -694,7 +710,7 @@ pub async fn http_delete(
     route: &RepoRoute,
     headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
-    let _ = st.auth.require_admin(headers).await.map_err(auth_err)?;
+    let _ = st.auth.require_admin(headers).await.map_err(|e| auth_err(&e))?;
     ensure_repo(st, route).await?;
     clear(&st.store, &route.id).await.map_err(store_err)?;
     Ok((StatusCode::NO_CONTENT, "").into_response())
@@ -710,7 +726,7 @@ async fn ensure_repo(st: &AppState, route: &RepoRoute) -> Result<(), ApiError> {
     })
 }
 
-fn auth_err(e: crate::auth::AuthError) -> ApiError {
+fn auth_err(e: &crate::auth::AuthError) -> ApiError {
     match e {
         crate::auth::AuthError::Invalid | crate::auth::AuthError::Unauthorized => {
             ApiError::Unauthorized

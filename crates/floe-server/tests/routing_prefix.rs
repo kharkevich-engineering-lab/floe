@@ -7,11 +7,19 @@
 //! * Non-repo survivors: `/api/v1` (discovery/me/owners), `/api-browser/v1/me`,
 //!   `/api-browser/v1/authenticate`, `/services/api/owners|instance`.
 //! * Clients must not emit the deleted lane-first repo forms.
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
-
-type TestResult = anyhow::Result<()>;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -81,7 +89,7 @@ fn route_literals(src: &str) -> Vec<(usize, String)> {
 }
 
 #[test]
-fn repo_scoped_routes_start_with_owner_repo() -> TestResult {
+fn repo_scoped_routes_start_with_owner_repo() {
     let files = [
         "crates/floe-server/src/lib.rs",
         "crates/floe-server/src/web/api.rs",
@@ -101,14 +109,13 @@ fn repo_scoped_routes_start_with_owner_repo() -> TestResult {
         "repo-scoped routes must start with /{{owner}}/{{repo}} (or be on the D26 allow-list):\n{}",
         bad.join("\n")
     );
-    Ok(())
 }
 
 fn forbidden_client_hits(src: &str, rel: &str) -> Vec<String> {
     let mut hits = Vec::new();
     for (i, line) in src.lines().enumerate() {
         let t = line.trim();
-        if t.starts_with("//") || t.starts_with("*") || t.starts_with("/*") {
+        if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
             continue;
         }
         // Documentation of the alias in comments is fine; code that builds a URL is not.
@@ -130,7 +137,7 @@ fn forbidden_client_hits(src: &str, rel: &str) -> Vec<String> {
 }
 
 #[test]
-fn clients_emit_prefix_form() -> TestResult {
+fn clients_emit_prefix_form() {
     let mut hits = Vec::new();
     hits.extend(forbidden_client_hits(
         &read("web/src/api.ts"),
@@ -155,12 +162,9 @@ fn clients_emit_prefix_form() -> TestResult {
         "UI/SDK/setup must not emit lane-first repo URLs (/api/v1/repos, /api-browser/v1/repos, /services/api/{{o}}/{{r}}):\n{}",
         hits.join("\n")
     );
-    Ok(())
 }
 
 fn walk_ts(dir: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let base = root().join(dir);
     fn rec(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
         let Ok(rd) = fs::read_dir(dir) else { return };
         for e in rd.flatten() {
@@ -169,10 +173,7 @@ fn walk_ts(dir: &str) -> Vec<(String, String)> {
                 rec(&p, root, out);
                 continue;
             }
-            let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if !(name.ends_with(".ts") || name.ends_with(".tsx")) {
+            if !matches!(p.extension().and_then(|x| x.to_str()), Some("ts" | "tsx")) {
                 continue;
             }
             let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
@@ -181,6 +182,8 @@ fn walk_ts(dir: &str) -> Vec<(String, String)> {
             }
         }
     }
+    let mut out = Vec::new();
+    let base = root().join(dir);
     rec(&base, &root(), &mut out);
     out
 }

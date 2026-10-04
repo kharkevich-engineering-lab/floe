@@ -1,3 +1,13 @@
+// Integration tests fail by panicking; clippy.toml's allow-*-in-tests only reaches #[test] fns,
+// not the helpers around them, so the panic-path lints are lifted for the whole test crate.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "test code: a panic is how a test fails"
+)]
 mod common;
 
 use std::process::Command;
@@ -53,6 +63,10 @@ fn set_main(repo: &LocalRepo, old: &str, oid: &str) {
 /// on a sibling, extended incrementally by a second pack, verified by git and
 /// used by rev-list without the base pack's data.
 #[tokio::test]
+#[allow(
+    clippy::many_single_char_names,
+    reason = "a/c are commits, p/i/g the pack/idx/graph paths"
+)]
 async fn base_layer_roundtrip_and_incremental_update() {
     let root = tempfile::TempDir::new().unwrap();
     let id = RepoId::new("acme", "cg").unwrap();

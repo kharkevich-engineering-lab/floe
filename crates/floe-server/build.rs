@@ -10,8 +10,13 @@ use std::path::Path;
 const PLACEHOLDER: &str = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>floe</title></head>\n\
 <body><p>floe web UI is not built in this binary. Run <code>just web-build</code> (vite via pnpm) and rebuild.</p></body></html>\n";
 
+#[allow(clippy::expect_used, reason = "a build script reports failure by panicking")]
 fn main() {
-    println!("cargo:rustc-env=FLOE_BUILD_SHA={}", build_sha());
+    let sha = build_sha();
+    let version = release_version();
+    println!("cargo:rustc-env=FLOE_BUILD_SHA={sha}");
+    println!("cargo:rustc-env=FLOE_VERSION={version}");
+    println!("cargo:rustc-env=FLOE_VERSION_LINE={version} ({sha})");
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let dist = manifest.join("../../web/dist");
     println!("cargo:rerun-if-changed={}", dist.display());
@@ -23,6 +28,19 @@ fn main() {
             "cargo:warning=web/dist was missing; wrote a placeholder index.html (run `just web-build` for the real UI)"
         );
     }
+}
+
+/// Release version for `floe --version`. The release workflow passes the version
+/// semantic-release is about to tag as `FLOE_VERSION` (no release ever rewrites
+/// Cargo.toml); any other build reports the crate's placeholder version. floe-git's
+/// build.rs repeats this so the git `agent=` advert agrees.
+fn release_version() -> String {
+    println!("cargo:rerun-if-env-changed=FLOE_VERSION");
+    std::env::var("FLOE_VERSION")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
 
 /// Build identity for `/healthz` (`version`) and `floe --version`: the commit

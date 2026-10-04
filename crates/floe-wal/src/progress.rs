@@ -44,6 +44,10 @@ impl Progress {
         total: Option<u64>,
         unit: &'static str,
     ) -> Self {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "display percentage; precision loss above 2^52 is irrelevant"
+        )]
         let percent = total
             .filter(|t| *t > 0)
             .map(|t| ((done as f64 / t as f64) * 1000.0).round() / 10.0);
@@ -140,13 +144,12 @@ impl Throttle {
     }
     /// True when an update should be emitted now.
     pub fn tick(&self, force: bool) -> bool {
-        let mut last = self.last.lock().unwrap();
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = std::time::Instant::now();
-        if force
-            || last
-                .map(|t| now.duration_since(t) >= self.min_interval)
-                .unwrap_or(true)
-        {
+        if force || last.is_none_or(|t| now.duration_since(t) >= self.min_interval) {
             *last = Some(now);
             true
         } else {

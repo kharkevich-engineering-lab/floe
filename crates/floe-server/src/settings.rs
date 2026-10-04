@@ -19,6 +19,10 @@ use serde_json::json;
 use crate::error::ApiError;
 use crate::{AppState, RepoRoute};
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used directly as a `map_err` callback"
+)]
 fn auth_err(e: crate::auth::AuthError) -> ApiError {
     match e {
         crate::auth::AuthError::Invalid | crate::auth::AuthError::Unauthorized => {
@@ -179,11 +183,13 @@ fn percent_decode(v: &str) -> String {
     let mut out = Vec::with_capacity(v.len());
     let b = v.as_bytes();
     let mut i = 0;
-    while i < b.len() {
-        match b[i] {
+    while let Some(&c) = b.get(i) {
+        match c {
             b'+' => out.push(b' '),
             b'%' if i + 2 < b.len() => {
-                if let Ok(n) = u8::from_str_radix(&v[i + 1..i + 3], 16) {
+                if let Some(hex) = v.get(i + 1..i + 3)
+                    && let Ok(n) = u8::from_str_radix(hex, 16)
+                {
                     out.push(n);
                     i += 3;
                     continue;
@@ -351,15 +357,12 @@ fn human_schedule(expr: &str) -> String {
         _ => {}
     }
     let f: Vec<&str> = expr.split_whitespace().collect();
-    if f.len() != 6 {
+    let &[sec, min, hour, dom, mon, dow] = f.as_slice() else {
         return expr.to_string();
-    }
-    let (sec, min, hour, dom, mon, dow) = (f[0], f[1], f[2], f[3], f[4], f[5]);
+    };
     let hm = match (hour.parse::<u32>(), min.parse::<u32>()) {
         (Ok(h), Ok(m)) => format!("at {h:02}:{m:02} UTC"),
-        _ if hour == "*" && min.parse::<u32>().is_ok() => {
-            format!("every hour at :{:02} UTC", min.parse::<u32>().unwrap())
-        }
+        (_, Ok(m)) if hour == "*" => format!("every hour at :{m:02} UTC"),
         _ => format!("at {hour}:{min}"),
     };
     let day = if dow != "*" && dow != "?" {
@@ -403,14 +406,16 @@ pub async fn http_validate(
         Ok(eff) => {
             let preview = floe_proto::v1::RepoSettings {
                 toml: text.to_string(),
-                revision: h.settings().map(|s| s.revision + 1).unwrap_or(1),
+                revision: h.settings().map_or(1, |s| s.revision + 1),
                 author: "(preview)".into(),
                 updated_at: None,
                 message: String::new(),
             };
             let mut d = describe_json(st, &h, &eff, Some(&preview))?;
-            d["ok"] = json!(true);
-            d["errors"] = json!([]);
+            if let Some(obj) = d.as_object_mut() {
+                obj.insert("ok".into(), json!(true));
+                obj.insert("errors".into(), json!([]));
+            }
             d
         }
         Err(e) => json!({"ok": false, "errors": [format!("{e:#}")]}),
@@ -467,7 +472,7 @@ pub async fn http_policy_dry_run(
         .unwrap_or(20)
         .clamp(1, 200);
     let bytes = crate::collect_body(body).await?;
-    let policy = if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+    let policy = if bytes.iter().all(u8::is_ascii_whitespace) {
         crate::policy::load(&st.store, &route.id)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?
@@ -489,7 +494,9 @@ pub async fn http_policy_dry_run(
     let mut results = Vec::new();
     let (mut allowed_n, mut denied_n) = (0usize, 0usize);
     for e in pushes {
-        let txn = e.txn.clone().unwrap();
+        let Some(txn) = e.txn.clone() else {
+            continue;
+        };
         let principal = e
             .meta
             .get("principal")
