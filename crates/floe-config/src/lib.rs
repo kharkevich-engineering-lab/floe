@@ -13,6 +13,12 @@ pub mod secret;
 pub use runtime::RuntimeConfig;
 pub use secret::Secret;
 
+mod codeintel;
+pub use codeintel::{
+    ACCESS_READ_DEFAULT, AccessConfig, BuildFeatures, CODEINTEL_REPO_KEYS, CodeIntelCatalogConfig,
+    CodeIntelConfig, EmbedConfig, EmbedProvider, McpConfig, QueryLog,
+};
+
 use anyhow::{Context, Result};
 pub use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
@@ -48,6 +54,13 @@ pub struct Config {
     pub catalog: CatalogConfig,
     /// D60: where the runtime config document lives.
     pub config_store: ConfigStoreConfig,
+    /// Code intelligence (D52, `docs/design/code-intelligence.md`): host switch and indexer
+    /// knobs; a subset is per-repository (D24 extension).
+    pub codeintel: CodeIntelConfig,
+    /// The MCP endpoints `/api/v1/mcp` and `/{owner}/{repo}/mcp` (D55).
+    pub mcp: McpConfig,
+    /// Per-repository read authorization (D54); host default, overridable per repository.
+    pub access: AccessConfig,
 }
 
 /// `[config_store]` (D60, `docs/design/admin-ui.md` §1.4): where the versioned
@@ -1292,7 +1305,29 @@ fn default_true() -> bool {
 }
 
 /// D24: the top-level sections a repository's settings may override.
-pub const SETTINGS_SECTIONS: &[&str] = &["bundles", "maintenance", "compaction", "upstream"];
+/// `[codeintel]` is limited to [`CODEINTEL_REPO_KEYS`] and `[access]` is D54's.
+pub const SETTINGS_SECTIONS: &[&str] = &[
+    "bundles",
+    "maintenance",
+    "compaction",
+    "upstream",
+    "codeintel",
+    "access",
+];
+/// D24: shape a serialized (effective) config the way a repository's settings see it: only
+/// [`SETTINGS_SECTIONS`], never `upstream.token_env` (host-only), and `[codeintel]` limited to
+/// [`CODEINTEL_REPO_KEYS`] with the repository switch shown as `enabled`.
+pub fn repo_settings_view(doc: &mut toml::Table) {
+    doc.retain(|k, _| SETTINGS_SECTIONS.contains(&k));
+    if let Some(toml::Value::Table(u)) = doc.get_mut("upstream") {
+        u.remove("token_env");
+        u.remove("token_env_by_host");
+    }
+    if let Some(toml::Value::Table(c)) = doc.get_mut("codeintel") {
+        codeintel::repo_codeintel_view(c);
+    }
+}
+
 /// The settings document's one section that is not configuration: `[repo]`,
 /// the repository's own metadata ([`RepoMeta`]). Never merged into a [`Config`].
 pub const REPO_META_SECTION: &str = "repo";
@@ -1384,6 +1419,12 @@ impl Config {
                 );
             }
         }
+        if let Some(c) = overrides.get_mut("codeintel") {
+            let section = c
+                .as_table_mut()
+                .context("settings: [codeintel] must be a table")?;
+            codeintel::repo_codeintel_overrides(section)?;
+        }
         let mut doc: toml::Table = toml::Table::try_from(self).context("serializing config")?;
         merge(&mut doc, &overrides);
         let mut cfg: Config = doc.try_into().context("settings: applying")?;
@@ -1400,11 +1441,7 @@ impl Config {
     /// never `upstream.token_env` / `token_env_by_host` (those names are host-only).
     pub fn public_settings_toml(&self) -> Result<String> {
         let mut doc: toml::Table = toml::Table::try_from(self).context("serializing config")?;
-        doc.retain(|k, _| SETTINGS_SECTIONS.contains(&k));
-        if let Some(toml::Value::Table(u)) = doc.get_mut("upstream") {
-            u.remove("token_env");
-            u.remove("token_env_by_host");
-        }
+        repo_settings_view(&mut doc);
         toml::to_string_pretty(&doc).context("encoding settings")
     }
 
@@ -2255,6 +2292,7 @@ impl Config {
         if self.github_mirror.enabled {
             self.github_mirror.check()?;
         }
+        self.validate_codeintel()?;
         Ok(())
     }
 

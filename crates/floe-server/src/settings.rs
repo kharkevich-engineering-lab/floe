@@ -306,10 +306,13 @@ fn describe_json(
         .collect();
     // Sources: every key of the settings sections; a key is "setting" when the
     // repo document sets it (rev/author), else "host" (floe.toml ⊕ env).
-    let host_doc: toml::Table =
+    let mut host_doc: toml::Table =
         toml::Table::try_from(&*st.cfg).map_err(|e| ApiError::Internal(e.to_string()))?;
-    let eff_doc: toml::Table =
+    let mut eff_doc: toml::Table =
         toml::Table::try_from(effective).map_err(|e| ApiError::Internal(e.to_string()))?;
+    // Only what a repository's settings may set (host-only codeintel keys stay hidden).
+    floe_config::repo_settings_view(&mut host_doc);
+    floe_config::repo_settings_view(&mut eff_doc);
     let set_doc: toml::Table = settings
         .map(|s| s.toml.parse::<toml::Table>().unwrap_or_default())
         .unwrap_or_default();

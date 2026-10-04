@@ -340,14 +340,21 @@ allowed_env = ["FLOE_SECRET_*", "FLOE_GITHUB_TOKEN", "FLOE_WEBHOOK_SECRET", "FLO
                                   # env vars the config document may name ({ env = … } and *_env keys): exact or prefix*;
                                   # key_env, FLOE__*, AWS_* and the store/auth variables only when listed exactly
 
+[access]                          # D54 — who may read a repository (host default; per repository via settings).
+                                  # Entries: authenticated, public, group:<name>, domain:<domain>, email:<address>,
+                                  # or a principal. Until policy::authorize_read ships (M5) only the default is
+                                  # accepted, so no rule is silently ignored.
+read = ["authenticated"]
+
 # ---------------------------------------------------------------------------------------------------------------
-# Runtime configuration (D60): NOT in this file. [github_mirror], [catalog] and [events] are one versioned
-# document in the config store, edited in the admin GUI (https://<host>/_admin) or with
+# Runtime configuration (D60): NOT in this file. [github_mirror], [catalog], [events], [codeintel] and [mcp] are
+# one versioned document in the config store, edited in the admin GUI (https://<host>/_admin) or with
 #   floe config show | set FILE | validate FILE | history | rollback N | import OLD_FLOE_TOML
-# The file refuses these sections and FLOE__GITHUB_MIRROR__* / __CATALOG__* / __EVENTS__* are ignored.
+# The file refuses these sections and FLOE__GITHUB_MIRROR__* / __CATALOG__* / __EVENTS__* / __CODEINTEL__* / __MCP__*
+# are ignored.
 # Below: the document's keys and defaults, in the TOML form `floe config set` takes (schema:
-# GET /api/v1/admin/config/schema). Changes to [github_mirror] apply live; [catalog], [events] and
-# github_mirror.git_url need a restart (the overview says which instances).
+# GET /api/v1/admin/config/schema). Changes to [github_mirror] apply live; [catalog], [events], [codeintel], [mcp]
+# and github_mirror.git_url need a restart (the overview says which instances).
 # ---------------------------------------------------------------------------------------------------------------
 # [events]                          # docs/EVENTS.md — read only by the bridge (roles ∋ "events"); never gates a push
 ## webhook_url = "https://hooks.example.com/floe"   # each batch of ref events is POSTed as a JSON array
@@ -413,3 +420,66 @@ allowed_env = ["FLOE_SECRET_*", "FLOE_GITHUB_TOKEN", "FLOE_WEBHOOK_SECRET", "FLO
 # commit_timeout = "60s"
 # backfill = false                  # a repository older than the catalog: false = start at head, true = full history
 # create_tables = true
+#
+# [codeintel]                       # docs/design/code-intelligence.md (D52–D58) — agent code navigation and search.
+#                                   # Needs a binary built with --features codeintel (a fatal config error otherwise);
+#                                   # every change needs a restart. The MCP HMAC key is a bootstrap key:
+#                                   # [server.auth] mcp_handle_secret.
+#                                   # Per repository (settings, D24) only enabled, refs, semantic, embed_remote,
+#                                   # max_file_bytes and exclude may be set; the rest is host-only.
+# enabled = false                   # this host does code intelligence (indexes what it maintains, serves what it serves)
+# default_enabled = true            # a repository is indexed unless its settings say [codeintel] enabled = false
+# refs = ["HEAD"]                   # ref patterns whose tips are indexed; refs/archive/* and refs/follow/* never are
+# max_refs = 8                      # tracked refs per repository
+# semantic = true                   # embed chunks (needs [codeintel.embed] provider != "none")
+# embed_remote = false              # allow a remote (http) embedder for this repository's chunks (privacy gate, §6.5)
+# max_file_bytes = "1MiB"           # larger files are not indexed (read/grep through git only)
+# exclude = ["**/vendor/**", "**/node_modules/**", "**/*.min.js", "**/*_pb2.py", "**/*.pb.go"]
+#                                   # plus .gitattributes linguist-vendored / linguist-generated
+# part_max_bytes = "512MiB"         # monorepo base shards are cut into path-range parts of at most this much content
+# delta_max_files = 5000            # a delta above this many files (or delta_max_ratio of the base) becomes a new base
+# delta_max_ratio = 0.10
+# cache_bytes = "4GiB"              # local shard cache, counted inside cache.max_bytes
+# sync_fetch_max_bytes = "64MiB"    # larger cold artifacts answer `warming` and hydrate in the background
+# query_threads = 0                 # 0 = num_cpus/2, min 2
+# head_ttl = "1s"                   # a cached head.pb older than this is revalidated before use
+# retention = "7d"                  # >= mcp.snapshot_ttl + 1h (validated); GC keeps retired generations this long
+# recent_max = 64                   # retired generations reachable by rev = <full sha>
+# catalog_retry_max = "5m"          # backoff cap of the catalog phase while the catalog is down
+# reindex_queue_timeout = "1h"      # a queued reindex never admitted by a maintainer pass is failed
+# require_catalog = true            # false = standalone: shards from git only, embeddings not durable (warns).
+#                                   # This build has no Iceberg catalog yet, so codeintel.enabled needs false here.
+# index_private_mirrors = false     # keep private mirrors out until per-repo [access] rules exist for them (D54)
+# known_blobs_max_bytes = "256MiB"  # maintainer's known-blobs set; past this it is loaded per bucket
+# prewarm = []                      # repo patterns whose artifacts are fetched at startup
+# adhoc_max_files = 200             # ad-hoc overlay for an unindexed commit covers at most this many changed files
+#
+# [codeintel.embed]
+# provider = "none"                 # none | local (--features embed-local) | http (--features embed-http)
+# model = "jina-v2-base-code"
+# model_object = ""                 # codeintel/models/<sha256>/ (required for local; nothing is downloaded at runtime)
+# http_url = ""                     # OpenAI-compatible /v1/embeddings (required for http)
+# http_model = ""
+# api_key_env = ""                  # NAME of the env var holding the API key (D43 style), never the key
+# batch = 32
+# max_rps = 20
+#
+# [codeintel.catalog]               # where the code.* Iceberg tables live (connection shared with the catalog)
+# table_bucket = "floe-code"
+# namespace = "code"
+# flush_interval = "30s"
+# flush_rows = 50000
+#
+# [mcp]                             # D55 — stateless MCP 2026-07-28 at /api/v1/mcp and /{owner}/{repo}/mcp (fixed).
+#                                   # Needs --features mcp and codeintel.enabled.
+# enabled = false
+# allowed_origins = []              # default [server.public_url]; never empty in oidc/token mode (validated)
+# allowed_hosts = []                # default: the host of server.public_url
+# audiences = []                    # default ["<public_url>/api/v1/mcp"]
+# scopes = ["floe.code.read", "floe.code.admin"]
+# snapshot_ttl = "24h"              # lifetime of a snapshot handle (D57)
+# min_handle_ttl = "10m"            # pin refuses a retired generation with less lifetime left
+# semantic_deadline_ms = 40
+# max_concurrent_per_principal = 8
+# query_log = "sampled"             # off | sampled | all
+# query_log_text = false
