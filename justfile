@@ -150,16 +150,24 @@ store-test-s3:
     cargo test -p floe-store --test contract -- --nocapture
 
 # Catalog (D50): the Iceberg writer against a live REST catalog, #[ignore]d tests only.
-# Needs `podman compose --profile catalog up -d`; FLOE_TEST_CATALOG_URI picks the endpoint
-# (default: the iceberg-rest fixture; RustFS S3 Tables needs SigV4, R6). Not part of `just ci`
-# (it needs a running catalog); `test-catalog-lib` + `clippy-catalog` are.
+# Needs `podman compose --profile catalog up -d`. Default: RustFS S3 Tables (table bucket
+# floe-catalog) with SigV4 (D63); FLOE_TEST_CATALOG_URI/_WAREHOUSE/_AUTH override the endpoint.
+# Not part of `just ci` (it needs a running catalog); `test-catalog-lib` + `clippy-catalog` are.
 test-catalog:
-    FLOE_TEST_CATALOG_URI="${FLOE_TEST_CATALOG_URI:-http://127.0.0.1:8181}" \
-    FLOE_TEST_CATALOG_WAREHOUSE="${FLOE_TEST_CATALOG_WAREHOUSE:-s3://floe-test/warehouse}" \
+    FLOE_TEST_CATALOG_URI="${FLOE_TEST_CATALOG_URI:-http://127.0.0.1:9000/iceberg}" \
+    FLOE_TEST_CATALOG_WAREHOUSE="${FLOE_TEST_CATALOG_WAREHOUSE:-floe-catalog}" \
+    FLOE_TEST_CATALOG_AUTH="${FLOE_TEST_CATALOG_AUTH:-sigv4}" \
     FLOE_TEST_CATALOG_S3_ENDPOINT=http://127.0.0.1:9000 \
     AWS_ACCESS_KEY_ID=floe-dev \
     AWS_SECRET_ACCESS_KEY=floe-dev-secret \
     cargo test -p floe-catalog --features iceberg --test live_catalog -- --ignored --nocapture
+
+# The same suite against the compose fallback (apache/iceberg-rest-fixture, no auth).
+test-catalog-fixture:
+    FLOE_TEST_CATALOG_URI=http://127.0.0.1:8181 \
+    FLOE_TEST_CATALOG_WAREHOUSE=s3://floe-test/warehouse \
+    FLOE_TEST_CATALOG_AUTH=none \
+    just test-catalog
 
 # Clippy over the catalog feature build (arrow/parquet/iceberg; slow, so its own recipe and its own
 # CI job rather than part of `just clippy`). Part of `just ci`.
