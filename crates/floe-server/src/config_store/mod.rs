@@ -769,19 +769,11 @@ async fn resolve_history(mode: HistoryMode, store: &DynStore) -> Result<HistoryM
 pub fn redact(stored: &Value) -> Value {
     let mut out = stored.clone();
     for path in SECRET_PATHS {
-        let mut cur = &mut out;
-        let mut ok = true;
-        for part in path.split('.') {
-            match cur.get_mut(part) {
-                Some(next) => cur = next,
-                None => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if ok && (cur.get("sealed").is_some() || cur.get("value").is_some()) {
-            *cur = serde_json::json!({"redacted": true});
+        let pointer = format!("/{}", path.replace('.', "/"));
+        if let Some(v) = out.pointer_mut(&pointer)
+            && (v.get("sealed").is_some() || v.get("value").is_some())
+        {
+            *v = serde_json::json!({"redacted": true});
         }
     }
     out
