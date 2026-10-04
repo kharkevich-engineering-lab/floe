@@ -139,10 +139,10 @@ pub fn info(cfg: &floe_config::Config) -> InstanceInfo {
     let version = match option_env!("FLOE_BUILD_SHA") {
         Some(sha) if !sha.is_empty() => format!(
             "{}+{}",
-            env!("CARGO_PKG_VERSION"),
+            env!("FLOE_VERSION"),
             &sha[..sha.len().min(12)]
         ),
-        _ => env!("CARGO_PKG_VERSION").to_string(),
+        _ => env!("FLOE_VERSION").to_string(),
     };
     let roles = if cfg.server.roles.is_empty() {
         vec!["all".to_string()]

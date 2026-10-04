@@ -20,8 +20,18 @@ env:
 
 jobs:
   build-test:
-    name: warnings + test
-    runs-on: ubuntu-latest
+    name: warnings + test (${{ matrix.arch }})
+    # Native on both architectures floe ships for (see release.yml): one runner per arch,
+    # never qemu. fail-fast off: a failure on one arch and not the other is the signal.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
@@ -31,12 +41,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       # No toolchain version here on purpose: rust-toolchain.toml pins it (and its components).
-      # `rustup show` installs exactly that, so the pin has one home.
+      # `rustup show` installs exactly that, so the pin has one home. The arm64 runner image
+      # may lack rustup, so bootstrap it (no default toolchain) when it is missing.
       - name: Install the pinned Rust toolchain
-        run: rustup show && cargo --version && git --version
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show && cargo --version && git --version
       - uses: Swatinem/rust-cache@v2
         with:
-          key: scoped-tests-v1
+          # Per arch: an x86_64 target/ restored onto arm64 is gigabytes of useless download.
+          key: scoped-tests-v1-${{ matrix.arch }}
           cache-on-failure: true
       - uses: taiki-e/install-action@v2
         with:
@@ -69,17 +87,34 @@ jobs:
       - run: just clippy
 
   e2e:
-    name: Git and editor contracts
-    runs-on: ubuntu-latest
+    name: Git and editor contracts (${{ matrix.arch }})
+    # Native on both architectures floe ships for (see release.yml): one runner per arch,
+    # never qemu. fail-fast off: a failure on one arch and not the other is the signal.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Install the pinned Rust toolchain
-        run: rustup show && cargo --version && git --version
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show && cargo --version && git --version
       - uses: Swatinem/rust-cache@v2
         with:
+          key: contracts-v1-${{ matrix.arch }}
           cache-on-failure: true
       - uses: taiki-e/install-action@v2
         with:
@@ -108,7 +143,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: contract-test-logs
+          name: contract-test-logs-${{ matrix.arch }}
           path: '*-contracts.log'
           retention-days: 14
 

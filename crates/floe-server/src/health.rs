@@ -14,6 +14,10 @@ use crate::AppState;
 /// Exposed by both health endpoints so operators can verify the running artifact.
 pub const BUILD_SHA: &str = env!("FLOE_BUILD_SHA");
 
+/// `floe --version`: the release version (`FLOE_VERSION` at build time, else the crate
+/// version) followed by the commit, e.g. `1.4.0 (0123456789ab)`.
+pub const VERSION: &str = env!("FLOE_VERSION_LINE");
+
 pub async fn healthz() -> Json<serde_json::Value> {
     Json(json!({"status": "ok", "version": BUILD_SHA}))
 }

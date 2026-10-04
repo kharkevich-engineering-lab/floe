@@ -142,7 +142,7 @@ async fn v2_capability_advert(
     handle: &Arc<floe_wal::RepoHandle>,
     buf: &mut Vec<u8>,
 ) -> Result<(), ApiError> {
-    let ver = env!("CARGO_PKG_VERSION");
+    let ver = env!("FLOE_VERSION");
     pktline::encode_text(buf, "version 2\n");
     pktline::encode_text(buf, &format!("agent=floe/{ver}\n"));
     pktline::encode_text(buf, "ls-refs=unborn\n");

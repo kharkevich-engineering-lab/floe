@@ -34,7 +34,7 @@ use floe_server::telemetry::tracing_init;
 #[derive(Parser)]
 #[command(
     name = "floe",
-    version = floe_server::health::BUILD_SHA,
+    version = floe_server::health::VERSION,
     about = "Git at any scale, on object storage, in Rust"
 )]
 struct Cli {
@@ -54,7 +54,7 @@ struct Cli {
 
 /// `floe-server`: the server and nothing else.
 #[derive(Parser)]
-#[command(name = "floe-server", version = floe_server::health::BUILD_SHA, about = "floe, standalone: git at any scale on an object-storage bucket")]
+#[command(name = "floe-server", version = floe_server::health::VERSION, about = "floe, standalone: git at any scale on an object-storage bucket")]
 struct ServerCli {
     /// Path to the configuration file.
     #[arg(
