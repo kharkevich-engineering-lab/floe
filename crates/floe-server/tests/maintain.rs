@@ -827,6 +827,14 @@ async fn one_pass_settles_all_closed_empty_slots() -> anyhow::Result<()> {
     // Publish the first state 31 hours in the past so that 30 closed hourly slots exist.
     let id = floe_git::RepoId::new("o", "r")?;
     let h = step!("open", server.state.registry.open(&id))?;
+    // The newest hourly slot stays `Pending` for SLOT_CLOSE_GRACE after every full hour, so a run
+    // that captures `now` inside that window plans one missing slot instead of INCREMENTALS_KEPT
+    // (CI at hh:01:26, 2026-10-04). Wait the window out: at most the grace, on a few % of runs.
+    let into_hour = floe_bundle::slots::epoch(std::time::SystemTime::now()) % 3600;
+    let settle = floe_bundle::slots::SLOT_CLOSE_GRACE.as_secs() + 5;
+    if into_hour < settle {
+        tokio::time::sleep(std::time::Duration::from_secs(settle - into_hour)).await;
+    }
     let now = std::time::SystemTime::now();
     let c1 = git_in(src.path(), &["rev-parse", "HEAD"])?
         .trim()
