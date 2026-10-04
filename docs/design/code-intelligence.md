@@ -238,7 +238,14 @@ other languages are still indexed for grep, read and line-window chunks (`lang =
 | `codeintel/models/<sha256>/{model.onnx,tokenizer.json}` | immutable | pinned model weights; no Hugging Face download at runtime |
 | `codeintel/leases/{dir,gc}.pb` | CAS lease | singleton units |
 
-Artifact keys are at the bucket root, not per repo, so identical shards dedupe and GC walks one prefix.
+Artifact keys are at the bucket root, not per repo, so identical shards dedupe and GC walks one prefix. The key
+is normally `<sha256>.<ext>`, but readers only ever use `ArtifactRef.key` (cache files are named by `sha256`).
+**Reuse rule:** a PUT that meets 412 reuses the existing object only if its `LastModified` (one HEAD) is younger
+than `codeintel.retention − 1 d`; GC never deletes anything younger than `retention`, so the reused object
+survives far past the head CAS that names it. Otherwise (a revert, a purge → clear, or an identical mirror
+re-producing content that sat unreferenced for days, so GC may be about to delete it) the writer PUTs the same
+bytes under `<sha256>~<generation>.<ext>` (If-None-Match) and names that key. No touch, no rewrite of an
+immutable object, no coordination with GC.
 
 ### 3.2 Visibility rule
 
@@ -270,9 +277,10 @@ repo idle for weeks still has 24 h handles on its last generation the moment it 
   from a crashed attempt can only lengthen retention.
 - A record is **live** iff `head.pb.refs` names it, or its `purge_epoch = head.pb.purge_epoch` and
   `retired_at(g) + max(snapshot_ttl + 1 h, codeintel.retention) > now`.
-- Every handle is minted with `exp ≤ min(now, retired_at) + snapshot_ttl` (`pin` of a retired generation clamps
-  `exp`, §7.4), so a live record outlives every handle that can name it by ≥ 1 h. No write happens on the read
-  path to make this true.
+- Every handle is minted with `exp ≤ now + snapshot_ttl` and, for a retired generation, `exp ≤ retired_at +
+  live_window − 1 h`, where `live_window = max(snapshot_ttl + 1 h, codeintel.retention)` is the same window as
+  the rule above (§7.4), so a live record outlives every handle that can name it by ≥ 1 h. No write happens on the
+  read path to make this true.
 
 Live artifacts: those named by a live record or by `head.pb`, any non-expired task, and the current and previous
 `dir/head.pb`. Delete non-live records, then `shards/*`, `vec/*`, `dir/*` named by nothing live, each only once its
@@ -295,12 +303,13 @@ wait for handles (§5.8). History stays in `code.commits_indexed`, so an expired
 - **Field ids are fixed and append-only.** Schema evolution only adds optional columns; every table carries
   property `floe.schema-rev`; `floe codeintel sql check` fails if the live schema is not a superset of
   `TableDef`.
-- **Keys.** `blob_sha` and `commit_sha` are lowercase hex `string` (40 or 64 chars; joins with
-  `floe.ref_events`; the 16-char bound truncation is enough to prune). `chunk_hash` is `fixed[32]`.
-  Blob-intrinsic rows are keyed by **`(blob_sha, extractor)`**; `extractor` encodes per-language grammar and
-  `tags.scm` versions **and the chunker version** (chunks are cut over the definition tree, so they are an
-  extractor output), so bumping one language re-extracts only that language and a chunker bump re-chunks
-  everything once. Every blob-keyed table, `chunks` included, carries `extractor`.
+- **Keys.** `blob_sha` and `commit_sha` are lowercase hex `string` (40 or 64 chars; joins with `floe.ref_events`;
+  the 16-char bound truncation is enough to prune). `chunk_hash` is `fixed[32]`. Blob-intrinsic rows are keyed by
+  **`(blob_sha, extractor)`**; `extractor` encodes per-language grammar and `tags.scm` versions **and the chunker
+  version** (chunks are cut over the definition tree, so they are an extractor output), so bumping one language
+  re-extracts only that language and a chunker bump re-chunks everything once. The per-blob `extractor` is the
+  language's string; a shard records one per language (`ShardMeta.extractors`), and reuse (step 4(a)) compares per
+  file, so this holds in standalone mode too. Every blob-keyed table, `chunks` included, carries `extractor`.
 - **`batch_id`** (uuid string) on every content row. The canonical batch for a blob is the one named by its
   earliest `code.blobs` row; rows from other batches are dead weight (crash windows, racing indexers).
 - **Writer.** Batches sorted by the sort order before writing (writers do not apply it). `WriterProperties` set
@@ -468,11 +477,12 @@ CREATE VIEW code.v_chunks  AS SELECT c.* FROM code.chunks  c JOIN code.v_blobs b
 CREATE VIEW code.v_commits AS
   SELECT i.* FROM code.commits_indexed i
   WHERE NOT EXISTS (SELECT 1 FROM code.purges p WHERE p.repo = i.repo AND p.epoch > i.purge_epoch);
--- latest indexed generation per (repo, real ref); generation is strictly increasing per repo, so no ties
--- except replayed duplicates of the same marker, which are identical
+-- latest indexed generation per (repo, real ref); (purge_epoch, generation) is strictly increasing per repo
+-- (a re-created repo restarts generations under a higher epoch), so ties are only identical replayed markers
 CREATE VIEW code.v_heads AS
   SELECT * EXCLUDE rn FROM (
-    SELECT *, row_number() OVER (PARTITION BY repo, ref_name ORDER BY generation DESC, indexed_at, instance) rn
+    SELECT *, row_number() OVER (PARTITION BY repo, ref_name
+                                 ORDER BY purge_epoch DESC, generation DESC, indexed_at, instance) rn
     FROM code.v_commits WHERE ref_name IS NOT NULL) WHERE rn = 1;
 -- index lag against floe-catalog's ref_events
 SELECT e.repo, max(e.committed_at) - max(i.indexed_at) AS lag
@@ -531,7 +541,8 @@ tip). `refs/archive/*` and `refs/follow/*` are never indexed. Mirrors created by
   `refs/follow/*`, at most `max_refs`);
 - for every ref in `tracked`: `refs[ref]` exists, `refs[ref].commit` is the tip, `refs[ref].extractor` is the
   current extractor, and every artifact it names is present and intact;
-- no `RefIndex` for a ref outside `tracked`, and `head.pb.requests` is empty;
+- no `RefIndex` for a ref outside `tracked`, and no lexical request (`delta | full | commit | repair`) in
+  `head.pb.requests` (`semantic` requests belong to the embed unit's desired state, §5.4);
 - with the catalog enabled: `(catalog_commit, catalog_extractor) == (commit, extractor)` for every ref (the catalog
   phase below); "`catalog_commit ≠ commit`" elsewhere in this document is shorthand for this pair.
 
@@ -549,7 +560,7 @@ item, which rebuilds the named layer identically (D22: missing ⇒ rebuilt).
 1.  head.pb (conditional GET, ETag-cached); manifest + ref snapshot at head_seq (already held)
 2.  work = diff(desired, head.pb), one item per ref with its reason:
       new_ref | tip_moved | extractor (RefIndex.extractor ≠ current) | repair (artifact missing/corrupt)
-      | request (head.pb.requests: delta | full | semantic → embed unit | commit → ad-hoc record)
+      | request (head.pb.requests: delta | full | repair | commit → ad-hoc record; semantic is not ours, §5.4)
       | drop (ref deleted or no longer tracked) | catalog (catalog mark ≠ (commit, extractor) → C1–C3)
     read_log_retained(indexed_seq, head_seq) only dates the pushes for lag_ms; no item depends on it
     work empty ⇒ no write (indexed_seq is lag reporting, never planning input, so nothing is re-scheduled)
@@ -560,7 +571,8 @@ item, which rebuilds the named layer identically (D22: missing ⇒ rebuilt).
       layering: no base OR |diff| > delta_max_files (5 000) OR delta bytes > 10 % of base
                 OR tombstones > 20 % of base files            ⇒ new BASE (parts) else DELTA (base_commit → tip)
 4.  per needed (blob, extractor), deduped within the batch, take facts from the first that has them:
-      a) previous shard of this repo at the same extractor (base/delta): copy per-file records     [no parse]
+      a) previous shard of this repo whose META.extractors[lang of the blob] equals the blob's current
+         per-language extractor (base/delta): copy per-file records                                [no parse]
       b) KnownBlobs ∋ (blob, extractor) ⇒ floe-ice scan_by_keys, canonical batch only (§4.11)     [no parse]
       c) extract: tree-sitter tags (200 ms/file timeout) → defs, refs, outline; cAST chunks
       (b fails, is slow (> 2 s per batch) or the catalog is disabled ⇒ c: deterministic, same rows)
@@ -585,9 +597,9 @@ C1. S = the ref's current generation (record from step 6 or head.pb); refresh Kn
     need = { (blob, extractor) of S's files (base parts ∪ delta, minus tombstones) } − KnownBlobs
     rows(need) = rows.rs over S's shard records (local on the maintainer: it built or holds them)
 C2. CodeWriter.append_durable: symbols, refs, chunks for need; artifacts rows for S's artifacts not yet
-    registered; then blobs for need; then commits_indexed for (repo, S.commit, S.extractor, S.generation) unless
-    a marker for (repo, S.commit, S.extractor) already exists (scan_by_keys on commits_indexed, pruned by
-    bucket(repo)); flush_hint(); wait for acks
+    registered; then blobs for need; then commits_indexed for (repo, ref, S.commit, S.extractor, S.generation,
+    purge_epoch) unless a marker for **(repo, purge_epoch, S.generation)** already exists (scan_by_keys on
+    commits_indexed, pruned by bucket(repo)); flush_hint(); wait for acks
 C3. CAS head.pb refs[ref].{catalog_commit, catalog_extractor} = (S.commit, S.extractor), iff the ref's current
     (commit, extractor) is still S's (a vector-only generation in between does not matter; a moved ref is
     re-planned by the next pass, and the rows just appended are reused through KnownBlobs)
@@ -604,7 +616,11 @@ C3. CAS head.pb refs[ref].{catalog_commit, catalog_extractor} = (S.commit, S.ext
   `catalog` stays in the work set with backoff (`codeintel.catalog_retry_max`, 5 min) so a dead catalog never
   spins the unit, and navigation is unaffected.
 - **No duplicates beyond the crash window.** A crash after C2 and before C3 re-plans C1 with a refreshed
-  KnownBlobs (`need` = ∅) and an existing marker, so the retry is just the CAS. A crash inside C2 leaves content
+  KnownBlobs (`need` = ∅) and an existing marker, so the retry is just the CAS. The marker's identity is the
+  generation within its purge epoch (a generation belongs to exactly one ref, commit and epoch), never the
+  (commit, extractor) pair: a ref that moves A → B → A gets a new marker for its second A generation, two tracked
+  refs at one commit get one marker each, and a cleared or re-created repo writes new markers under its new epoch
+  even where an older epoch indexed the same commit. A crash inside C2 leaves content
   rows without their `blobs` marker; the retry appends again and the views keep the canonical batch.
 - **Superseded tips.** If a ref moves several times while the catalog is down, the phase catches up on the
   current generation only; the intermediate generations were served and pinnable, but get no marker
@@ -646,8 +662,16 @@ awaits it. Targets: small repos push-ACK → delta visible p50 ≤ 3 s, p99 ≤ 
 
 ### 5.4 The `codeintel-embed` unit (lease `leases/codeintel-embed.pb`, rate-limited, may lag)
 
+Desired state: for every ref, a vector artifact for the **serving model** with `vec_commit = commit`; no
+`semantic` request in `head.pb.requests`; and, when the configured model differs from the serving one, a
+**candidate** artifact for the configured model that covers every *eligible* chunk (eligible = may be embedded by
+the configured provider under §6.5; withheld chunks never count, so coverage can always reach 100 %). Work set =
+the diff, as in §5.2:
+
 ```
-1. for each ref whose vec_commit ≠ commit, or whose model_id ≠ the configured default:
+1. for each ref with: vec_commit ≠ commit (serving model) | a semantic request (re-embed missing chunks and rebuild
+   the .fvec even if vec_commit = commit; the task record is updated as in §7.9) | configured model ≠ serving
+   model_id and the candidate is incomplete (spend only the budget left after the serving-model work)
 2.   chunks = CHUNKS section of the current snapshot's shards
 3.   missing = chunk_hashes ∉ KnownEmbeddings[model_id]  (same projection-scan set; 3 M hashes ≈ 100 MB)
 4.   gate: remote provider only for chunks passing the privacy gate (§6.5); others → local or skipped
@@ -656,8 +680,11 @@ awaits it. Targets: small repos push-ACK → delta visible p50 ≤ 3 s, p99 ≤ 
 7.   vectors for already-present chunks: previous .fvec of this repo, else scan_by_keys(code.embeddings)
 8.   build .fvec → PUT codeintel/vec/<sha>.fvec → PUT commits/<commit>/<g>.pb (g = next_generation; the ref's
      current lexical layers + the new vec; supersedes its generation) → CAS head.pb refs[ref].{generation, vec,
-     vec_commit, model_id}, next_generation   (412 on head.pb ⇒ reload; if the ref moved, re-key to its new
-     generation, the .fvec is reused)
+     vec_commit, model_id}, next_generation, requests −= served semantic requests   (412 on head.pb ⇒ reload;
+     if the ref moved, re-key to its new generation, the .fvec is reused)
+9. model switch: the candidate .fvec is published as `vec` (model_id = configured) in step 8 only once it covers
+   every eligible chunk of the current commit; until then the serving model's vec stays and keeps being refreshed.
+   After the flip the serving model is the configured one, so step 1 no longer selects the ref.
 ```
 
 A vector publish is a generation like any other, so `commits/<commit>/<generation>.pb` always names the vectors
@@ -726,7 +753,9 @@ never hides a repo name forever.
 
 `model_id = "<name>@<revision>/<dim>/<storage dtype>/<chunker>"`, e.g. `jina-v2-base-code@516f4ba/768/f16/cast1`.
 Any component change is a new namespace in `code.embeddings` and a new `.fvec`; namespaces never mix. A model
-switch serves the old namespace until the new one reaches 100 % coverage of a repo, then flips per repo.
+switch serves the old namespace until the new one covers 100 % of the repo's **eligible** chunks (those the new
+provider may embed under §6.5), then flips per ref (§5.4 step 9); withheld chunks are reported as coverage, never
+as a reason to wait forever.
 
 ### 6.2 Trait
 
@@ -780,11 +809,16 @@ jina-code-embeddings (CC-BY-NC) and nomic-embed-code 7B (GPU-only).
 
 ### 6.5 Privacy gate for remote embedders
 
-A chunk may be sent to a `Remote` embedder only if **every** repo whose indexed snapshots contain its blob has
-`embed_remote = true` and `[access] read` does not restrict it beyond the host's policy. The check uses the
-`commits_indexed.files` membership (or the directory's blob → repo map) and fails closed when membership is
-unknown. Chunks that fail use the local provider when configured, otherwise stay unembedded (reported as
-coverage < 100 %).
+The gate is decided **per source repo, from the repo being embedded, never from blob membership**: the embed
+unit sends a chunk to a `Remote` embedder only while embedding a ref of repo R with `embed_remote = true` whose
+`[access] read` does not restrict it beyond the host's policy, and only once the chunk is in R's published
+snapshot. The text sent (`header ‖ body`, header including the path) is then byte-for-byte content of R, which R's
+admin opted to send; an identical chunk in another repo F is not F's to withhold, because it is equally R's.
+Membership is deliberately not consulted: `commits_indexed.files` lags serving (D56) and misses tips superseded
+during a catalog outage, and an unindexed private repo has no membership at all, so any rule "every repo
+containing the blob" could not fail closed. A chunk embedded remotely on R's behalf is then reused for every repo
+(vectors leave nothing). Chunks of repos without `embed_remote` use the local provider when configured, otherwise
+stay unembedded (they are not *eligible*, §6.1, and are reported in coverage).
 
 ---
 
@@ -884,19 +918,26 @@ floe adds:
 ### 7.4 Explicit handle: the snapshot (D57)
 
 `snap_` + base64url(`SnapshotClaims {v:1, repo, commit, generation (u64), epoch (purge epoch), exp}`) + `.` +
-base64url(HMAC-SHA256(k_snap, payload)[0:16]), `k_snap = HKDF(server.auth.session_secret, "floe-mcp-snapshot-v1")`.
+base64url(HMAC-SHA256(k_snap, payload)[0:16]), `k_snap = HKDF(mcp.handle_secret, "floe-mcp-snapshot-v1")`, where
+`mcp.handle_secret` defaults to `server.auth.session_secret` when that is set. `session_secret` is optional and
+oidc-only, so `token` and `none` modes (the static-token agent path) would otherwise have no key: `Config::validate`
+refuses `mcp.enabled` without one of the two (≥ 32 bytes; the same value on every serving host, or handles and
+cursors minted on one host fail on another). Cursors use `HKDF(…, "floe-mcp-cursor-v1")` of the same secret.
 
 - Pins **commit and generation**: the key `commits/<commit>/<generation>.pb` follows from the claims, so a
   multi-call session sees one set of lexical layers even while compaction or reindexing moves underneath it.
   Decoding costs ≈ 2 µs and needs no lookup. Vectors are the one additive exception (§8.8).
 - **Not a bearer.** Authorization is re-checked on every call (`authorize_read` + purged flag + `epoch =
   head.pb.purge_epoch`); the HMAC gives integrity (no forged generation pointers), not secrecy. Rotating
-  `session_secret` invalidates handles.
-- Lifetime 24 h (`mcp.snapshot_ttl`), stated in `pin`'s description. `pin` mints `exp = now + snapshot_ttl` for
-  a current generation and `exp = min(now, retired_at) + snapshot_ttl` for a retired one (reached through
-  `head.pb.recent`), so no handle outlives the GC window of §3.4 (retirement + `snapshot_ttl` + 1 h) and no
-  write is needed on the read path. Expired, invalid or from an old epoch → tool result `isError`
-  `snapshot_expired` (never a protocol error), so the model calls `pin` again.
+  the handle secret invalidates handles and cursors.
+- Lifetime 24 h (`mcp.snapshot_ttl`), stated in `pin`'s description. `pin` mints `exp = now + snapshot_ttl` for a
+  current generation and `exp = min(now + snapshot_ttl, retired_at + live_window − 1 h)` for a retired one (reached
+  through `head.pb.recent`; `live_window` as in §3.4, 7 d by default), so no handle outlives the GC window and no
+  write is needed on the read path. A retired generation whose remaining window is shorter than
+  `mcp.min_handle_ttl` (10 min) is **not pinned**: `pin` returns `isError` `not_indexed` (fix: pin a ref, or
+  `reindex scope=commit`), never a handle that is already or almost expired, so an agent cannot loop on
+  `snapshot_expired` → `pin`. The indexer drops `recent` entries past that point. Expired, invalid or from an old
+  epoch → tool result `isError` `snapshot_expired` (never a protocol error), so the model calls `pin` again.
 - `repo` stays **required** next to `snapshot` on every tool, so `Mcp-Param-Repo` routing always works and the
   schema needs no `oneOf` (a request with both is valid; a mismatch is `isError`).
 - Continuation cursors (`grep`, `find_references`, `list_*`) are HMAC'd `(snapshot claims, part, file ordinal,
@@ -1139,20 +1180,32 @@ variant `…/{o}/{r}/mcp` and the root variant; open):
   "resource_name": "floe code navigation" }
 ```
 
-`offline_access` is never advertised. For `/{o}/{r}/mcp` the `resource` is that URL; tokens for
-`<public_url>/api/v1/mcp` (the global resource) are accepted on both (configurable `mcp.audiences`).
+`offline_access` is never advertised. For `/{o}/{r}/mcp` the `resource` is that URL (RFC 9728: clients check
+that `resource` equals the URL they derived the metadata location from). Accepted audiences are therefore
+per endpoint: `/api/v1/mcp` accepts `mcp.audiences` (default `[<public_url>/api/v1/mcp]`); `/{o}/{r}/mcp`
+accepts `mcp.audiences` **plus its own exact URL `<public_url>/{o}/{r}/mcp`**, derived from `PathRepo`, never
+configured. A token issued for one repo's resource is refused on every other repo's endpoint and on the global
+one. IdPs without RFC 8707 resource indicators (Entra) mint only the configured audience, so their users use the
+global endpoint or a global-audience token on the per-repo one.
 
 **Accepted credentials**, all through the existing `Authenticator` (no parallel verifier), then the same
 allowlist and admin rules:
-1. **IdP access tokens (JWT)**: `iss` exactly the configured issuer; `aud` ∈ `mcp.audiences` (default
-   `[<public_url>/api/v1/mcp]`; Entra `api://…` and GUID forms may be listed); `exp`/`nbf`; RS256/ES256 via the
+1. **IdP access tokens (JWT)**: `iss` exactly the configured issuer; `aud` ∈ the endpoint's accepted audiences
+   (above; Entra `api://…` and GUID forms may be listed); `exp`/`nbf`; RS256/ES256 via the
    cached JWKS; `scp`/`scope` (or Entra `roles`) ⊇ `floe.code.read`; identity from
    `email`/`preferred_username`/`upn`. ID tokens and tokens for other audiences are rejected on both MCP endpoints
    (no pass-through), and these MCP-audience tokens are rejected on git and web routes.
-2. **floe access tokens** (`wgt_…`) minted at `/_auth/tokens?aud=mcp&scope=floe.code.read`; a `wgt_` without
-   `aud=mcp` is refused, so git tokens never silently become agent tokens. This is the day-one path for headless
-   agents and CI (a static `Authorization: Bearer` in the agent's MCP config).
-3. **Static `tokens`** from config with explicit `scopes`.
+2. **floe access tokens** (`wgt_…`) minted at `/_auth/tokens?aud=mcp&scope=floe.code.read` (oidc mode with
+   `session_secret`, as every `wgt_` today). They are minted with a **distinct HMAC kind, `"mcp"`**, carrying the
+   scopes, next to today's `"session"` and `"token"` kinds (`auth.rs` `mint(…, kind)` / `claims_of(raw, kind)`).
+   The git/web verifier keeps accepting only kind `"token"`, so an agent token is refused (401) on git smart HTTP,
+   LFS, `/{o}/{r}/api*` and `/api/v1`: a read-only agent credential can never push or call the web API. The MCP
+   verifier accepts only kind `"mcp"`, so git tokens never silently become agent tokens either. This is the
+   day-one path for headless agents and CI in oidc mode (a static `Authorization: Bearer` in the agent's MCP
+   config).
+3. **Static `tokens`** from config with explicit `scopes` (the day-one path in `token` mode). A static token is
+   accepted on MCP only if it lists `scopes`, and one whose `scopes` are all `floe.code.*` is refused on git and
+   web routes (the same rule as kind `"mcp"`).
 
 Status: missing/invalid/expired → **401** `WWW-Authenticate: Bearer resource_metadata="<prm url>",
 scope="floe.code.read"` (a real 401, never 200). Insufficient scope → **403** `Bearer error="insufficient_scope",
@@ -1231,12 +1284,19 @@ reads would blow the budget, so the design does not pretend otherwise.
 
 ### 8.1 Snapshot resolution
 
-1. `snapshot` given → decode claims (HMAC, ≈ 2 µs), check `exp`, `epoch`, `authorize_read`; artifacts come from
-   `commits/<commit>/<generation>.pb` (immutable, cached forever). **0 round trips** when warm.
+Every path goes through the repo's **cached `head.pb`, revalidated by conditional GET once it is older than
+`codeintel.head_ttl`** (1 s; a notification only makes it sooner, it is never the only trigger). Nothing in
+resolution may skip that age check, because a purge, a new vector generation or a repair does not move any ref:
+a host that missed the best-effort notification still sees the purge within `head_ttl`, as §5.8 promises.
+
+1. `snapshot` given → decode claims (HMAC, ≈ 2 µs), check `exp`; revalidate `head.pb` if stale, then check
+   `purged` and `epoch = purge_epoch`, `authorize_read`; artifacts come from `commits/<commit>/<generation>.pb`
+   (immutable, cached forever). **0 round trips** when `head.pb` is fresh; otherwise one conditional GET (304,
+   ≈ 15 ms), shared by every call on that repo for the next `head_ttl`.
 2. `rev` given → `RepoHandle::sync_refs` (conditional manifest GET, skipped within `wal.freshness_ttl`) → sha;
-   if the sha equals the cached `RefIndex.commit`, done; else `head.pb` conditional GET (skipped within
-   `codeintel.head_ttl`, 1 s, or after a notification); a full sha that is no ref's current commit is looked up in
-   `head.pb.recent` (→ its record, +1 GET, then cached forever; `pin` clamps `exp`, §7.4), else `not_indexed`.
+   revalidate `head.pb` if stale; the sha equal to `refs[ref].commit` ⇒ that generation; a full sha that is no
+   ref's current commit is looked up in `head.pb.recent` (→ its record, +1 GET, then cached forever; `pin` bounds
+   `exp`, §7.4), else `not_indexed`.
 3. Ref ahead of its index → answer at the indexed commit with `exact: false` and both shas; `pin exact=true` (or
    any tool with a pinned overlay handle) builds the ad-hoc overlay (M10, §8.10) or returns `index_lag`.
 
@@ -1255,7 +1315,8 @@ reads would blow the budget, so the design does not pretend otherwise.
 ```
 Header    magic "FLSH" | major u16 | minor u16 | flags | section count | section table
           [(kind u16, codec u8, off u64, len u64, crc32c u32)]; sections 4 KiB-aligned
-META      protobuf ShardMeta { repo, commit, base_commit?, part, first_path, last_path, extractor, chunker }
+META      protobuf ShardMeta { repo, commit, base_commit?, part, first_path, last_path, extractor, chunker,
+          extractors: map<lang, string> (the per-language extractor string each FILES row was built with) }
           (no timestamps: the build is deterministic ⇒ same inputs, same sha)
 PATHS     front-coded sorted paths → file ordinal (u32) + fst Map path → ordinal (prefix/glob/regex automata)
 FILES     fixed rows: blob_sha[32], lang u8, flags u8, size u32, content_off u64, content_len u32, lines_off u64,
@@ -1367,7 +1428,7 @@ parts fanned out in parallel.
 |---|---|---|
 | HTTP + rmcp header/body/`_meta` validation + JSON parse | 0.1–0.2 ms | 0.5 ms |
 | Bearer (verified-token cache hit; miss 0.3 ms, JWKS only on `kid` miss) | 0.05 ms | 0.3 ms |
-| Snapshot decode + `authorize_read` + generation lookup | 0.01 ms | 0.05 ms |
+| Snapshot decode + `authorize_read` + generation lookup (`head.pb` fresh) | 0.01 ms | 0.05 ms |
 | Serialize (structuredContent + text block, ≤ 50 hits) | 0.2–1 ms | 3 ms |
 
 | Tool | p50 target | p99 target |
@@ -1400,7 +1461,7 @@ parts fanned out in parallel.
 
 | Operation | Sequential bucket round trips |
 |---|---|
-| MCP query, snapshot handle, warm | **0** |
+| MCP query, snapshot handle, warm | **0** within `head_ttl` of the repo's last `head.pb` revalidation, else 1 (conditional, 304) |
 | MCP query, ref name, unchanged | 0–1 (manifest conditional, shared with every other read) |
 | MCP query, ref name, moved | 1 + 1 (manifest, then `head.pb` conditional) |
 | MCP query, cold shard | + 1 GET per part (striped, parallel) |
@@ -1469,6 +1530,7 @@ query_threads = 0               # 0 = num_cpus/2, min 2
 head_ttl = "1s"
 retention = "7d"                # ≥ mcp.snapshot_ttl + 1h (validated); GC keeps retired generations this long
 recent_max = 64                 # head.pb.recent: retired generations reachable by rev = <full sha>
+                                # (entries leave once retired_at + live_window - 1h - mcp.min_handle_ttl passes)
 catalog_retry_max = "5m"        # backoff cap of the catalog phase while the catalog is down
 reindex_queue_timeout = "1h"    # a queued reindex never admitted by a maintainer pass ⇒ failed
 require_catalog = true          # false = standalone: shards from git only; embeddings not durable (warns)
@@ -1500,6 +1562,9 @@ allowed_hosts = []              # default host of server.public_url
 audiences = []                  # default ["<public_url>/api/v1/mcp"]
 scopes = ["floe.code.read", "floe.code.admin"]
 snapshot_ttl = "24h"
+min_handle_ttl = "10m"          # pin refuses a retired generation with less lifetime left (not_indexed)
+handle_secret = ""              # HMAC key (>= 32 bytes, same on every host) for snapshot handles and cursors;
+                                # use FLOE__MCP__HANDLE_SECRET; empty = derived from server.auth.session_secret
 semantic_deadline_ms = 40
 max_concurrent_per_principal = 8
 query_log = "sampled"           # off | sampled | all
@@ -1510,7 +1575,8 @@ query_log_text = false
 `embed.provider = "http"` and no repo can ever pass the privacy gate (no `embed_remote` possible) — warning, not
 error; `codeintel.enabled` without the feature; `require_catalog = true` without `catalog.enabled`; an
 `allowed_origins` that is empty after defaulting in oidc mode; `format-version` of an existing table ≠ 2;
-`codeintel.retention < mcp.snapshot_ttl + 1h`.
+`codeintel.retention < mcp.snapshot_ttl + 1h`; `mcp.enabled` without `mcp.handle_secret` or
+`server.auth.session_secret` (or with one shorter than 32 bytes).
 
 ---
 
@@ -1534,9 +1600,9 @@ error; `codeintel.enabled` without the feature; `require_catalog = true` without
 | Pinned handle past `exp` | Handle stops working | `snapshot_expired` + "call pin"; GC never removes a generation while a handle can name it (§3.4); history in `commits_indexed`; `reindex scope=commit` rebuilds. |
 | Named artifact deleted or corrupt in the bucket | Queries on it fail | Detected at lease acquisition, by the GC LIST, or by a serving host's sha256 check (repair request); a `repair` item rebuilds it as a new generation. |
 | Embedder slow / down / rate-limited | Semantic lag | Rate limit and backoff; `search` still returns symbol + grep channels with `semantic: "skipped"`/`"stale"`. |
-| Model change | Vector-space mismatch | New `model_id` namespace; old served until new coverage hits 100 %. |
+| Model change | Vector-space mismatch | New `model_id` namespace; old served (and kept fresh) until the new one covers every eligible chunk, then flipped per ref. |
 | Read revoked / repo made private | Stale access | `authorize_read` on every call; RepoMask cache 60 s; `resources/read` TTL ≤ 1 h; handles re-checked. |
-| Private code sent to an external embedder | Data egress | Provider `http` gated by `embed_remote` per repo and the shared-blob privacy gate; fails closed. |
+| Private code sent to an external embedder | Data egress | Provider `http` gated per source repo by `embed_remote` and its `[access] read` (§6.5); no dependency on lagging membership; a repo without opt-in never causes a remote call. |
 | Unauthorised cross-repo leakage | Security | RepoMask inside postings and vector scans, not after top-k; one `authorize_read`; leakage test suite (two principals, disjoint ACLs, shared blobs, counts, cursors, errors). |
 | Repo deleted or must be erased | Data retained | Purge ends the epoch (§5.8): `head.pb.purged` hides immediately, handles of older epochs expire, `v_commits` hides older epochs in SQL; GC + generation swap remove physically; a same-name repo created later is indexed under the next epoch and stays visible. |
 | IdP JWKS unreachable | New JWTs unverifiable | JWKS cache with refresh-on-`kid`-miss; verified-token cache; `wgt_` and static tokens unaffected; real 401s. |
@@ -1557,11 +1623,11 @@ correction). Nothing runs `cargo` on the dev machine until it has disk space; CI
 | **M0** Decisions, config, skeleton, spikes (≈ 1 wk) | D52–D58 drafted in AGENTS (as a separate PR from this doc), GOAL §4 amendment, `codeintel.proto`, `[codeintel]`/`[codeintel.embed]`/`[mcp]`/`[access]` parsing and fail-closed validation, empty `floe-codeintel` crate and feature wiring. **Spikes (ignored tests):** (a) iceberg-rust → RustFS S3 Tables with SigV4 via 0.11 RC `AuthSession` or a signing proxy: create v2 table, `fast_append`, read back with DuckDB; (b) rmcp 3.5 stateless hello-world + official conformance suite. | Config tests for every fail-closed rule; `just clippy` clean with and without features; spike decision recorded for R1 (which SigV4 route). |
 | **M1** Extraction and chunking (≈ 1 wk) | `lang.rs`, `extract/` for Rust, Go, Python, TS/TSX, JS/JSX, Java with pinned `tags.scm`, outline tree, `chunk.rs`, extractor/chunker version strings. | Golden fixture: expected defs/refs/outline per language; timeout and minified tests; determinism (same input ⇒ byte-identical records). |
 | **M2** Shard format and query engines (≈ 2 wk) | `.fsh` writer/reader, trigram planner (Cox), grep, symbols, defs, refs, outline, list, read; `floe codeintel build|query` local CLI; `bench` harness. | Property test: grep results equal a brute-force regex scan; layering test (base + delta + tombstones); on a 1 GB checkout (CI runner): symbol p50 < 2 ms, literal grep p50 < 20 ms; format golden (deterministic sha). |
-| **M3** Indexer unit, head pointer, shard cache — standalone (≈ 1.5 wk) | Maintainer `codeintel` unit (lease, desired-state planner, diff, base/delta, PUT, `commits/<commit>/<generation>.pb`, CAS), `codeintel-gc` (retirement-based liveness), ShardCache, `require_catalog = false` path, metrics, ROUNDTRIPS rows. | Sim tests: push ⇒ delta visible within one pass; kill between any two steps ⇒ next pass converges and artifacts are byte-identical; second maintainer loses the lease; force-push; monorepo fixture splits into parts. **Planner = work set:** a newly tracked ref (settings change, no push), an extractor bump for one language, a deleted base part and a corrupted delta each produce exactly one item and converge in one pass; a pass with nothing to do performs zero bucket writes, and the planner reports nothing missing afterwards (property test: planner(missing) ⇔ work ≠ ∅ over random states). **Generations:** rebuilding the same tip (`reindex full`) publishes a new generation without a 412; an orphan record from a killed attempt is skipped. **GC:** a repo idle 8 days gets a handle, then a push retires its generation; GC run immediately and at +24 h keeps every artifact the handle names; at retirement + `snapshot_ttl` + 1 h + retention it removes them; `pin` of a retired generation clamps `exp`. |
-| **M4** MCP endpoint, read-only tools (≈ 1.5 wk) | rmcp service on `/api/v1/mcp` and `/{o}/{r}/mcp` (one service, `PathRepo` extension), discover, tools 1–9 + `search` (lexical channels only), resources, caching hints, snapshot handles, cursors, PRM, bearer middleware (issuer JWT with `aud`, `wgt_ aud=mcp`, static), Origin/Host, `_meta` timing and trace. | Official conformance suite passes (stateless metadata required); 401 + `resource_metadata`, 403 `insufficient_scope`, ID token rejected, wrong `aud` rejected, `wgt_` without `aud=mcp` rejected; -32602 for missing resource (no empty contents); traversal URIs rejected; `x-mcp-header` validated; Claude Code connects with a bearer header and runs every tool. **Routing:** with `mcp.enabled`, owner `mcp` (and repo `mcp/x`) keeps its SPA page, git clone/push and API; `/api/v1/mcp/anything` is 404; on `/{o}/{r}/mcp` a call without `repo` is answered for the path repo, a different `repo` (argument or header) is `repo_mismatch`, an invalid path repo is 404; PRM `resource` equals the endpoint URL for both. |
-| **M5** Per-repo read authorization (≈ 1 wk) | `[access] read` (D54), `policy::authorize_read` used by git, web and MCP, RepoMask plumbing, purge flag, `floe-mirror` integration (writes `read` from upstream visibility), `index_private_mirrors` gate lifted per repo. | Leakage suite: two principals with disjoint ACLs see nothing of each other through hits, counts, cursors, errors, `list_repos`, `resources/list` or shared blobs; git/web/MCP parity test; security review sign-off. **Purge lifecycle:** purge ⇒ tools, resources and existing handles refuse within `head_ttl`, indexer publishes nothing and `reindex` is `not_indexed`; `--clear` ⇒ fresh bases under the same epoch and old handles stay expired; delete + re-create the same name ⇒ the new repo is indexed and visible in `v_heads`, the old incarnation's rows are not. |
-| **M6** Iceberg truth (≈ 1.5 wk; depends on the M0 SigV4 route and on `floe-catalog`'s state) | `floe-ice` (extract/shared with `floe-catalog`), `TableDef`s for `blobs, symbols, refs, chunks, artifacts, commits_indexed, index_runs, purges`, `CodeWriter` with ordered flush, KnownBlobs, step 4(b) reuse, `views.sql`, `StaticTable` fallback, `floe codeintel sql|status|why`. | Ignored integration test against RustFS: index ⇒ rows ⇒ DuckDB `views.sql` returns exactly-once, commit-consistent results; crash between flush steps ⇒ views unchanged; catalog down ⇒ nav still publishes, `catalog_seq` lags then catches up; counter proves a blob is extracted once across two mirrors. **Replay:** catalog down across three pushes (facts for the last two reused through (a)) ⇒ after recovery every blob of the current snapshot is in `v_blobs`, its marker exists, `catalog_commit = commit`, and no blob has two canonical batches; idle passes after recovery do no catalog work and append no rows; kill between marker and CAS ⇒ the retry appends nothing. **Views:** a `reindex full` of HEAD's current tip becomes HEAD's row in `v_heads` (never a ref named `reindex`); duplicate replayed markers yield one row; `v_chunks` returns one row set per (blob, extractor) after a crash-window duplicate and after a chunker bump; `floe-ice`'s canonical-batch reader equals DuckDB over `views.sql`. |
-| **M7** Semantic (≈ 2 wk) | `Embedder` (local fastembed with pinned model object; http), `codeintel-embed` unit (Iceberg-first), `code.embeddings`, `.fvec` flat b1+i8, `semantic_search`, hybrid `search` with RRF, query-vector LRU, privacy gate. | recall@10 on a 100-query fixture ≥ brute-force f32 baseline − 2 pts; hybrid beats lexical-only; same chunk in two repos embedded exactly once; embed unit refuses to publish `.fvec` before its Iceberg commit; gate test (shared blob with one `embed_remote = false` repo never leaves the box); manifest-size measurement for `vec` bounds recorded. **Handle + vectors:** `pin` right after a push (no vectors yet), then the embedder publishes ⇒ `semantic_search` with that handle returns hits from the same commit, while lexical answers stay identical to the pinned generation. |
+| **M3** Indexer unit, head pointer, shard cache — standalone (≈ 1.5 wk) | Maintainer `codeintel` unit (lease, desired-state planner, diff, base/delta, PUT, `commits/<commit>/<generation>.pb`, CAS), `codeintel-gc` (retirement-based liveness), ShardCache, `require_catalog = false` path, metrics, ROUNDTRIPS rows. | Sim tests: push ⇒ delta visible within one pass; kill between any two steps ⇒ next pass converges and artifacts are byte-identical; second maintainer loses the lease; force-push; monorepo fixture splits into parts. **Planner = work set:** a newly tracked ref (settings change, no push), an extractor bump for one language, a deleted base part and a corrupted delta each produce exactly one item and converge in one pass; a pass with nothing to do performs zero bucket writes, and the planner reports nothing missing afterwards (property test: planner(missing) ⇔ work ≠ ∅ over random states). **Generations:** rebuilding the same tip (`reindex full`) publishes a new generation without a 412; an orphan record from a killed attempt is skipped. **GC:** a repo idle 8 days gets a handle, then a push retires its generation; GC run immediately and at +24 h keeps every artifact the handle names; at retirement + `snapshot_ttl` + 1 h + retention it removes them; `pin` of a retired generation clamps `exp`, and one retired longer than `live_window − 1 h − min_handle_ttl` is refused with `not_indexed` (no dead handle). **Reuse vs GC:** a rebuild that re-produces an unreferenced shard whose `LastModified` is past `retention − 1 d` names `<sha256>~<generation>.fsh`, and a GC run interleaved between that PUT and the head CAS leaves every named key present. **Extractor:** bumping one language's grammar in standalone mode re-extracts only that language's files (counter), the rest are copied by 4(a). |
+| **M4** MCP endpoint, read-only tools (≈ 1.5 wk) | rmcp service on `/api/v1/mcp` and `/{o}/{r}/mcp` (one service, `PathRepo` extension), discover, tools 1–9 + `search` (lexical channels only), resources, caching hints, snapshot handles, cursors, PRM, bearer middleware (issuer JWT with `aud`, `wgt_ aud=mcp`, static), Origin/Host, `_meta` timing and trace. | Official conformance suite passes (stateless metadata required); 401 + `resource_metadata`, 403 `insufficient_scope`, ID token rejected, wrong `aud` rejected, `wgt_` without `aud=mcp` rejected; -32602 for missing resource (no empty contents); traversal URIs rejected; `x-mcp-header` validated; Claude Code connects with a bearer header and runs every tool. **Routing:** with `mcp.enabled`, owner `mcp` (and repo `mcp/x`) keeps its SPA page, git clone/push and API; `/api/v1/mcp/anything` is 404; on `/{o}/{r}/mcp` a call without `repo` is answered for the path repo, a different `repo` (argument or header) is `repo_mismatch`, an invalid path repo is 404; PRM `resource` equals the endpoint URL for both; an IdP token with `aud = <public_url>/o/r/mcp` works on `/o/r/mcp` and is refused on `/o/s/mcp` and `/api/v1/mcp`; a global-audience token works on both. **Credentials:** a `wgt_` minted with `aud=mcp` is refused (401) by git push/fetch, LFS and the web API, and a git `wgt_` is refused on MCP; a static token with only `floe.code.*` scopes cannot push. **Keys:** in `token` mode with `mcp.handle_secret`, `pin` → handle → cursor round-trips across two hosts; `validate` refuses `mcp.enabled` with no handle secret and no `session_secret`. **Freshness:** with notifications disabled, a purge is refused by a warm host within `head_ttl` both for a ref-name call whose ref did not move and for a pinned handle. |
+| **M5** Per-repo read authorization (≈ 1 wk) | `[access] read` (D54), `policy::authorize_read` used by git, web and MCP, RepoMask plumbing, purge flag, `floe-mirror` integration (writes `read` from upstream visibility), `index_private_mirrors` gate lifted per repo. | Leakage suite: two principals with disjoint ACLs see nothing of each other through hits, counts, cursors, errors, `list_repos`, `resources/list` or shared blobs; git/web/MCP parity test; security review sign-off. **Purge lifecycle:** purge ⇒ tools, resources and existing handles refuse within `head_ttl`, indexer publishes nothing and `reindex` is `not_indexed`; `--clear` ⇒ fresh bases under the same epoch and old handles stay expired; delete + re-create the same name ⇒ the new repo is indexed and visible in `v_heads`, the old incarnation's rows are not, also when the new incarnation indexes the same commit as the old. |
+| **M6** Iceberg truth (≈ 1.5 wk; depends on the M0 SigV4 route and on `floe-catalog`'s state) | `floe-ice` (extract/shared with `floe-catalog`), `TableDef`s for `blobs, symbols, refs, chunks, artifacts, commits_indexed, index_runs, purges`, `CodeWriter` with ordered flush, KnownBlobs, step 4(b) reuse, `views.sql`, `StaticTable` fallback, `floe codeintel sql|status|why`. | Ignored integration test against RustFS: index ⇒ rows ⇒ DuckDB `views.sql` returns exactly-once, commit-consistent results; crash between flush steps ⇒ views unchanged; catalog down ⇒ nav still publishes, `catalog_seq` lags then catches up; counter proves a blob is extracted once across two mirrors. **Replay:** catalog down across three pushes (facts for the last two reused through (a)) ⇒ after recovery every blob of the current snapshot is in `v_blobs`, its marker exists, `catalog_commit = commit`, and no blob has two canonical batches; idle passes after recovery do no catalog work and append no rows; kill between marker and CAS ⇒ the retry appends nothing. **Markers:** a ref moved A → B → A ends on A in `v_heads`; two tracked refs at one commit each get a row; purge → clear re-indexing an already-marked commit writes a new marker under the new epoch. **Views:** a `reindex full` of HEAD's current tip becomes HEAD's row in `v_heads` (never a ref named `reindex`); duplicate replayed markers yield one row; `v_chunks` returns one row set per (blob, extractor) after a crash-window duplicate and after a chunker bump; `floe-ice`'s canonical-batch reader equals DuckDB over `views.sql`. |
+| **M7** Semantic (≈ 2 wk) | `Embedder` (local fastembed with pinned model object; http), `codeintel-embed` unit (Iceberg-first), `code.embeddings`, `.fvec` flat b1+i8, `semantic_search`, hybrid `search` with RRF, query-vector LRU, privacy gate. | recall@10 on a 100-query fixture ≥ brute-force f32 baseline − 2 pts; hybrid beats lexical-only; same chunk in two repos embedded exactly once; embed unit refuses to publish `.fvec` before its Iceberg commit; gate test (a chunk only in an `embed_remote = false` repo never leaves the box, also while the catalog is down and before that repo is indexed; a remote call is only ever made while embedding an opted-in repo); `reindex scope=semantic` is served and removed from `head.pb.requests` by the embed unit and its task completes; a model switch with withheld chunks flips once every eligible chunk is embedded and the unit then goes idle; manifest-size measurement for `vec` bounds recorded. **Handle + vectors:** `pin` right after a push (no vectors yet), then the embedder publishes ⇒ `semantic_search` with that handle returns hits from the same commit, while lexical answers stay identical to the pinned generation. |
 | **M8** Bench and hardening (≈ 1 wk) | Latency harness (floe repo, linux, reference monorepo, 300 synthetic mirrors), `floe_mcp_*`/`codeintel_*` metrics, `code.query_log` (lossy Recorder), `docs/CODEINTEL.md`, `docs/MCP.md`. | §9.1 p50 targets met warm, or each gap recorded as a dated note with its planned response (M10/M11). |
 | **M9** All-repo search and Tasks (≈ 1.5 wk) | `.fdir` + `codeintel-dir` unit, `scope: "all"` for symbols/grep/semantic/search/goto, bucket-backed task store, `tasks/get|update|cancel`, `reindex` tool via `head.pb.requests`, Tasks advertised in discover. | -32021 for `tasks/*` without the extension; `CreateTaskResult` only after durable PUT (fault-injected); any instance answers `tasks/get`; sweep executor-loss ⇒ `failed`; a `reindex` queued behind a maintainer pass of 10 × `pollIntervalMs` stays `working` (queued), a killed maintainer mid-reindex ⇒ `working` (requeued) then `completed`, a crash between record and `head.pb.requests` ⇒ `failed` "request lost" after the admit window; all-repo symbol search p50 < 15 ms over 1 000 repos; ACL mask applied before shard access. |
 | **M10** Scale shapes (gated) | Ad-hoc overlay for unindexed commits; compound shards if M8's mirror benchmark shows open-mmap or cold-GET pressure; Iceberg generation swap and physical purge. | Feature branch commit answers `exact: true` with ≤ 200 changed files; 300 mirrors in ≤ 3 compound shards with identical answers; generation swap keeps views identical. |
@@ -1607,8 +1673,8 @@ Lance, arroy.
    keeps the option of better rescoring and model-agnostic re-quantisation.
 6. **Group-based `[access] read`**: floe has no group directory today. Are IdP group claims (`groups`/Entra
    `roles`) acceptable as the source, or only emails/domains in M5?
-7. **Per-repo endpoint audience**: should `/{o}/{r}/mcp` advertise its own `resource` (fine-grained tokens) or
-   always the global `…/api/v1/mcp` resource (one token for all)? Proposed: global by default, per-repo optional.
+7. **Per-repo endpoint audience** (decided in §7.7): `/{o}/{r}/mcp` must advertise its own `resource` (RFC 9728)
+   and accepts that audience plus the global one. Open: whether to offer repo-scoped `wgt_` tokens as well.
 8. **Compound shards at all?** Our format has no heap trigram table; M8 decides with numbers.
 9. **Query log retention and text**: 90 days, hashed text by default — acceptable for the operator's privacy
    posture?
@@ -1637,19 +1703,21 @@ Lance, arroy.
 - **D55** **`/api/v1/mcp` and `/{o}/{r}/mcp` are stateless MCP 2026-07-28 endpoints; floe is an OAuth resource
   server.** The global endpoint lives under D15's non-repository prefix so it shadows no owner; both are exact
   routes of one service, and the per-repo route passes its validated repo to the handler as a request extension.
-  rmcp pinned exactly; PRM at the well-known paths; audience-bound IdP access tokens, `wgt_` tokens with
-  `aud=mcp`, and static tokens; ID tokens refused. The edge may route `/api/v1/mcp` by `Mcp-Param-Repo` (from
-  `x-mcp-header: "Repo"` on the root-level `repo` property) and by nothing else; routing is an optimisation,
-  never a correctness dependency.
+  rmcp pinned exactly; PRM at the well-known paths, the per-repo endpoint advertising and accepting its own
+  resource; audience-bound IdP access tokens, `wgt_` tokens of the HMAC kind `mcp` (refused on git and web), and
+  scoped static tokens; ID tokens refused. The edge may route `/api/v1/mcp` by `Mcp-Param-Repo` (from
+  `x-mcp-header: "Repo"` on the root-level `repo` property) and by nothing else; routing is an optimisation, never
+  a correctness dependency.
 - **D56** **Freshness before durability, for deterministic facts only.** A nav shard may be served before its
   Iceberg rows commit, because it is a pure function of git and the extractor version; the rows are then owed,
   tracked per ref as `catalog_commit`, and re-derived from the published shards until the marker commits;
   embeddings must commit to Iceberg before any artifact derived from them is published.
 - **D57** **Agent state is explicit, signed and re-authorized.** The snapshot handle pins (repo, commit,
-  generation, purge epoch) with an HMAC under a key derived from `session_secret`, lives 24 h, and is re-checked
-  against `authorize_read` on every call; continuation cursors are HMAC'd positions; there are no MCP sessions; MCP
-  tasks live in the bucket and are durable before `CreateTaskResult` is returned (a `reindex` task is durable as a
-  record and as a queued `head.pb` request; queued tasks are judged by their request, running ones by heartbeat).
+  generation, purge epoch) with an HMAC under a key derived from `mcp.handle_secret` (default `session_secret`;
+  required when MCP is on), lives 24 h, and is re-checked against `authorize_read` on every call; continuation
+  cursors are HMAC'd positions; there are no MCP sessions; MCP tasks live in the bucket and are durable before
+  `CreateTaskResult` is returned (a `reindex` task is durable as a record and as a queued `head.pb` request; queued
+  tasks are judged by their request, running ones by heartbeat).
 - **D58** **SQL visibility is by marker rows.** `code.blobs` then `code.commits_indexed` are committed last; the
   latter records each table's snapshot id, its generation and its purge epoch; purges hide earlier epochs only;
   `views.sql` (shipped, tested against DuckDB) gives exactly-once, commit-consistent reads; catalog credentials are
@@ -1680,6 +1748,13 @@ per-generation immutable commit records, so vectors and same-tip rebuilds get ne
 vectors (§3.1, §8.8); GC liveness from retirement time with handle `exp` clamped to it (§3.4); queued vs running
 reindex tasks (§7.9); MCP moved to `/api/v1/mcp` with exact routes and a `PathRepo` extension (§7.1); purge epochs
 (§5.8); `v_heads` keyed by real refs and generation; `v_chunks` and `extractor` on `code.chunks` (§4.11).
+
+Third review (second code review) fixed: marker identity is (repo, purge epoch, generation) (§5.2 C2); every
+resolution revalidates `head.pb` after `head_ttl` (§8.1); retired pins bounded by the GC window and refused when
+nearly expired (§7.4); 412 reuse only of objects GC cannot reach, else a generation-suffixed key (§3.1); `semantic`
+requests and model switches owned by the embed unit with coverage over eligible chunks (§5.4, §6.1); privacy gate
+per source repo (§6.5); per-repo audience accepted on its own endpoint (§7.7); `wgt_` kind `mcp` refused on git
+and web; `mcp.handle_secret` required (§7.4, §11); per-language extractor map in shards (§8.3).
 
 ---
 
