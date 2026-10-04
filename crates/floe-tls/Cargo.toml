@@ -3,6 +3,8 @@ name = "floe-tls"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 # TLS for the listener (D39, D59): a hot-swappable rustls certificate resolver, `files` mode
 # reload, and ACME (RFC 8555) DNS-01 with state in the bucket. Its own crate so the Pebble
