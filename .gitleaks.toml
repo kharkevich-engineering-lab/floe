@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fixed RSA key used only by the hermetic OIDC verifier tests"
+rules = ["private-key"]
+paths = ['''crates/floe-server/src/auth\.rs''']

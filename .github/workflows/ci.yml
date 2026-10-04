@@ -1,0 +1,170 @@
+name: CI
+
+# The repository had no build/test workflow: only pages.yml (a site deploy). A workspace that did
+# not compile reached main because nothing ran cargo on push. This runs `just ci` — the same
+# tiers AGENTS.md documents (warnings, clippy, test, e2e) — so CI and a contributor's laptop cannot drift.
+# The tier definitions live in the justfile, never duplicated here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: warnings + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      # prost-build does not vendor protoc; without it the proto crate fails with NotFound.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # No toolchain version here on purpose: rust-toolchain.toml pins it (and its components).
+      # `rustup show` installs exactly that, so the pin has one home.
+      - name: Install the pinned Rust toolchain
+        run: rustup show && cargo --version && git --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: scoped-tests-v1
+          cache-on-failure: true
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      # Required, not cosmetic: build.rs only writes a placeholder index.html, and api_v1's
+      # v1_surface_and_browser_lane asserts /repos.js and /repos.mjs are served 200. Also runs
+      # oxlint --deny-warnings and tsc --noEmit, so the web gate is covered here too.
+      - name: Build the SPA and the SDK
+        run: just web-build
+
+      - name: Compile cold workspace before timed checks
+        timeout-minutes: 45
+        run: |
+          cargo build --workspace --all-targets --locked
+          # Package subsets resolve different dependency features than the workspace build.
+          cargo test -p floe-store -p floe-git -p floe-wal -p floe-bundle --tests --no-run --locked
+          cargo test -p floe-server --tests --no-run --locked
+      - run: just test
+      - run: just warnings
+      - run: just clippy
+
+  e2e:
+    name: Git and editor contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install the pinned Rust toolchain
+        run: rustup show && cargo --version && git --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build the SPA and the SDK
+        run: just web-build
+      - name: Compile cold contract binaries before timed tests
+        id: contracts
+        timeout-minutes: 45
+        run: cargo test -p floe-server --test e2e --test github --test github_reads --test github_graphql --test github_prs --test github_webhooks --test events --no-run --locked
+      - name: Editor facade contracts
+        shell: bash
+        run: just test-editor 2>&1 | tee editor-contracts.log
+      - name: Git protocol contracts
+        if: ${{ !cancelled() && steps.contracts.outcome == 'success' }}
+        shell: bash
+        run: just e2e 2>&1 | tee git-contracts.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: contract-test-logs
+          path: '*-contracts.log'
+          retention-days: 14
+
+  container:
+    name: release container
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+      - uses: useblacksmith/setup-docker-builder@v1
+      - name: Build release image without publishing
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          build-args: FLOE_BUILD_SHA=${{ github.sha }}
+          tags: floe:smoke
+      - name: Start S3-compatible test store
+        run: |
+          docker compose up -d --wait rustfs
+          docker compose run --rm create-bucket
+      - name: Start packaged facade
+        run: |
+          docker run -d --name floe-smoke --network host \
+            -e AWS_ACCESS_KEY_ID=floe-dev \
+            -e AWS_SECRET_ACCESS_KEY=floe-dev-secret \
+            -e FLOE__STORE__BUCKET=floe-test \
+            -e FLOE__STORE__S3__REGION=us-east-1 \
+            -e FLOE__STORE__S3__ENDPOINT=http://127.0.0.1:9000 \
+            -e FLOE__STORE__S3__FORCE_PATH_STYLE=true \
+            -e FLOE__SERVER__PUBLIC_URL=http://127.0.0.1:8097 \
+            floe:smoke
+      - name: Verify editor publish, concurrent Git, and cold webhook recovery
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          mkdir -p smoke-logs
+          python3 -u scripts/container-smoke.py 2>&1 | tee smoke-logs/test.log
+      - name: Container logs
+        if: always()
+        run: |
+          mkdir -p smoke-logs
+          docker logs floe-smoke > smoke-logs/facade.log 2>&1 || true
+          docker compose logs rustfs > smoke-logs/store.log 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: editor-container-logs
+          path: smoke-logs/
+          retention-days: 14
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -fv floe-smoke || true
+          docker compose down -v

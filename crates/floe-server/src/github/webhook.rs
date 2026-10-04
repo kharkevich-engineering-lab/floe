@@ -1,0 +1,531 @@
+//! Outbound GitHub webhooks (`docs/GITHUB.md` §Webhooks).
+//!
+//! Two producers, one signed sender:
+//!
+//! * **Ref events come from the WAL.** [`GithubSink`] is a [`crate::events::Sink`]
+//!   registered on the bridge (`crate::bridge`), so every `push` / `create` /
+//!   `delete` delivery is rendered from a committed log entry read from a
+//!   durable cursor — never from a step of a write (principle III). A delivery
+//!   that fails leaves the cursor where it was and the batch is retried.
+//! * **`pull_request` deliveries come from the PR handlers**, because PR state
+//!   is the facade's own and is not in the WAL. They are best effort with a
+//!   couple of retries, always spawned: nothing blocks a request handler.
+//!
+//! The wire is GitHub's: a JSON body, `x-github-event`, `x-github-delivery`
+//! (uuid v4) and `x-hub-signature-256: sha256=<hex HMAC-SHA256 of the raw
+//! body>` — the same HMAC helper the floe-native signature uses.
+
+use std::sync::{Arc, OnceLock, Weak};
+
+use futures::StreamExt;
+use serde_json::{Value, json};
+use floe_git::RepoId;
+
+use super::auth::USER_LOGIN;
+use super::models::{self, Urls};
+use super::repo::{self, View};
+use crate::AppState;
+use crate::events::{RefEvent, Sink};
+
+/// GitHub truncates a push's `commits[]`; the consumer reads
+/// `commits.len() < size` as "incomplete", which is what we want it to see.
+const MAX_COMMITS: usize = 20;
+
+/// Delivery attempts for a `pull_request` event (the WAL-driven ones retry
+/// through the cursor instead).
+const PR_ATTEMPTS: u32 = 3;
+
+// ---- the sender --------------------------------------------------------------
+
+/// One signed POST to an integration callback.
+pub struct Sender {
+    url: String,
+    secret: Vec<u8>,
+    client: reqwest::Client,
+}
+
+impl Sender {
+    pub fn new(integration: &super::integrations::Integration) -> Sender {
+        Sender {
+            url: integration.webhook_url.clone(),
+            secret: integration.webhook_secret.as_bytes().to_vec(),
+            client: {
+                static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+                CLIENT
+                    .get_or_init(|| {
+                        reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(10))
+                            .build()
+                            .unwrap_or_default()
+                    })
+                    .clone()
+            },
+        }
+    }
+
+    /// POST one event. Non-2xx and timeouts are errors; the caller decides
+    /// whether that fails a batch or is logged and dropped.
+    pub async fn deliver(&self, event: &str, payload: &Value) -> anyhow::Result<()> {
+        let body = serde_json::to_vec(payload)?;
+        let delivery = uuid::Uuid::new_v4().to_string();
+        let mut req = self
+            .client
+            .post(&self.url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::USER_AGENT, "GitHub-Hookshot/floe")
+            .header("x-github-event", event)
+            .header("x-github-delivery", &delivery);
+        req = req.header(
+            "x-hub-signature-256",
+            crate::events::WebhookSink::signature(&self.secret, &body),
+        );
+        let resp = req
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| anyhow::anyhow!("GitHub webhook request failed"))?;
+        let status = resp.status();
+        anyhow::ensure!(
+            status.is_success(),
+            "github webhook {event} ({delivery}) returned {status}"
+        );
+        tracing::debug!(event, delivery, "github webhook delivered");
+        Ok(())
+    }
+}
+
+/// Set `topics` on a rendered `repository` object; anything else is left alone.
+fn with_topics(repository: &mut Value, topics: &[String]) {
+    if let Some(obj) = repository.as_object_mut() {
+        obj.insert("topics".to_string(), json!(topics));
+    }
+}
+
+/// Fire one `pull_request` (or any handler-side) delivery in the background.
+/// Never awaited by a request handler: a slow consumer must not slow a write.
+pub fn spawn(st: &Arc<AppState>, event: &'static str, payload: Value) {
+    let st = st.clone();
+    tokio::spawn(async move {
+        let Some(full_name) = payload["repository"]["full_name"].as_str() else {
+            return;
+        };
+        let Ok(id) = full_name.parse::<RepoId>() else {
+            return;
+        };
+        // GitHub's `repository` carries the topics, and a consumer that routes
+        // a merged PR by topic reads them off this payload.
+        let mut payload = payload;
+        if let Ok(topics) = super::topics::load(&st, &id).await
+            && let Some(repository) = payload.get_mut("repository")
+        {
+            with_topics(repository, &topics);
+        } else {
+            tracing::warn!(
+                event,
+                "could not load repository topics for a GitHub webhook"
+            );
+        }
+        let registry = match super::integrations::read(st.registry.store()).await {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::warn!(event, "could not load GitHub webhook integrations");
+                return;
+            }
+        };
+        let subscriptions = match registry.subscriptions(&id) {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::warn!(event, "invalid GitHub webhook subscriptions");
+                return;
+            }
+        };
+        let deliveries: Vec<_> = subscriptions.into_iter().map(|subscription| {
+            let sender = Sender::new(subscription.integration);
+            let mut payload = payload.clone();
+            payload["installation"] = json!({ "id": subscription.installation.id });
+            async move {
+                for attempt in 1..=PR_ATTEMPTS {
+                    match sender.deliver(event, &payload).await {
+                        Ok(()) => return,
+                        Err(e) if attempt == PR_ATTEMPTS => {
+                            tracing::warn!(event, error = %e, attempts = attempt, "github webhook delivery failed");
+                        }
+                        Err(e) => {
+                            tracing::warn!(event, error = %e, attempt, "github webhook delivery failed; retrying");
+                            tokio::time::sleep(std::time::Duration::from_millis(200 * u64::from(attempt))).await;
+                        }
+                    }
+                }
+            }
+        }).collect();
+        futures::stream::iter(deliveries)
+            .buffer_unordered(16)
+            .collect::<Vec<_>>()
+            .await;
+    });
+}
+
+// ---- shared payload pieces ---------------------------------------------------
+
+/// The origins a bridge-rendered payload's URLs are built from. There is no
+/// request here, so `server.public_url` is the only source; without it the
+/// listener's own address is the best guess.
+pub fn urls(cfg: &floe_config::Config) -> Urls {
+    let html = cfg.server.public_url.clone().unwrap_or_else(|| {
+        let scheme = if cfg.tls_enabled() { "https" } else { "http" };
+        format!("{scheme}://{}", cfg.server.listen)
+    });
+    let html = html.trim_end_matches('/').to_string();
+    let api = format!("{html}/api/v3");
+    Urls { html, api }
+}
+
+fn sender_user(urls: &Urls) -> Value {
+    serde_json::to_value(models::named_user(urls, USER_LOGIN)).unwrap_or(Value::Null)
+}
+
+fn all_zeros(oid: &str) -> bool {
+    !oid.is_empty() && oid.bytes().all(|b| b == b'0')
+}
+
+fn short_ref(name: &str) -> &str {
+    name.strip_prefix("refs/heads/")
+        .or_else(|| name.strip_prefix("refs/tags/"))
+        .unwrap_or(name)
+}
+
+// ---- commits -----------------------------------------------------------------
+
+/// `added` / `modified` / `removed` for one commit, from `--name-status`
+/// against its first parent (`--root` so an initial commit has its whole tree).
+async fn paths(local: &floe_git::LocalRepo, sha: &str) -> anyhow::Result<[Vec<String>; 3]> {
+    let out = repo::git(
+        local,
+        &[
+            "log",
+            "-1",
+            "--format=",
+            "--name-status",
+            "--first-parent",
+            "--root",
+            "--no-renames",
+            "--end-of-options",
+            sha,
+        ],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let (mut added, mut modified, mut removed) = (Vec::new(), Vec::new(), Vec::new());
+    for line in String::from_utf8_lossy(&out).lines() {
+        let mut f = line.split('\t');
+        let Some(status) = f.next().and_then(|s| s.bytes().next()) else {
+            continue;
+        };
+        let Some(path) = f.next().filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        match status {
+            b'A' => added.push(path.to_string()),
+            b'D' => removed.push(path.to_string()),
+            _ => modified.push(path.to_string()),
+        }
+    }
+    Ok([added, modified, removed])
+}
+
+/// GitHub's commit shape inside a `push`, `head_commit` included.
+async fn commit_json(
+    local: &floe_git::LocalRepo,
+    urls: &Urls,
+    full_name: &str,
+    sha: &str,
+) -> anyhow::Result<Value> {
+    let facts = repo::commit_facts(local, sha)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let [added, modified, removed] = paths(local, sha).await?;
+    Ok(json!({
+        "id": facts.sha,
+        "tree_id": facts.tree,
+        "message": facts.message,
+        "timestamp": facts.author_date,
+        "url": format!("{}/{full_name}/commit/{}", urls.html, facts.sha),
+        "distinct": true,
+        "author": {
+            "name": facts.author_name,
+            "email": facts.author_email,
+            "username": USER_LOGIN,
+        },
+        "committer": {
+            "name": facts.committer_name,
+            "email": facts.committer_email,
+            "username": USER_LOGIN,
+        },
+        "added": added,
+        "modified": modified,
+        "removed": removed,
+    }))
+}
+
+// ---- the WAL-driven sink -----------------------------------------------------
+
+/// The bridge sink that renders each `RefEvent` as GitHub deliveries. It reads
+/// the repository to build the payload, so it needs the instance it belongs to
+/// — which does not exist yet when `Bridge::new` runs; `attach_state` closes
+/// that loop with a `Weak`, so the sink never keeps the state alive.
+pub struct GithubSink {
+    state: OnceLock<Weak<AppState>>,
+    sender: Sender,
+    installation_id: u64,
+}
+
+impl GithubSink {
+    pub fn new(sender: Sender, installation_id: u64) -> Self {
+        GithubSink {
+            state: OnceLock::new(),
+            sender,
+            installation_id,
+        }
+    }
+
+    fn state(&self) -> anyhow::Result<Arc<AppState>> {
+        self.state
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| anyhow::anyhow!("github webhook sink has no server state attached"))
+    }
+
+    async fn deliver_ref(
+        &self,
+        view: &View,
+        topics: &[String],
+        urls: &Urls,
+        ev: &RefEvent,
+    ) -> anyhow::Result<()> {
+        let mut repository = super::prs::repo_json(view, urls);
+        with_topics(&mut repository, topics);
+
+        let created = all_zeros(&ev.old);
+        let deleted = all_zeros(&ev.new);
+        if ev.ref_type == "branch" {
+            let push = self.push_payload(view, urls, &repository, ev).await?;
+            self.sender.deliver("push", &push).await?;
+        }
+        if created || deleted {
+            let event = if created { "create" } else { "delete" };
+            let payload = json!({
+                "ref": short_ref(&ev.ref_name),
+                "ref_type": ev.ref_type,
+                "master_branch": default_branch(view),
+                "description": Value::Null,
+                "pusher_type": "user",
+                "repository": repository,
+                "installation": json!({ "id": self.installation_id }),
+                "sender": sender_user(urls),
+            });
+            self.sender.deliver(event, &payload).await?;
+        }
+        if ev.ref_type == "branch" && !created && !deleted {
+            self.synchronize_prs(view, urls, &repository, ev).await?;
+        }
+        Ok(())
+    }
+
+    async fn push_payload(
+        &self,
+        view: &View,
+        urls: &Urls,
+        repository: &Value,
+        ev: &RefEvent,
+    ) -> anyhow::Result<Value> {
+        let local = &view.local;
+        let full = &view.full_name;
+        let created = all_zeros(&ev.old);
+        let deleted = all_zeros(&ev.new);
+        // A create renders the tip only (its history is not "pushed commits"
+        // for any consumer here); an update renders the range, newest 20, so
+        // `head_commit` is always in `commits[]`.
+        let (shas, size, forced) = if deleted {
+            (Vec::new(), 0u64, false)
+        } else if created {
+            (vec![ev.new.clone()], 1u64, false)
+        } else {
+            let all = repo::commits_between(local, &ev.old, &ev.new)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            let size = all.len() as u64;
+            let keep = all.len().saturating_sub(MAX_COMMITS);
+            let forced = !local.is_ancestor(&ev.old, &ev.new).await.unwrap_or(false);
+            (all.into_iter().skip(keep).collect(), size, forced)
+        };
+        let mut commits = Vec::with_capacity(shas.len());
+        for sha in &shas {
+            commits.push(commit_json(local, urls, full, sha).await?);
+        }
+        let head_commit = commits.last().cloned().unwrap_or(Value::Null);
+        let pusher = if ev.pusher.is_empty() {
+            USER_LOGIN
+        } else {
+            ev.pusher.as_str()
+        };
+        Ok(json!({
+            "ref": ev.ref_name,
+            "before": ev.old,
+            "after": ev.new,
+            "created": created,
+            "deleted": deleted,
+            "forced": forced,
+            "size": size,
+            "base_ref": Value::Null,
+            "compare": format!("{}/{full}/compare/{}...{}", urls.html, ev.old, ev.new),
+            "repository": repository,
+            "installation": json!({ "id": self.installation_id }),
+            // The WAL's principal, not the facade's one user: a consumer that
+            // attributes a push wants who actually pushed.
+            "pusher": {
+                "name": pusher,
+                "email": format!("{pusher}@floe.localhost"),
+            },
+            "sender": sender_user(urls),
+            "head_commit": head_commit,
+            "commits": commits,
+        }))
+    }
+
+    /// A push to an open PR's head branch is a `synchronize`. The index row
+    /// carries the head ref, so this is one GET of the index plus one per PR
+    /// actually affected.
+    async fn synchronize_prs(
+        &self,
+        view: &View,
+        urls: &Urls,
+        repository: &Value,
+        ev: &RefEvent,
+    ) -> anyhow::Result<()> {
+        let Some(branch) = ev.ref_name.strip_prefix("refs/heads/") else {
+            return Ok(());
+        };
+        let store = view.handle.store().clone();
+        let Ok((index, _)) = super::pr_store::read_index(&store).await else {
+            return Ok(());
+        };
+        let numbers: Vec<u64> = index
+            .prs
+            .iter()
+            .filter(|r| r.state == "open" && r.head_ref == branch)
+            .map(|r| r.number)
+            .collect();
+        for number in numbers {
+            let Ok(Some(pr)) = super::pr_store::try_read(&store, number).await else {
+                continue;
+            };
+            let mut payload = super::prs::event_payload(
+                view,
+                urls,
+                repository,
+                "synchronize",
+                &pr,
+                &ev.new,
+                &json!({ "id": self.installation_id }),
+                &sender_user(urls),
+            );
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("before".into(), json!(ev.old));
+                obj.insert("after".into(), json!(ev.new));
+            }
+            self.sender.deliver("pull_request", &payload).await?;
+        }
+        Ok(())
+    }
+}
+
+fn default_branch(view: &View) -> String {
+    view.index
+        .head_target
+        .strip_prefix("refs/heads/")
+        .unwrap_or("main")
+        .to_string()
+}
+
+#[async_trait::async_trait]
+impl Sink for GithubSink {
+    fn name(&self) -> &'static str {
+        "github"
+    }
+
+    fn attach_state(&self, st: &Arc<AppState>) {
+        let _ = self.state.set(Arc::downgrade(st));
+    }
+
+    async fn deliver(&self, batch: &[RefEvent]) -> anyhow::Result<()> {
+        let st = self.state()?;
+        let urls = urls(&st.cfg);
+        // A bridge batch is already committed before we synchronize. One view
+        // per repo therefore contains the objects for every event in the batch;
+        // repeatedly syncing it per event only queues behind concurrent writers.
+        // The repository's topics ride along: one GET per repo, not per event.
+        let mut views = std::collections::HashMap::new();
+        for ev in batch.iter().filter(|ev| !ev.ref_type.is_empty()) {
+            let (view, topics) = match views.entry(ev.repo.as_str()) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let (owner, name) = ev
+                        .repo
+                        .split_once('/')
+                        .ok_or_else(|| anyhow::anyhow!("bad repo id {}", ev.repo))?;
+                    let id = RepoId::new(owner, name)?;
+                    let view = repo::objects_view(&st, &id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                    let topics = super::topics::load(&st, &id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                    entry.insert((view, topics))
+                }
+            };
+            self.deliver_ref(view, topics, &urls, ev).await?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_oids_and_short_refs() {
+        assert!(all_zeros(&"0".repeat(40)));
+        assert!(!all_zeros(""));
+        assert!(!all_zeros("0000000000000000000000000000000000000001"));
+        assert_eq!(short_ref("refs/heads/feature/x"), "feature/x");
+        assert_eq!(short_ref("refs/tags/v1"), "v1");
+        assert_eq!(short_ref("HEAD"), "HEAD");
+    }
+
+    /// The signature a consumer verifies is the floe-native one over the raw
+    /// body, with GitHub's header name.
+    #[test]
+    fn signature_is_hmac_sha256_of_the_body() {
+        let sig = crate::events::WebhookSink::signature(b"secret", b"{\"a\":1}");
+        assert!(sig.starts_with("sha256="));
+        assert_eq!(sig.len(), "sha256=".len() + 64);
+        assert_eq!(
+            sig,
+            crate::events::WebhookSink::signature(b"secret", b"{\"a\":1}")
+        );
+        assert_ne!(
+            sig,
+            crate::events::WebhookSink::signature(b"other", b"{\"a\":1}")
+        );
+    }
+
+    #[test]
+    fn urls_prefer_public_url() {
+        let mut cfg = floe_config::Config::default();
+        cfg.server.public_url = Some("http://127.0.0.1:8080/".into());
+        let u = urls(&cfg);
+        assert_eq!(u.html, "http://127.0.0.1:8080");
+        assert_eq!(u.api, "http://127.0.0.1:8080/api/v3");
+    }
+}

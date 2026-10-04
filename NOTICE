@@ -1,0 +1,6 @@
+floe is derived from walgit (https://github.com/rgodha24/walgithub),
+imported at commit c056857be70c7f4feb00c9db7cf1b85fe7803f2f and used under the MIT License.
+Copyright (c) 2026 the walgit authors.
+
+Identifiers were renamed from `walgit` to `floe`; the original design documents under
+docs/ describe walgit's architecture and are kept with that provenance.

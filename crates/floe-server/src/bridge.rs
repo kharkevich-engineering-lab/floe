@@ -1,0 +1,536 @@
+//! The events bridge (`Role::Events`, `docs/EVENTS.md`): the WAL → your webhook.
+//! The only producer of events.
+//!
+//! `catch_up(repo)`: read the durable cursor `events/cursor.json` (last seq
+//! published), the fresh manifest, and the log entries `(cursor, head_seq]`;
+//! convert to `ref` events; deliver to every sink; CAS the cursor to
+//! `head_seq`. A sink failure leaves the cursor where it was, so the next
+//! wake-up retries the same range — at-least-once, never a gap, and
+//! `head_seq - cursor` is the lag. An event is published iff its entry is
+//! durable; nothing on the push path knows events exist.
+//!
+//! Wake-ups, both idempotent (they only ever call `catch_up`):
+//! * `POST /_events/notify` with a bucket notification that names a finalized
+//!   `…/manifest.pb` — the commit point itself as a notification. Accepted
+//!   shapes: a GCS Pub/Sub push envelope (`message.attributes.objectId`), an S3
+//!   event notification (`Records[].s3.object.key`), or a plain `{"key": "…"}`
+//!   / `{"repo": "owner/name"}`. A non-2xx here is meant to be redelivered;
+//! * the sweep (`events.sweep_interval`): every repo — the backstop. A sweep
+//!   that finds unpublished entries means the notifications are not flowing
+//!   and says so (`events_bridge_sweep_found_total`, warn).
+//!
+//! One instance of the service; catch-ups serialize per repository and target.
+
+use std::sync::{Arc, OnceLock, Weak};
+
+use anyhow::Context;
+use chrono::Utc;
+use futures::StreamExt;
+use floe_git::RepoId;
+use floe_store::{ObjectStoreExt, PutMode, StoreError};
+
+use crate::events::{self, RefEvent, Sink};
+
+const CURSOR_KEY: &str = "events/cursor.json";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Cursor {
+    published_seq: u64,
+    updated_at: String,
+}
+
+/// What one `catch_up` did.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CatchUp {
+    pub repo: String,
+    /// Cursor before (the last seq already published).
+    pub from_seq: u64,
+    pub head_seq: u64,
+    pub emitted: usize,
+}
+
+pub struct Bridge {
+    registry: Arc<floe_wal::Registry>,
+    /// Global key prefix of the bucket (`prefix/`): GCS object names
+    /// carry it, the registry's store strips it.
+    store_prefix: String,
+    sinks: Vec<Box<dyn Sink>>,
+    /// The GitHub facade's sink is on. It changes two things and nothing else
+    /// (`docs/GITHUB.md` §Webhooks): a write on this instance wakes the bridge
+    /// directly, and a sweep that finds work is the design rather than an
+    /// alarm — a dev bucket has no notifications to be missing.
+    github_sink: bool,
+    state: OnceLock<Weak<crate::AppState>>,
+    serial: dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl Bridge {
+    /// `None` unless this instance has the `events` role and a sink is
+    /// configured (`events.webhook_url`).
+    pub fn new(
+        cfg: &floe_config::Config,
+        registry: Arc<floe_wal::Registry>,
+    ) -> Option<Arc<Bridge>> {
+        if !cfg.has_role(floe_config::Role::Events) {
+            return None;
+        }
+        let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
+        if let Some(url) = &cfg.events.webhook_url {
+            sinks.push(Box::new(events::WebhookSink::new(
+                url.clone(),
+                cfg.events.webhook_secret.clone().filter(|s| !s.is_empty()),
+            )));
+        }
+        // The GitHub facade's own sink (`docs/GITHUB.md` §Webhooks): the same
+        // WAL entries, rendered as GitHub `push` / `create` / `delete`
+        // deliveries. Independent of the floe-native array webhook above.
+        let github_sink = cfg.github.enabled;
+        if sinks.is_empty() && !github_sink {
+            return None;
+        }
+        tracing::info!(
+            sinks = ?sinks.iter().map(|s| s.name()).collect::<Vec<_>>(),
+            "events bridge enabled"
+        );
+        Some(Arc::new(Bridge {
+            registry,
+            store_prefix: cfg.store_prefix(),
+            sinks,
+            github_sink,
+            state: OnceLock::new(),
+            serial: dashmap::DashMap::new(),
+        }))
+    }
+
+    /// Hand every sink the instance it belongs to. Called once, right after
+    /// the `AppState` Arc exists.
+    pub fn attach_state(&self, st: &Arc<crate::AppState>) {
+        let _ = self.state.set(Arc::downgrade(st));
+        for sink in &self.sinks {
+            sink.attach_state(st);
+        }
+    }
+
+    /// In-process wake-up: this instance just committed something for `id`, so
+    /// catch up now instead of waiting for the next sweep. Spawned — a writer
+    /// never waits on a webhook (invariant 1).
+    ///
+    /// Only the GitHub facade uses it (`docs/GITHUB.md` §Webhooks). The
+    /// floe-native bus keeps `docs/EVENTS.md`'s two wake-ups exactly —
+    /// `POST /_events/notify` and the sweep — because a production bridge is a
+    /// separate service and must not depend on being co-located with a writer.
+    pub fn wake(self: &Arc<Self>, id: &RepoId) {
+        if !self.github_sink {
+            return;
+        }
+        let bridge = self.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = bridge.catch_up(&id).await {
+                tracing::warn!(repo = %id, error = format!("{e:#}"), "events bridge: wake catch-up failed");
+            }
+        });
+    }
+
+    /// Publish everything committed after the cursor, then advance it.
+    pub async fn catch_up(&self, id: &RepoId) -> anyhow::Result<CatchUp> {
+        let native = async {
+            if self.sinks.is_empty() {
+                return Ok(None);
+            }
+            self.catch_up_target(id, CURSOR_KEY, None).await.map(Some)
+        };
+        let github = self.catch_up_github(id);
+        let (native, github) = tokio::join!(native, github);
+        // Every target ran even if another failed. Only its own cursor can
+        // advance, so a retry never replays a successful target's batch.
+        let mut report = native?;
+        for next in github? {
+            if let Some(current) = &mut report {
+                current.from_seq = current.from_seq.min(next.from_seq);
+                current.head_seq = current.head_seq.max(next.head_seq);
+                current.emitted += next.emitted;
+            } else {
+                report = Some(next);
+            }
+        }
+        Ok(report.unwrap_or_else(|| CatchUp {
+            repo: id.to_string(),
+            ..CatchUp::default()
+        }))
+    }
+
+    async fn catch_up_github(&self, id: &RepoId) -> anyhow::Result<Vec<CatchUp>> {
+        if !self.github_sink {
+            return Ok(Vec::new());
+        }
+        let st = self
+            .state
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| anyhow::anyhow!("GitHub bridge has no server state"))?;
+        let registry = crate::github::integrations::read(self.registry.store())
+            .await
+            .map_err(|_| anyhow::anyhow!("could not read GitHub integrations"))?;
+        let targets: Vec<_> = registry
+            .subscriptions(id)
+            .map_err(|_| anyhow::anyhow!("invalid GitHub subscriptions"))?
+            .into_iter()
+            .map(|subscription| {
+                let sink = crate::github::webhook::GithubSink::new(
+                    crate::github::webhook::Sender::new(subscription.integration),
+                    subscription.installation.id,
+                );
+                sink.attach_state(&st);
+                let key = format!("github/events/{}.json", subscription.generation);
+                async move { self.catch_up_target(id, &key, Some(&sink)).await }
+            })
+            .collect();
+        futures::stream::iter(targets)
+            .buffer_unordered(16)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect()
+    }
+
+    async fn catch_up_target(
+        &self,
+        id: &RepoId,
+        cursor_key: &str,
+        github: Option<&crate::github::webhook::GithubSink>,
+    ) -> anyhow::Result<CatchUp> {
+        let serial = self
+            .serial
+            .entry(format!("{id}/{cursor_key}"))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _serial = serial.lock().await;
+        let handle = self.registry.open(id).await?;
+        let manifest = {
+            let guard = handle.sync_refs().await?;
+            let m = handle.manifest();
+            drop(guard);
+            m
+        };
+        let head = manifest.head_seq;
+        let store = handle.store();
+
+        // Persist the starting boundary before doing any delivery. Otherwise a
+        // failed first attempt followed by a checkpoint would start at a newer
+        // min_seq on retry and silently abandon that first batch.
+        let (from, version) = loop {
+            if let Some((meta, bytes)) = store.get_bytes(cursor_key).await? {
+                let c: Cursor = serde_json::from_slice(&bytes).context("event cursor")?;
+                break (c.published_seq, meta.version);
+            }
+            let start = handle.retained_log_start().await?;
+            let body = serde_json::to_vec(&Cursor {
+                published_seq: start,
+                updated_at: Utc::now().to_rfc3339(),
+            })?;
+            match store.put_bytes(cursor_key, body, PutMode::Create).await {
+                Ok(meta) => break (start, meta.version),
+                Err(StoreError::PreconditionFailed { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+        };
+        metrics::gauge!("events_bridge_lag_entries", "repo" => id.to_string())
+            .set(head.saturating_sub(from) as f64);
+        let mut report = CatchUp {
+            repo: id.to_string(),
+            from_seq: from,
+            head_seq: head,
+            emitted: 0,
+        };
+
+        if head > from {
+            let entries = handle.read_log_retained(from + 1, Some(head)).await?;
+            let mut batch = Vec::new();
+            events::refs_from_entries(id, &entries, &mut batch);
+            // A failing sink returns here: cursor untouched, retried on the
+            // next wake-up.
+            if let Some(sink) = github {
+                sink.deliver(&batch).await?;
+                metrics::counter!("events_published_total", "sink" => "github")
+                    .increment(batch.len() as u64);
+            } else {
+                self.publish(&batch).await?;
+            }
+            report.emitted = batch.len();
+        }
+
+        if from < head {
+            let body = serde_json::to_vec(&Cursor {
+                published_seq: head,
+                updated_at: Utc::now().to_rfc3339(),
+            })?;
+            let mode = PutMode::Update(version);
+            match store.put_bytes(cursor_key, body, mode).await {
+                Ok(_) => {}
+                // Another bridge instance advanced it: our emission was a
+                // duplicate (dedup key), theirs stands.
+                Err(StoreError::PreconditionFailed { .. }) => {
+                    tracing::warn!(repo = %id, "events bridge: cursor CAS lost (two bridges?)")
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        metrics::gauge!("events_bridge_lag_entries", "repo" => id.to_string()).set(0.0);
+        if report.emitted > 0 {
+            tracing::info!(repo = %id, from = from, head = head, emitted = report.emitted,
+                "events bridge: published");
+        }
+        Ok(report)
+    }
+
+    /// Every repo (a `list` + one conditional manifest GET each): the backstop
+    /// behind the notifications, and the health check — finding work here
+    /// means they are not flowing.
+    pub async fn sweep(&self) {
+        let repos = match self.registry.list().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "events bridge: sweep list failed");
+                return;
+            }
+        };
+        let mut passes = futures::stream::iter(repos.into_iter().map(|id| async move {
+            let result = self.catch_up(&id).await;
+            (id, result)
+        }))
+        .buffer_unordered(16);
+        while let Some((id, result)) = passes.next().await {
+            match result {
+                Ok(c) if c.emitted > 0 => {
+                    metrics::counter!("events_bridge_sweep_found_total")
+                        .increment(c.emitted as u64);
+                    if self.github_sink {
+                        tracing::debug!(repo = %id, emitted = c.emitted,
+                            "events bridge: sweep published (polling, docs/GITHUB.md)");
+                    } else {
+                        tracing::warn!(repo = %id, emitted = c.emitted,
+                            "events bridge: sweep found unpublished entries — are the GCS notifications flowing?");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(repo = %id, error = format!("{e:#}"), "events bridge: sweep catch-up failed")
+                }
+            }
+        }
+        // Entries are held while a catch-up owns/waits for its mutex. Retain
+        // those; obsolete disposable-repo/generation locks can be reclaimed.
+        self.serial.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
+
+    /// A GCS notification: `…/repos/<o>/<r>/manifest.pb` finalized ⇒ that
+    /// repo committed something. Everything else is ignored.
+    pub async fn object_finalized(&self, object: &str) -> anyhow::Result<Option<CatchUp>> {
+        let Some(id) = self.manifest_repo(object) else {
+            return Ok(None);
+        };
+        match self.catch_up(&id).await {
+            // A late notification for a repo deleted since: nothing to do
+            // (a 503 here would have Pub/Sub retry it for days).
+            Err(e)
+                if matches!(
+                    e.downcast_ref::<floe_wal::WalError>(),
+                    Some(floe_wal::WalError::NotFound)
+                ) =>
+            {
+                Ok(None)
+            }
+            r => r.map(Some),
+        }
+    }
+
+    /// `prefix/repos/<o>/<r>/manifest.pb` → `o/r`.
+    fn manifest_repo(&self, object: &str) -> Option<RepoId> {
+        let rel = object
+            .strip_prefix(self.store_prefix.as_str())?
+            .strip_prefix("repos/")?
+            .strip_suffix("/manifest.pb")?;
+        let (owner, name) = rel.split_once('/')?;
+        if name.contains('/') {
+            return None;
+        }
+        RepoId::new(owner, name).ok()
+    }
+
+    async fn publish(&self, batch: &[RefEvent]) -> anyhow::Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        for sink in &self.sinks {
+            sink.deliver(batch)
+                .await
+                .with_context(|| format!("{} sink", sink.name()))?;
+            metrics::counter!("events_published_total", "sink" => sink.name())
+                .increment(batch.len() as u64);
+        }
+        // One structured line per published event (Cloud Logging:
+        // `jsonPayload.event_type="ref"`).
+        for ev in batch {
+            if let Ok(body) = serde_json::to_string(ev) {
+                tracing::info!(target: "floe::event",
+                    event_type = "ref", repo = %ev.repo, event = %body, "event");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The object keys (or repository ids) a notification body names. Store-agnostic.
+fn notified_keys(v: &serde_json::Value) -> Vec<String> {
+    let mut keys = Vec::new();
+    // GCS → Pub/Sub push envelope.
+    let attrs = &v["message"]["attributes"];
+    if attrs["eventType"] == "OBJECT_FINALIZE"
+        && let Some(k) = attrs["objectId"].as_str()
+    {
+        keys.push(k.to_string());
+    }
+    // S3 event notification (also what MinIO/rustfs/Ceph emit).
+    if let Some(records) = v["Records"].as_array() {
+        for r in records {
+            if r["eventName"]
+                .as_str()
+                .is_some_and(|e| e.starts_with("ObjectCreated"))
+                && let Some(k) = r["s3"]["object"]["key"].as_str()
+            {
+                // S3 URL-encodes keys in notifications.
+                keys.push(
+                    k.replace('+', " ")
+                        .split('%')
+                        .enumerate()
+                        .map(|(i, part)| {
+                            if i == 0 {
+                                return part.to_string();
+                            }
+                            match u8::from_str_radix(part.get(..2).unwrap_or(""), 16) {
+                                Ok(b) => format!("{}{}", b as char, &part[2..]),
+                                Err(_) => format!("%{part}"),
+                            }
+                        })
+                        .collect(),
+                );
+            }
+        }
+    }
+    // Plain shapes for your own glue.
+    if let Some(k) = v["key"].as_str() {
+        keys.push(k.to_string());
+    }
+    if let Some(r) = v["repo"].as_str() {
+        keys.push(format!("repos/{r}/manifest.pb"));
+    }
+    keys
+}
+
+/// `POST /_events/notify`: a bucket notification naming a finalized `manifest.pb`.
+/// `200` (ack) when handled or ignored, `503` (redeliver) when a sink failed.
+pub async fn http_notify(
+    st: &crate::AppState,
+    headers: &axum::http::HeaderMap,
+    body: axum::body::Body,
+) -> Result<axum::response::Response, crate::error::ApiError> {
+    use crate::error::ApiError;
+    use axum::response::IntoResponse;
+    let _ = st.auth.require_read(headers).await.map_err(auth_err)?;
+    let Some(bridge) = &st.bridge else {
+        return Err(ApiError::NotFound(
+            "events bridge is not enabled here".into(),
+        ));
+    };
+    let bytes = crate::collect_body(body).await?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| ApiError::BadRequest(format!("notify body: {e}")))?;
+    let mut reports = Vec::new();
+    for key in notified_keys(&v) {
+        match bridge.object_finalized(&key).await {
+            Ok(Some(report)) => reports.push(report),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, key, "events bridge: notify failed");
+                return Ok((
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    format!("events bridge: {e:#}"),
+                )
+                    .into_response());
+            }
+        }
+    }
+    Ok(axum::Json(reports).into_response())
+}
+
+fn auth_err(e: crate::auth::AuthError) -> crate::error::ApiError {
+    use crate::error::ApiError;
+    match e {
+        crate::auth::AuthError::Invalid | crate::auth::AuthError::Unauthorized => {
+            ApiError::Unauthorized
+        }
+        crate::auth::AuthError::Forbidden => ApiError::Forbidden,
+        crate::auth::AuthError::Unavailable => {
+            ApiError::ServiceUnavailable("auth provider unavailable".into())
+        }
+    }
+}
+
+/// The sweep timer: `events.sweep_interval`, shortened to
+/// `github.webhook_poll_interval` when the GitHub sink is on (a dev bucket has
+/// no notifications, and the editor suite waits seconds, not minutes). 0 = off.
+pub fn spawn_sweeper(state: Arc<crate::AppState>) {
+    let Some(bridge) = state.bridge.clone() else {
+        return;
+    };
+    let mut every = state.cfg.events.sweep_interval;
+    if state.cfg.github.enabled {
+        let poll = state.cfg.github.webhook_poll_interval;
+        if !poll.is_zero() && (every.is_zero() || poll < every) {
+            every = poll;
+        }
+    }
+    if every.is_zero() {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(every).await;
+            bridge.sweep().await;
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_object_names() {
+        let b = Bridge {
+            registry: floe_wal::Registry::new(
+                Arc::new(floe_store::memory::MemoryStore::new()),
+                Arc::new(floe_config::Config::default()),
+            ),
+            store_prefix: "prefix/".into(),
+            sinks: Vec::new(),
+            github_sink: false,
+            state: OnceLock::new(),
+            serial: dashmap::DashMap::new(),
+        };
+        let id = b
+            .manifest_repo("prefix/repos/acme/monorepo/manifest.pb")
+            .unwrap();
+        assert_eq!(id.to_string(), "acme/monorepo");
+        for other in [
+            "prefix/repos/t/r/wal/abc.pack",
+            "prefix/repos/t/r/events/cursor.json",
+            "floe-go/repos/t/r/manifest.pb",
+            "prefix/repos/t/manifest.pb",
+            "prefix/repos/t/r/x/manifest.pb",
+        ] {
+            assert!(b.manifest_repo(other).is_none(), "{other}");
+        }
+    }
+}

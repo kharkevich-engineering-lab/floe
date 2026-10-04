@@ -1,0 +1,37 @@
+# Runtime defaults for the facade image (Containerfile).
+# The deployment supplies the bucket, region and public origin (FLOE__ overrides). Integrations are
+# registered through the `_dev` API (docs/GITHUB.md §11).
+[server]
+listen = "0.0.0.0:8097"
+auto_create_on_push = true
+
+[server.auth]
+mode = "none"
+
+[server.tls]
+mode = "off"
+
+[bundles]
+enabled = false
+advertise = false
+
+[github]
+enabled = true
+webhook_poll_interval = "1s"
+
+[store]
+backend = "s3"
+prefix = ""
+
+[store.s3]
+# Let the AWS SDK choose its endpoint from the injected region.
+endpoint = ""
+force_path_style = false
+
+[cache]
+dir = "/var/lib/floe"
+max_bytes = "5GiB"
+
+[telemetry]
+log_format = "json"
+log_filter = "info"
