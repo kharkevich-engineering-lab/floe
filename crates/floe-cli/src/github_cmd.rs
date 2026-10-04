@@ -34,7 +34,7 @@ pub async fn run(action: GithubAction, cfg: &Arc<Config>) -> Result<()> {
             let registry = Registry::new(store.clone(), cfg.clone());
             let source = Arc::new(floe_mirror::github::GithubSource::new(gm)?);
             let target =
-                floe_mirror::WalTarget::new(registry, store.clone(), Box::new(|_| {}));
+                floe_mirror::WalTarget::new(registry, store.clone(), Box::new(|_: &floe_git::RepoId| {}));
             let mirror = Arc::new(Mirror {
                 cfg: cfg.clone(),
                 source,

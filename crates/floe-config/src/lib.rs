@@ -2263,7 +2263,7 @@ listen = \"0.0.0.0:1\"\n",
         let mut bad = c.clone();
         bad.server.roles = vec![Role::Serve];
         assert!(bad.validate().is_err());
-        for edit in [
+        let edits: [fn(&mut GithubMirrorConfig); 8] = [
             |m: &mut GithubMirrorConfig| m.prefix = "GH".into(),
             |m: &mut GithubMirrorConfig| m.prefix = String::new(),
             |m: &mut GithubMirrorConfig| m.include = vec!["acme".into()],
@@ -2272,7 +2272,8 @@ listen = \"0.0.0.0:1\"\n",
             |m: &mut GithubMirrorConfig| m.api_url = "ftp://x".into(),
             |m: &mut GithubMirrorConfig| m.follow = vec![],
             |m: &mut GithubMirrorConfig| m.follow = vec!["refs/archive/*".into()],
-        ] {
+        ];
+        for edit in edits {
             let mut bad = c.clone();
             edit(&mut bad.github_mirror);
             assert!(bad.validate().is_err(), "{:?}", bad.github_mirror);

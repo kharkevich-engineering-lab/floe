@@ -55,7 +55,7 @@ pub async fn run_loop(state: Arc<AppState>) {
     });
     // Catalog telemetry (`sync_runs`/`repo_inventory`, §C.6) hooks in here once
     // `floe-catalog`'s Recorder lands on this branch.
-    floe_mirror::run_loop(mirror, Box::new(|_| {})).await;
+    floe_mirror::run_loop(mirror, Box::new(|_: &floe_mirror::PassReport| {})).await;
 }
 
 #[cfg(test)]
