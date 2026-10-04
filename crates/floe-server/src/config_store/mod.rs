@@ -467,7 +467,9 @@ impl ConfigStore {
             return Err(errors);
         }
         let stored = doc.to_json().map_err(|e| vec![FieldError::from_error(&e)])?;
-        let diff = diff(current.map(|r| &r.document), &stored);
+        // The first revision is diffed against the built-in defaults it replaces.
+        let defaults = RuntimeConfig::default().to_json().unwrap_or_default();
+        let diff = diff(Some(current.map_or(&defaults, |r| &r.document)), &stored);
         let restart_required = restart_paths(&diff);
         Ok(Prepared {
             stored,

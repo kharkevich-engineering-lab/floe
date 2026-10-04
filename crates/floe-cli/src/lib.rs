@@ -480,7 +480,7 @@ enum ConfigAction {
         #[arg(long, short, default_value = "")]
         message: String,
     },
-    /// One shot: publish a pre-D60 floe.toml's [github_mirror]/[catalog]/[events].
+    /// One shot: publish a pre-D60 file's `github_mirror`, `catalog` and `events` sections.
     Import {
         file: PathBuf,
         #[arg(long, short, default_value = "")]

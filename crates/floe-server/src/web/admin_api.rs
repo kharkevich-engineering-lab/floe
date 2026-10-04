@@ -52,11 +52,14 @@ pub fn routes(mut r: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
 
 // ---- plumbing -----------------------------------------------------------------
 
-async fn admin(st: &AppState, headers: &HeaderMap) -> Result<Principal, Response> {
+/// A refusal, already rendered (boxed: a `Response` is too large for an `Err`).
+type Refusal = Box<Response>;
+
+async fn admin(st: &AppState, headers: &HeaderMap) -> Result<Principal, Refusal> {
     st.auth
         .require_admin(headers)
         .await
-        .map_err(|e| crate::web::api::auth_err(e).into_response())
+        .map_err(|e| Box::new(crate::web::api::auth_err(e).into_response()))
 }
 
 fn no_store(mut r: Response) -> Response {
@@ -73,18 +76,20 @@ fn fail(status: StatusCode, v: &Value) -> Response {
     no_store((status, axum::Json(v)).into_response())
 }
 
-fn bad_request(message: impl std::fmt::Display) -> Response {
+fn bad_request(message: &str) -> Response {
     fail(
         StatusCode::BAD_REQUEST,
-        &json!({"error": message.to_string(), "errors": []}),
+        &json!({"error": message, "errors": []}),
     )
 }
 
-fn parse<T: serde::de::DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
-    if body.is_empty() {
-        return serde_json::from_value(json!({})).map_err(|e| bad_request(format!("JSON body: {e}")));
-    }
-    serde_json::from_slice(body).map_err(|e| bad_request(format!("JSON body: {e}")))
+fn parse<T: serde::de::DeserializeOwned>(body: &Bytes) -> Result<T, Refusal> {
+    let parsed = if body.is_empty() {
+        serde_json::from_value(json!({}))
+    } else {
+        serde_json::from_slice(body)
+    };
+    parsed.map_err(|e| Box::new(bad_request(&format!("JSON body: {e}"))))
 }
 
 fn publish_error(e: PublishError) -> Response {
@@ -151,7 +156,7 @@ fn record_json(r: &config_store::Record) -> Value {
 
 async fn config_get(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Err(r) = admin(&st, &headers).await {
-        return r;
+        return *r;
     }
     let cs = st.config.store();
     let current = match cs.current().await {
@@ -204,11 +209,11 @@ struct PutBody {
 async fn config_put(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     let principal = match admin(&st, &headers).await {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let req: PutBody = match parse(&body) {
         Ok(b) => b,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let published = st
         .config
@@ -253,11 +258,11 @@ struct ValidateBody {
 
 async fn config_validate(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(r) = admin(&st, &headers).await {
-        return r;
+        return *r;
     }
     let req: ValidateBody = match parse(&body) {
         Ok(b) => b,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let cs = st.config.store();
     let current = match cs.current().await {
@@ -272,7 +277,7 @@ async fn config_validate(State(st): State<Arc<AppState>>, headers: HeaderMap, bo
 
 async fn config_schema(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Err(r) = admin(&st, &headers).await {
-        return r;
+        return *r;
     }
     ok(&config_store::schema::document_schema())
 }
@@ -289,7 +294,7 @@ async fn config_history(
     Query(q): Query<HistoryQuery>,
 ) -> Response {
     if let Err(r) = admin(&st, &headers).await {
-        return r;
+        return *r;
     }
     match st
         .config
@@ -308,7 +313,7 @@ async fn config_revision(
     Path(n): Path<u64>,
 ) -> Response {
     if let Err(r) = admin(&st, &headers).await {
-        return r;
+        return *r;
     }
     match st.config.store().revision(n).await {
         Ok(r) => ok(&record_json(&r)),
@@ -327,11 +332,11 @@ struct RollbackBody {
 async fn config_rollback(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     let principal = match admin(&st, &headers).await {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let req: RollbackBody = match parse(&body) {
         Ok(b) => b,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let published = st
         .config
@@ -351,7 +356,7 @@ async fn config_rollback(State(st): State<Arc<AppState>>, headers: HeaderMap, bo
 
 async fn overview(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Err(r) = admin(&st, &headers).await {
-        return r;
+        return *r;
     }
     let cs = st.config.store();
     let (current, instances, mirror) = tokio::join!(cs.current(), cs.instances(), mirror_summary(&st));
@@ -447,7 +452,7 @@ fn is_paused(gm: &GithubMirrorConfig, full_name: &str) -> bool {
 
 async fn mirror_status(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Err(r) = admin(&st, &headers).await {
-        return r;
+        return *r;
     }
     let cfg = st.config.current().cfg;
     let gm = &cfg.github_mirror;
@@ -483,7 +488,7 @@ async fn mirror_status(State(st): State<Arc<AppState>>, headers: HeaderMap) -> R
 /// The candidate `github_mirror` section of a request (`{"section": {...}}`),
 /// over the applied one for missing keys; a redacted or sealed token means
 /// "the applied token".
-fn candidate_section(st: &AppState, section: Option<&Value>) -> Result<GithubMirrorConfig, Response> {
+fn candidate_section(st: &AppState, section: Option<&Value>) -> Result<GithubMirrorConfig, Refusal> {
     let applied = st.config.current().cfg.github_mirror.clone();
     let Some(section) = section else {
         return Ok(applied);
@@ -495,7 +500,7 @@ fn candidate_section(st: &AppState, section: Option<&Value>) -> Result<GithubMir
         }
     }
     let doc: RuntimeConfig = serde_json::from_value(json!({ "github_mirror": base }))
-        .map_err(|e| bad_request(format!("github_mirror: {e}")))?;
+        .map_err(|e| Box::new(bad_request(&format!("github_mirror: {e}"))))?;
     let mut gm = doc.github_mirror;
     if matches!(gm.token, Secret::Redacted(_) | Secret::Sealed(_)) {
         gm.token = applied.token;
@@ -551,15 +556,15 @@ struct PreviewBody {
 
 async fn mirror_preview(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(r) = admin(&st, &headers).await {
-        return r;
+        return *r;
     }
     let req: PreviewBody = match parse(&body) {
         Ok(b) => b,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let gm = match candidate_section(&st, req.section.as_ref()) {
         Ok(g) => g,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let state = match floe_mirror::state::load(st.store.as_ref(), "github").await {
         Ok(s) => s,
@@ -651,11 +656,11 @@ struct TestBody {
 
 async fn mirror_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(r) = admin(&st, &headers).await {
-        return r;
+        return *r;
     }
     let req: TestBody = match parse(&body) {
         Ok(b) => b,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let applied = st.config.current().cfg.github_mirror.clone();
     let api = req.api_url.unwrap_or(applied.api_url).trim_end_matches('/').to_string();
@@ -704,7 +709,7 @@ async fn mirror_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: 
 async fn mirror_sync(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let principal = match admin(&st, &headers).await {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match crate::mirror::request_sync(&st.store, &principal.name).await {
         Ok(()) => ok(&json!({"ok": true, "message": "requested: the mirror loop runs a pass within about a minute"})),
@@ -730,11 +735,11 @@ async fn mirror_resume(State(st): State<Arc<AppState>>, headers: HeaderMap, body
 async fn pause_or_resume(st: Arc<AppState>, headers: HeaderMap, body: Bytes, pause: bool) -> Response {
     let principal = match admin(&st, &headers).await {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let req: PauseBody = match parse(&body) {
         Ok(b) => b,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let name = req.full_name.trim().to_string();
     if name.matches('/').count() != 1 || name.contains('*') || name.starts_with('/') || name.ends_with('/') {
@@ -786,7 +791,7 @@ async fn pause_or_resume(st: Arc<AppState>, headers: HeaderMap, body: Bytes, pau
 
 async fn catalog_status(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Err(r) = admin(&st, &headers).await {
-        return r;
+        return *r;
     }
     let cfg = st.config.current().cfg;
     let mut v = catalog_json(&st, &cfg.catalog);
@@ -814,11 +819,11 @@ struct CatalogTestBody {
 /// what would be used without a call until the writer's auth seam exposes them.
 async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(r) = admin(&st, &headers).await {
-        return r;
+        return *r;
     }
     let req: CatalogTestBody = match parse(&body) {
         Ok(b) => b,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let applied = st.config.current().cfg.catalog.clone();
     let cat = match req.section {
@@ -832,7 +837,7 @@ async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body:
             }
             match serde_json::from_value::<RuntimeConfig>(json!({"catalog": base})) {
                 Ok(d) => d.catalog,
-                Err(e) => return bad_request(format!("catalog: {e}")),
+                Err(e) => return bad_request(&format!("catalog: {e}")),
             }
         }
     };
