@@ -274,6 +274,22 @@ pub trait ObjectStore: Send + Sync + 'static {
             "compose is not supported by this backend".into(),
         ))
     }
+
+    /// Whether the bucket keeps noncurrent object versions (S3 bucket
+    /// versioning, GCS object versioning). The config store (D60) keeps its
+    /// history bodies there when it does. Default: no.
+    async fn object_versioning(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// The body `key` had at `version` (a [`Version`] a write of `key`
+    /// returned), when the bucket still keeps it. `Ok(None)` = expired or never
+    /// existed. Backends without versioning answer `InvalidArgument`.
+    async fn get_version(&self, key: &str, _version: &Version) -> Result<Option<Bytes>> {
+        Err(StoreError::InvalidArgument(format!(
+            "{key}: this backend keeps no object versions"
+        )))
+    }
 }
 
 /// Convenience extension methods shared by all backends.
@@ -623,6 +639,12 @@ impl ObjectStore for Prefixed {
             .compose(&self.full(dest), &full_sources, opts)
             .await?;
         Ok(self.strip(meta))
+    }
+    async fn object_versioning(&self) -> Result<bool> {
+        self.inner.object_versioning().await
+    }
+    async fn get_version(&self, key: &str, version: &Version) -> Result<Option<Bytes>> {
+        self.inner.get_version(&self.full(key), version).await
     }
 }
 

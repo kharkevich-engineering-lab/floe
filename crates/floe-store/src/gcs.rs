@@ -794,6 +794,42 @@ impl ObjectStore for GcsStore {
         }
     }
 
+    async fn object_versioning(&self) -> Result<bool> {
+        let req = google_cloud_storage::model::GetBucketRequest::new()
+            .set_name(self.bucket_resource.clone());
+        match call("bucket", &self.bucket, META_DEADLINE, READ_RETRIES, || {
+            self.control.get_bucket().with_request(req.clone()).send()
+        })
+        .await
+        {
+            Ok(b) => Ok(b.versioning.is_some_and(|v| v.enabled)),
+            Err(e) => Err(e.into_store("bucket", &self.bucket)),
+        }
+    }
+
+    /// A [`Version`] here is the object's generation: read that generation.
+    async fn get_version(&self, key: &str, version: &Version) -> Result<Option<Bytes>> {
+        let Some(generation) = parse_generation(version) else {
+            return Ok(None);
+        };
+        let (client, permit) = self.data_client(key, false).await;
+        let open = client
+            .read_object(self.bucket_resource.clone(), key.to_owned())
+            .set_generation(generation)
+            .send();
+        let resp = match tokio::time::timeout(READ_OPEN_DEADLINE, open).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                let e = map_error(key, e);
+                return if e.is_not_found() { Ok(None) } else { Err(e) };
+            }
+            Err(_) => return Err(deadline_error("read", key, READ_OPEN_DEADLINE)),
+        };
+        let size = usize::try_from(resp.object().size).unwrap_or(0);
+        let body = crate::util::collect(unfold_response(key, resp, permit), size).await?;
+        Ok(Some(body))
+    }
+
     fn supports_compose(&self) -> bool {
         true
     }

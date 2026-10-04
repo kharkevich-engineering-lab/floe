@@ -30,6 +30,11 @@ pub struct MemoryStore {
     /// Test switch: `signed_get_url` fails like a store whose signing permission
     /// is unavailable or denied.
     pub signing_fails: bool,
+    /// Test switch: keep every overwritten body, like a bucket with object
+    /// versioning (`object_versioning`, `get_version`).
+    pub versioning: std::sync::atomic::AtomicBool,
+    /// Noncurrent bodies by `(key, version)` while `versioning` is on.
+    noncurrent: Mutex<std::collections::HashMap<(String, Version), Bytes>>,
 }
 
 impl MemoryStore {
@@ -172,6 +177,11 @@ impl ObjectStore for MemoryStore {
         }
         let version = self.next_version();
         let size = data.len() as u64;
+        if self.versioning.load(Ordering::Relaxed) {
+            self.noncurrent
+                .lock()
+                .insert((key.to_owned(), version.clone()), data.clone());
+        }
         g.insert(key.to_owned(), (version.clone(), data));
         Ok(ObjectMeta {
             key: key.into(),
@@ -185,6 +195,23 @@ impl ObjectStore for MemoryStore {
     }
     fn compose_is_native(&self) -> bool {
         true
+    }
+
+    async fn object_versioning(&self) -> Result<bool> {
+        Ok(self.versioning.load(Ordering::Relaxed))
+    }
+
+    async fn get_version(&self, key: &str, version: &Version) -> Result<Option<Bytes>> {
+        if !self.versioning.load(Ordering::Relaxed) {
+            return Err(StoreError::InvalidArgument(format!(
+                "{key}: versioning is off on this memory store"
+            )));
+        }
+        Ok(self
+            .noncurrent
+            .lock()
+            .get(&(key.to_owned(), version.clone()))
+            .cloned())
     }
 
     async fn compose(
@@ -259,6 +286,25 @@ impl ObjectStore for MemoryStore {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn versioning_keeps_noncurrent_bodies() {
+        let s = MemoryStore::new();
+        assert!(!s.object_versioning().await.unwrap());
+        let v0 = s.put_bytes("k", Bytes::from_static(b"zero"), PutMode::Create).await.unwrap().version;
+        assert!(s.get_version("k", &v0).await.is_err(), "off = unsupported");
+        s.versioning.store(true, Ordering::Relaxed);
+        assert!(s.object_versioning().await.unwrap());
+        let v1 = s.put_bytes("k", Bytes::from_static(b"one"), PutMode::Update(v0.clone())).await.unwrap().version;
+        let v2 = s.put_bytes("k", Bytes::from_static(b"two"), PutMode::Update(v1.clone())).await.unwrap().version;
+        assert_eq!(s.get_version("k", &v1).await.unwrap().as_deref(), Some(&b"one"[..]));
+        assert_eq!(s.get_version("k", &v2).await.unwrap().as_deref(), Some(&b"two"[..]));
+        assert_eq!(s.get_version("k", &v0).await.unwrap(), None, "written before versioning was on");
+        let p = crate::Prefixed::new(std::sync::Arc::new(s), "pre/");
+        assert!(p.object_versioning().await.unwrap());
+        assert_eq!(p.get_version("k", &v1).await.unwrap(), None, "prefixed key differs");
+    }
+
     use super::*;
     use crate::ObjectStoreExt;
 

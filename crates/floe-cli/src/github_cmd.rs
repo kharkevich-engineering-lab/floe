@@ -23,15 +23,18 @@ pub async fn run(action: GithubAction, cfg: &Arc<Config>) -> Result<()> {
     match action {
         GithubAction::Status { json } => status(&store, json).await,
         GithubAction::Sync { once, dry_run } => {
+            // D60: `[github_mirror]` lives in the config store.
+            let cs = floe_server::config_store::ConfigStore::open(cfg, &store).await?;
+            let cfg = &floe_server::config_store::live::effective_once(cfg, &cs).await?;
             let gm = &cfg.github_mirror;
             // `validate` checks the section only where the mirror is enabled
             // (a maintain host); a bad glob or URL must not run a pass here.
             gm.check()?;
             // The token check comes before the lease.
-            if std::env::var(&gm.token_env).map_or(true, |t| t.trim().is_empty()) {
+            if floe_config::secret::env_var(&gm.token_env).is_none() {
                 eprintln!(
-                    "floe: the GitHub token variable {} is unset or empty",
-                    gm.token_env
+                    "floe: no GitHub token: github_mirror.token in the config store resolves to nothing here ({:?})",
+                    gm.token
                 );
                 std::process::exit(2);
             }

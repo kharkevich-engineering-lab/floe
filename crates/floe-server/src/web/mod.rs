@@ -1,3 +1,4 @@
+pub mod admin_api;
 pub mod api;
 pub mod login;
 pub mod objects;

@@ -99,27 +99,22 @@ enabled = true                    # that already supports GHES develops against 
                                   # http://127.0.0.1:8080/api/v3. Auth-free by construction (any bearer, one hardcoded
                                   # user, admin everywhere) — hence loopback only, and never deployed.
 
-# The GitHub mirror (D49, README "Mirroring GitHub"): needs roles ∋ "maintain" (the default single box
-# has every role) and FLOE_GITHUB_TOKEN in the environment. Every floe reader can read mirrored private
-# repositories (no per-repository read ACL), hence the explicit acknowledgement.
-# [github_mirror]
-# enabled = true
-# users = ["@me"]
-# private_visible_to_all_readers = true   # or include_private = false
-
-# Iceberg audit tables (D50): a floe built with --features catalog, and
-# `podman compose --profile catalog up -d` (compose.yaml: RustFS S3 Tables, table bucket floe-catalog,
-# SigV4 with the floe-dev keys from AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, D63).
-# [catalog]
-# enabled = true
-# uri = "http://127.0.0.1:9000/iceberg"
-# warehouse = "floe-catalog"
-# auth = "sigv4"
-# sigv4_service = "s3"
-# s3_endpoint = "http://127.0.0.1:9000"
-# flush_interval = "5s"
-# Fallback (the Iceberg REST fixture in the same profile, no auth):
-# uri = "http://127.0.0.1:8181", warehouse = "s3://floe-test/warehouse", auth = "none".
+# The GitHub mirror (D49), the Iceberg audit tables (D50) and the events webhook are runtime configuration
+# (D60): open http://floe.localhost:8080/_admin (every user is admin on loopback with auth mode "none"), or
+#   floe --config floe.standalone.toml config set mirror.toml
+# with a document such as
+#   [github_mirror]
+#   enabled = true
+#   users = ["@me"]
+#   token = { env = "FLOE_GITHUB_TOKEN" }    # or { value = "ghp_…" } with FLOE_CONFIG_KEY set (sealed)
+#   private_visible_to_all_readers = true   # no per-repository read ACL; or include_private = false
+#   [catalog]                               # a floe built with --features catalog;
+#   enabled = true                          # `podman compose --profile catalog up -d`
+#   uri = "http://127.0.0.1:9000/iceberg"   # RustFS S3 Tables, SigV4 (D63)
+#   warehouse = "floe-catalog"
+#   auth = "sigv4"
+#   sigv4_service = "s3"
+#   s3_endpoint = "http://127.0.0.1:9000"
 
 [cache]
 dir = "/tmp/floe"               # materialized repositories; wiped = warmth lost, nothing else

@@ -214,14 +214,13 @@ impl Upstream {
     }
 
     /// The upstream token: the value of the environment variable
-    /// `Config::upstream_token_env` names.
+    /// `Config::upstream_token_env` names, resolved through the config
+    /// store's secret aliases first (D61: a token entered in the admin GUI).
     #[allow(clippy::unused_async, reason = "awaited by callers in other modules (ops.rs)")]
     pub async fn secret(&self, env_name: &str) -> anyhow::Result<String> {
-        let v = std::env::var(env_name).map_err(|_| {
-            anyhow::anyhow!("upstream token env var {env_name:?} is not set in this host's environment")
+        let v = floe_config::secret::env_var(env_name).ok_or_else(|| {
+            anyhow::anyhow!("upstream token env var {env_name:?} is not set (or empty) in this host's environment or config store")
         })?;
-        let v = v.trim().to_string();
-        anyhow::ensure!(!v.is_empty(), "upstream token env var {env_name:?} is empty");
-        Ok(v)
+        Ok(v.trim().to_string())
     }
 }

@@ -527,6 +527,12 @@ impl ObjectStore for FaultStore {
             _ => self.inner.compose(dest, sources, opts).await,
         }
     }
+    async fn object_versioning(&self) -> Result<bool> {
+        self.inner.object_versioning().await
+    }
+    async fn get_version(&self, key: &str, version: &Version) -> Result<Option<Bytes>> {
+        self.inner.get_version(key, version).await
+    }
 }
 
 /// Snapshot of an inner store's keys → sizes (for oracles that read the truth

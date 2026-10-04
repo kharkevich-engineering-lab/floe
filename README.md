@@ -145,10 +145,14 @@ push. Follow (D48) moves the bytes: it fetches the matching refs (`refs/heads/*`
 any push. When upstream force-pushes, moves a tag or deletes a ref, the old tip is **archived** first, in the same
 commit, under `refs/archive/<unix-ts>/<original-ref>`. Nothing upstream rewrites is ever lost.
 
+The mirror is configured at runtime, not in `floe.toml` (D60): open **`/_admin`** (the admin GUI, for admin
+principals) or publish the document with `floe config set mirror.toml`. Changes apply live on the next pass.
+
 ```toml
-[github_mirror]          # on a host with roles ∋ "maintain"; FLOE_GITHUB_TOKEN in its environment
+[github_mirror]          # runs on hosts with roles ∋ "maintain"
 enabled = true
 users = ["@me"]          # the token's user, private repositories included
+token = { env = "FLOE_GITHUB_TOKEN" }    # or entered in the GUI: sealed with FLOE_CONFIG_KEY, never shown again
 private_visible_to_all_readers = true    # or include_private = false
 ```
 
@@ -162,11 +166,12 @@ private_visible_to_all_readers = true    # or include_private = false
   deletes them. A repository that disappears upstream is frozen. Your own repositories are untouched.
 * **No per-repository read ACL**: every principal that can read floe can read every mirrored private repository.
   That is why `include_private` needs the explicit `private_visible_to_all_readers = true`.
-* The token is only ever read from the environment variable named by `token_env`. It is never written to the bucket.
+* The token is an env reference (read on every instance; nothing in the bucket) or a value entered in the admin GUI,
+  sealed at rest with `FLOE_CONFIG_KEY` (AES-256-GCM, D61) and never returned by any read.
 * LFS is read-through, not prefetched: an object nobody downloaded before the GitHub repository vanished is gone.
 
 **Audit tables** (D50): a binary built with `cargo build --release -p floe-cli --features catalog` (the release
-image and tarballs are) and `[catalog] enabled` writes `ref_events`, `force_push_log`, `sync_runs` and `repo_inventory` to an Iceberg REST catalog (RustFS
+image and tarballs are) and `catalog.enabled` in the config document writes `ref_events`, `force_push_log`, `sync_runs` and `repo_inventory` to an Iceberg REST catalog (RustFS
 or AWS S3 Tables with `auth = "sigv4"`, or `podman compose --profile catalog up -d` for a local one). The tables are derived copies of the WAL
 plus telemetry. A catalog outage only adds lag, and git, sync and the mirror never wait for it.
 
