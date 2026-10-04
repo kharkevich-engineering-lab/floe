@@ -1,9 +1,9 @@
 # floe.standalone.toml — one binary, one bucket, one origin.
 #
 #   floe-server --config floe.standalone.toml
-#   → https://floe.localhost:8080/   (self-signed TLS; PORT=… moves it)
+#   → http://floe.localhost:8080/   (plain HTTP on loopback; PORT=… moves it)
 #
-# Nothing in front of it: TLS, the web UI, the JSON API, smart HTTP (fetch/push),
+# Nothing in front of it: the web UI, the JSON API, smart HTTP (fetch/push),
 # bundle-uri and LFS bytes are all served by this process from the bucket below.
 # An edge that wants to take work over announces it per request with
 # `X-Floe-Capabilities: …` (`accel-redirect`, honoured only when
@@ -16,14 +16,15 @@
 
 [server]
 listen = "127.0.0.1:8080"                      # PORT env wins; also binds the ::1 twin
-public_url = "https://floe.localhost:8080"   # browser origin; PORT rewrites the port
+public_url = "http://floe.localhost:8080"    # browser origin; PORT rewrites the port
 auto_create_on_push = true                     # `git push` to a repository that does not exist yet creates it
 roles = []                                     # empty = every role: serve, maintain (checkpoints, bundles, compaction), events
 
 [server.tls]
-mode = "self_signed"              # generated once under <cache.dir>/tls/, published at /services/public/ca.pem.
-                                  # *.localhost is not a public CA name: the browser warns once (Advanced → proceed);
-                                  # git pins the cert via the installer. Real certificate: mode = "files", cert, key.
+mode = "off"                      # loopback only, so plain HTTP. On a real name, terminate TLS here with
+                                  # mode = "acme" (Let's Encrypt over DNS-01, see floe.example.toml) or
+                                  # mode = "files" + cert/key (e.g. from mkcert for *.localhost), and set
+                                  # public_url to https://.
 
 [server.auth]
 # Local play: everyone is `anon` with write. Nobody else can reach 127.0.0.1.
@@ -96,9 +97,7 @@ chain = true
 [github]                          # docs/GITHUB.md — a fake GitHub Enterprise Server over these repositories, so an app
 enabled = true                    # that already supports GHES develops against floe: point its install's baseUrl at
                                   # http://127.0.0.1:8080/api/v3. Auth-free by construction (any bearer, one hardcoded
-                                  # user, admin everywhere) — hence loopback only, and never deployed. Node will not
-                                  # trust the self-signed certificate above, so set [server.tls] mode = "off" (and use
-                                  # http:// URLs) before pointing octokit here.
+                                  # user, admin everywhere) — hence loopback only, and never deployed.
 
 # The GitHub mirror (D49, README "Mirroring GitHub"): needs roles ∋ "maintain" (the default single box
 # has every role) and FLOE_GITHUB_TOKEN in the environment. Every floe reader can read mirrored private
@@ -123,7 +122,7 @@ enabled = true                    # that already supports GHES develops against 
 # uri = "http://127.0.0.1:8181", warehouse = "s3://floe-test/warehouse", auth = "none".
 
 [cache]
-dir = "/tmp/floe"               # materialized repositories + tls/; wiped = warmth lost, nothing else
+dir = "/tmp/floe"               # materialized repositories; wiped = warmth lost, nothing else
 max_bytes = "20GiB"
 
 [telemetry]

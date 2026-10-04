@@ -10,9 +10,9 @@
 #
 # The image carries git (upload-pack, repack, bundle, index-pack run as subprocesses),
 # git-lfs, CA certificates and tini. Config comes from /etc/floe/floe.toml or
-# FLOE__SECTION__KEY environment overrides; the local cache (materialized repositories,
-# a self-signed TLS cert) lives under /var/lib/floe and can be wiped at any time — the
-# bucket is the only durable state. flake.nix provides separate standalone floe packaging.
+# FLOE__SECTION__KEY environment overrides; the local cache (materialized repositories)
+# lives under /var/lib/floe and can be wiped at any time — the bucket is the only durable
+# state (with [server.tls] mode = "acme", the certificate too). flake.nix provides separate standalone floe packaging.
 
 # ---- 1. web UI (embedded into the binary at compile time) ---------------------------
 FROM docker.io/library/node:24-bookworm-slim AS web

@@ -49,11 +49,10 @@ mode = "none"
 mode = "off"            # see below
 ```
 
-**TLS must be off.** `floe.standalone.toml` uses `mode = "self_signed"` (D39), and Node will not trust a
-self-signed CA without `NODE_EXTRA_CA_CERTS` pointing at `/services/public/ca.pem` — octokit's fetch fails
-with `SELF_SIGNED_CERT_IN_CHAIN` before any of this code runs. `mode = "off"` (the default) serves plain
-HTTP/1.1 + h2c, which is what the facade is documented and tested against. If you want TLS anyway, fetch
-`http(s)://<host>/services/public/ca.pem` and export `NODE_EXTRA_CA_CERTS`.
+**TLS off.** `mode = "off"` (the default, and what `floe.standalone.toml` uses) serves plain HTTP/1.1 +
+h2c on loopback, which is what the facade is documented and tested against. The facade is never deployed,
+so it has no use for `files` or `acme` (D59); if you put it behind a certificate anyway, it must be one Node
+already trusts (a public CA, or `NODE_EXTRA_CA_CERTS` for your own).
 
 `server.public_url` is what every URL in a response is built from (`html_url`, `clone_url`, `url`). Set it
 to the origin the application will actually use, or leave it unset and the request's `Host` is used.

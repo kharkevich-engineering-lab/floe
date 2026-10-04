@@ -26,6 +26,11 @@ Read `AGENTS.md` first (design §1–§2, decisions §3; the original layout/pha
   placeholder modules `coord.rs`, `gcs.rs`, `s3.rs`.
 - `floe-config`: `Config` for floe.toml (+ `FLOE__` env overrides, `PORT`); `Config::with_settings` accepts
   only `[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`, and `[integrations]` in repo-scoped settings.
+  `TlsConfig { mode: TlsMode::{Off,Files,Acme}, cert, key, acme: AcmeConfig }` + `TlsConfig::validate` (D59).
+- `floe-tls` (D59): `Tls::load(&Config, DynStore) -> Option<Arc<Tls>>` (`server_config`, `ready()`, `status()`,
+  `spawn(Arc<dyn Narrator>)`), `CertResolver` (rustls `ResolvesServerCert`, hot swap), `FilesCert`,
+  `AcmeManager` (`refresh`, `tick`, `run`, `status`), `dns::DnsProvider` (`create_txt`, `delete_txt`),
+  `cloudflare::Cloudflare`, `seal::SealKey`, `CertStatus`, `Narrator`/`Narration` (the server's task bridge).
 
 ## floe-git (owner: GitEngine)
 
