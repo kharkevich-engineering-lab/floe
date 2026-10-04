@@ -1589,6 +1589,269 @@ dependencies = [
 ]
 
 [[package]]
+name = "floe-bundle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "cron",
+ "floe-config",
+ "floe-git",
+ "floe-proto",
+ "floe-store",
+ "floe-wal",
+ "futures",
+ "hex",
+ "metrics",
+ "parking_lot",
+ "prost",
+ "sha1 0.10.7",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "floe-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "chrono",
+ "clap",
+ "floe-bundle",
+ "floe-config",
+ "floe-git",
+ "floe-proto",
+ "floe-server",
+ "floe-store",
+ "floe-wal",
+ "futures",
+ "gix-hash",
+ "hex",
+ "humantime",
+ "mimalloc",
+ "parking_lot",
+ "rand 0.9.5",
+ "reqwest 0.12.28",
+ "rustls 0.23.43",
+ "serde",
+ "serde_json",
+ "sha1 0.10.7",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "floe-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytesize",
+ "cron",
+ "humantime-serde",
+ "serde",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "floe-git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "dashmap",
+ "flate2",
+ "floe-config",
+ "floe-proto",
+ "futures",
+ "gix",
+ "gix-actor",
+ "gix-date",
+ "gix-features",
+ "gix-hash",
+ "gix-hashtable",
+ "gix-lock",
+ "gix-object",
+ "gix-odb",
+ "gix-pack",
+ "gix-packetline",
+ "gix-ref",
+ "gix-revwalk",
+ "gix-tempfile",
+ "gix-traverse",
+ "gix-validate",
+ "hex",
+ "libc",
+ "parking_lot",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "floe-proto"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "prost",
+ "prost-build",
+ "prost-types",
+]
+
+[[package]]
+name = "floe-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "async-trait",
+ "axum",
+ "base64",
+ "bytes",
+ "bytesize",
+ "chrono",
+ "dashmap",
+ "floe-bundle",
+ "floe-config",
+ "floe-git",
+ "floe-proto",
+ "floe-store",
+ "floe-wal",
+ "futures",
+ "gix-actor",
+ "gix-date",
+ "gix-hash",
+ "gix-object",
+ "gix-packetline",
+ "graphql-parser",
+ "hex",
+ "hmac 0.12.1",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
+ "humantime",
+ "hyper 1.11.0",
+ "hyper-util",
+ "jsonwebtoken 11.0.0",
+ "libc",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "moka",
+ "parking_lot",
+ "prost",
+ "prost-types",
+ "rand 0.9.5",
+ "rcgen",
+ "reqwest 0.12.28",
+ "rust-embed",
+ "rustls 0.23.43",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "floe-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-smithy-types",
+ "axum",
+ "bytes",
+ "bytesize",
+ "floe-config",
+ "floe-proto",
+ "futures",
+ "google-cloud-auth",
+ "google-cloud-gax",
+ "google-cloud-storage",
+ "hex",
+ "http 1.5.0",
+ "metrics",
+ "parking_lot",
+ "prost",
+ "rand 0.9.5",
+ "reqwest 0.12.28",
+ "rustls 0.23.43",
+ "serde",
+ "serde_json",
+ "sha1 0.10.7",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "floe-wal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "flate2",
+ "floe-config",
+ "floe-git",
+ "floe-proto",
+ "floe-store",
+ "futures",
+ "gix-hash",
+ "gix-object",
+ "gix-pack",
+ "hex",
+ "libc",
+ "metrics",
+ "moka",
+ "parking_lot",
+ "prost",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5809,269 +6072,6 @@ name = "vsimd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
-
-[[package]]
-name = "floe-bundle"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "cron",
- "futures",
- "hex",
- "metrics",
- "parking_lot",
- "prost",
- "sha1 0.10.7",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "floe-config",
- "floe-git",
- "floe-proto",
- "floe-store",
- "floe-wal",
-]
-
-[[package]]
-name = "floe-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bytes",
- "chrono",
- "clap",
- "futures",
- "gix-hash",
- "hex",
- "humantime",
- "mimalloc",
- "parking_lot",
- "rand 0.9.5",
- "reqwest 0.12.28",
- "rustls 0.23.43",
- "serde",
- "serde_json",
- "sha1 0.10.7",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "floe-bundle",
- "floe-config",
- "floe-git",
- "floe-proto",
- "floe-server",
- "floe-store",
- "floe-wal",
-]
-
-[[package]]
-name = "floe-config"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytesize",
- "cron",
- "humantime-serde",
- "serde",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "floe-git"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "dashmap",
- "flate2",
- "futures",
- "gix",
- "gix-actor",
- "gix-date",
- "gix-features",
- "gix-hash",
- "gix-hashtable",
- "gix-lock",
- "gix-object",
- "gix-odb",
- "gix-pack",
- "gix-packetline",
- "gix-ref",
- "gix-revwalk",
- "gix-tempfile",
- "gix-traverse",
- "gix-validate",
- "hex",
- "libc",
- "parking_lot",
- "serde",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "floe-config",
- "floe-proto",
-]
-
-[[package]]
-name = "floe-proto"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "prost",
- "prost-build",
- "prost-types",
-]
-
-[[package]]
-name = "floe-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-compression",
- "async-trait",
- "axum",
- "base64",
- "bytes",
- "bytesize",
- "chrono",
- "dashmap",
- "futures",
- "gix-actor",
- "gix-date",
- "gix-hash",
- "gix-object",
- "gix-packetline",
- "graphql-parser",
- "hex",
- "hmac 0.12.1",
- "http 1.5.0",
- "http-body 1.1.0",
- "http-body-util",
- "humantime",
- "hyper 1.11.0",
- "hyper-util",
- "jsonwebtoken 11.0.0",
- "libc",
- "metrics",
- "metrics-exporter-prometheus",
- "moka",
- "parking_lot",
- "prost",
- "prost-types",
- "rand 0.9.5",
- "rcgen",
- "reqwest 0.12.28",
- "rust-embed",
- "rustls 0.23.43",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "sha1 0.10.7",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-rustls 0.26.4",
- "tokio-stream",
- "tokio-util",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "floe-bundle",
- "floe-config",
- "floe-git",
- "floe-proto",
- "floe-store",
- "floe-wal",
-]
-
-[[package]]
-name = "floe-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "aws-config",
- "aws-sdk-s3",
- "aws-smithy-types",
- "axum",
- "bytes",
- "bytesize",
- "futures",
- "google-cloud-auth",
- "google-cloud-gax",
- "google-cloud-storage",
- "hex",
- "http 1.5.0",
- "metrics",
- "parking_lot",
- "prost",
- "rand 0.9.5",
- "reqwest 0.12.28",
- "rustls 0.23.43",
- "serde",
- "serde_json",
- "sha1 0.10.7",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
- "floe-config",
- "floe-proto",
-]
-
-[[package]]
-name = "floe-wal"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "chrono",
- "dashmap",
- "flate2",
- "futures",
- "gix-hash",
- "gix-object",
- "gix-pack",
- "hex",
- "libc",
- "metrics",
- "moka",
- "parking_lot",
- "prost",
- "prost-types",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
- "floe-config",
- "floe-git",
- "floe-proto",
- "floe-store",
-]
 
 [[package]]
 name = "walkdir"
