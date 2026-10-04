@@ -37,9 +37,12 @@ ENV FLOE_BUILD_SHA=${FLOE_BUILD_SHA}
 # workspace version from Cargo.toml. `floe --version` prints "<version> (<sha>)".
 ARG FLOE_VERSION=
 ENV FLOE_VERSION=${FLOE_VERSION}
+# `--features catalog` (D50): the shipped binaries can write the Iceberg audit tables, so
+# `[catalog] enabled = true` works on the image and the release tarballs instead of being
+# the fatal startup error a featureless build answers with. Off it costs nothing at runtime.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p floe-cli \
+    cargo build --release --locked -p floe-cli --features catalog \
     && install -D target/release/floe /out/bin/floe \
     && install -D target/release/floe-server /out/bin/floe-server
 

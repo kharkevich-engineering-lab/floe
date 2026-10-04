@@ -163,8 +163,8 @@ private_visible_to_all_readers = true    # or include_private = false
 * The token is only ever read from the environment variable named by `token_env`. It is never written to the bucket.
 * LFS is read-through, not prefetched: an object nobody downloaded before the GitHub repository vanished is gone.
 
-**Audit tables** (D50): a binary built with `cargo build --release -p floe-cli --features catalog` and `[catalog]
-enabled` writes `ref_events`, `force_push_log`, `sync_runs` and `repo_inventory` to an Iceberg REST catalog (RustFS
+**Audit tables** (D50): a binary built with `cargo build --release -p floe-cli --features catalog` (the release
+image and tarballs are) and `[catalog] enabled` writes `ref_events`, `force_push_log`, `sync_runs` and `repo_inventory` to an Iceberg REST catalog (RustFS
 S3 Tables, or `podman compose --profile catalog up -d` for a local one). The tables are derived copies of the WAL
 plus telemetry. A catalog outage only adds lag, and git, sync and the mirror never wait for it.
 
