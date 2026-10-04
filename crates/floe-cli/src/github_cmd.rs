@@ -2,7 +2,9 @@
 //! `docs/design/github-mirror.md` §B.12). `sync` takes the same bucket lease as
 //! a server's mirror loop, so the two never reconcile together. Follow is not
 //! run here (no nudge): the maintaining host picks new repositories up within
-//! one `upstream.follow_interval`.
+//! one `upstream.follow_interval`. Passes write the same catalog telemetry as
+//! the server's loop (`sync_runs`/`repo_inventory`, D50) when `[catalog]` is
+//! enabled; `--dry-run` writes none.
 
 use std::sync::Arc;
 
@@ -51,9 +53,14 @@ pub async fn run(action: GithubAction, cfg: &Arc<Config>) -> Result<()> {
                 print_report(&report);
                 return Ok(());
             }
+            let telemetry = Arc::new(floe_server::mirror::PassTelemetry::start(&cfg.catalog)?);
             if once {
                 match floe_mirror::run_once_leased(&mirror).await? {
-                    Some(report) => print_report(&report),
+                    Some(report) => {
+                        print_report(&report);
+                        telemetry.record(&report);
+                        telemetry.flush(cfg.server.drain_timeout).await;
+                    }
                     None => {
                         let held = floe_mirror::lease_holder(&store, "github").await;
                         match held {
@@ -68,7 +75,16 @@ pub async fn run(action: GithubAction, cfg: &Arc<Config>) -> Result<()> {
                 }
                 return Ok(());
             }
-            floe_mirror::run_loop(mirror, Box::new(print_report)).await;
+            let hook = telemetry.clone();
+            floe_mirror::run_loop(
+                mirror,
+                Box::new(move |r: &PassReport| {
+                    print_report(r);
+                    hook.record(r);
+                }),
+            )
+            .await;
+            telemetry.flush(cfg.server.drain_timeout).await;
             Ok(())
         }
     }

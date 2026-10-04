@@ -86,6 +86,43 @@ pub async fn run_loop(state: Arc<AppState>) {
     .await;
 }
 
+/// Catalog telemetry for mirror passes run outside `floe serve` (`floe github
+/// sync`): the writer the same `[catalog]` section starts in a server (or
+/// [`floe_catalog::NoopRecorder`] when it is off), fed the same rows as
+/// [`run_loop`]. Lossy like every `sync_runs`/`repo_inventory` row: call
+/// [`PassTelemetry::flush`] before the process exits.
+pub struct PassTelemetry {
+    recorder: Arc<dyn floe_catalog::Recorder>,
+    writer: Option<Arc<floe_catalog::CatalogWriter>>,
+}
+
+impl PassTelemetry {
+    /// Start the writer when compiled in and `catalog.enabled`. Fails closed
+    /// like `floe serve` when `catalog.enabled` but the binary lacks the feature.
+    pub fn start(cfg: &floe_config::CatalogConfig) -> anyhow::Result<Self> {
+        let writer = crate::catalog_writer(cfg)?;
+        let recorder: Arc<dyn floe_catalog::Recorder> = match &writer {
+            Some(w) => w.clone() as Arc<dyn floe_catalog::Recorder>,
+            None => Arc::new(floe_catalog::NoopRecorder),
+        };
+        Ok(Self { recorder, writer })
+    }
+
+    /// The rows of one finished pass (see [`record_pass`]).
+    pub fn record(&self, r: &floe_mirror::PassReport) {
+        record_pass(self.recorder.as_ref(), r);
+    }
+
+    /// Final flush, bounded: losing it costs telemetry only.
+    pub async fn flush(&self, bound: Duration) {
+        if let Some(w) = &self.writer
+            && tokio::time::timeout(bound, w.shutdown()).await.is_err()
+        {
+            tracing::warn!(?bound, "catalog: final flush did not finish; buffered telemetry dropped");
+        }
+    }
+}
+
 /// One `sync_runs` row (`kind = discovery`) per finished pass, a failed one
 /// included (`outcome = failed`, the error as detail), and one
 /// `repo_inventory` change row per repository the pass created or whose
@@ -181,6 +218,25 @@ mod tests {
         assert_eq!(runs[0].outcome, "failed");
         assert_eq!(runs[0].detail.as_deref(), Some("github: 401 Bad credentials"));
         assert!(rec.inventory.lock().is_empty());
+    }
+
+    /// `floe github sync`'s telemetry: nothing to write (and nothing to
+    /// flush) while `[catalog]` is off; `enabled` in a featureless binary fails
+    /// closed exactly like `floe serve`.
+    #[tokio::test]
+    async fn cli_pass_telemetry_follows_the_catalog_section() {
+        let off = super::PassTelemetry::start(&floe_config::CatalogConfig::default()).unwrap();
+        assert!(off.writer.is_none());
+        off.record(&floe_mirror::PassReport::default());
+        off.flush(std::time::Duration::from_millis(10)).await;
+        if cfg!(not(feature = "catalog")) {
+            let on = floe_config::CatalogConfig {
+                enabled: true,
+                ..floe_config::CatalogConfig::default()
+            };
+            let err = super::PassTelemetry::start(&on).err().expect("featureless build must refuse");
+            assert!(err.to_string().contains("without the catalog feature"), "{err:#}");
+        }
     }
 
     /// §B.7.2: the mirror's read-only policy parses and refuses every push.
