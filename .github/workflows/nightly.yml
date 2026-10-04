@@ -1,0 +1,154 @@
+name: Nightly
+
+# What is too slow or too noisy to gate a pull request on, run against main twice a day:
+#   - `just test-slow`: the #[ignore]d benches and soaks (20k-ref push, 466k-ref ls-refs, ...)
+#   - the simulation suite with random seeds (a PR runs the default seeds; see ci.yml)
+#   - cargo-deny, since a new RustSec advisory lands without any change in this repository
+# Two runs, twelve-odd hours apart and off the hour, so tests with a wall-clock window (weekly
+# slots, slot-close graces) meet two different times of day. A failure on main opens one issue
+# labelled `nightly`, or comments on the one already open.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+    - cron: "47 15 * * *"
+  workflow_dispatch:
+    inputs:
+      sim_seeds:
+        description: Random simulation seeds to run per architecture
+        default: "4"
+  # A change to this workflow is tested by its own PR (it cannot be dispatched before it is on main).
+  pull_request:
+    paths:
+      - .github/workflows/nightly.yml
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  # A scheduled run finishes; a PR's run is superseded by its next push.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  # The job id matches ci.yml's on purpose: rust-cache keys include the job id, so this restores
+  # the warnings + test job's target/ (written from main) instead of compiling the world cold.
+  # It never saves (the cache budget belongs to ci.yml).
+  build-test:
+    name: slow tests + random-seed sim (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # Same as ci.yml (rust-toolchain.toml pins the version; rustup-init is hash-checked).
+      - name: Install the pinned Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            RUSTUP=1.29.1
+            case "$(uname -m)" in
+              aarch64) triple=aarch64-unknown-linux-gnu; sum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;;
+              x86_64) triple=x86_64-unknown-linux-gnu; sum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;;
+              *) echo "::error::no pinned rustup-init for $(uname -m)"; exit 1 ;;
+            esac
+            curl --proto '=https' --tlsv1.2 -sSfo "$RUNNER_TEMP/rustup-init" "https://static.rust-lang.org/rustup/archive/${RUSTUP}/${triple}/rustup-init"
+            echo "${sum}  $RUNNER_TEMP/rustup-init" | sha256sum -c -
+            chmod +x "$RUNNER_TEMP/rustup-init"
+            "$RUNNER_TEMP/rustup-init" -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show && cargo --version && git --version
+          active="$(rustup show active-toolchain | cut -d' ' -f1)"
+          rustup toolchain list | cut -d' ' -f1 | grep -vxF "$active" | xargs -r -n1 rustup toolchain uninstall
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: scoped-tests-v1-${{ matrix.arch }}
+          save-if: false
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: just
+      - name: Compile the test binaries
+        timeout-minutes: 60
+        run: cargo test --workspace --no-run --locked
+      - name: Slow tier (#[ignore]d benches and soaks)
+        id: slow
+        timeout-minutes: 45
+        run: just test-slow
+      # One full suite per seed: FLOE_SIM_SEED replaces the default seeds in every seeded
+      # scenario. The seed is printed first, so a failure reproduces with exactly that command.
+      - name: Simulation suite, random seeds
+        if: ${{ !cancelled() }}
+        timeout-minutes: 60
+        env:
+          SEEDS: ${{ inputs.sim_seeds || '4' }}
+          # A PR that edits this workflow tests the workflow, not the known flakes (#12, #14);
+          # scheduled and manual runs keep the full suite.
+          SKIP: ${{ github.event_name == 'pull_request' && '--skip sim_cache_pressure_keeps_pinned_repos_and_refuses_too_large --skip base_rebuild_resumes_after_a_kill_between_any_two_phases' || '' }}
+        run: |
+          set -uo pipefail
+          failed=()
+          for _ in $(seq 1 "$SEEDS"); do
+            seed="$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')"
+            echo "::group::FLOE_SIM_SEED=${seed}"
+            # shellcheck disable=SC2086 # SKIP is a list of harness arguments
+            if ! FLOE_SIM_SEED="$seed" just sim $SKIP; then failed+=("$seed"); fi
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            for seed in "${failed[@]}"; do
+              echo "::error::sim failed; reproduce: FLOE_SIM_SEED=${seed} just sim"
+            done
+            exit 1
+          fi
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: just,cargo-deny@0.20.2
+      - run: just deny
+
+  report:
+    name: Open or refresh the nightly issue
+    needs: [build-test, deny]
+    if: ${{ failure() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          results="$(echo "$NEEDS" | jq -r 'to_entries[] | "- `\(.key)`: \(.value.result)"')"
+          # shellcheck disable=SC2016 # the backticks are Markdown, not a command substitution
+          body="$(printf 'Nightly run failed at %s UTC (%s).\n\n%s\n\nThe failing step prints its reproduce command (a sim failure names its `FLOE_SIM_SEED`).' \
+            "$(date -u '+%Y-%m-%d %H:%M')" "$RUN_URL" "$results")"
+          gh label create nightly --color B60205 --description "Nightly workflow failure" 2>/dev/null || true
+          number="$(gh issue list --state open --label nightly --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "Nightly workflow is failing" --label nightly --body "$body"
+          fi
