@@ -1472,6 +1472,26 @@ it neither the mirror nor the catalog has one.
 
 ---
 
+### D.8 As landed (2026-10-04; the code wins)
+
+- **Telemetry wiring**: `AppState` carries `recorder` (the writer, or `NoopRecorder`), `catalog` (the writer, for the
+  final flush) and `catalog_tail`. The mirror's `on_pass` hook (§B.15) maps a `PassReport` to one `sync_runs` row
+  (`kind = discovery`) and one `repo_inventory` change row per `changes` entry (`floe_server::mirror::record_pass`).
+  Follow records a `sync_runs` row for every round that did work, was refused or failed; `in-sync` rounds are not
+  recorded (one row per repository per tick would be noise).
+- **Notify**: `Bridge` is unchanged. `http_notify` wakes the catalog tail itself (the same key parsing,
+  `try_send`), and answers `200 []` on an events host that has a catalog tail but no bridge sink.
+- **Inventory snapshot**: hourly due-check, `INVENTORY_LEASE` 5 min TTL, the schedule re-read under the lease.
+  The mirror's state is read as `mirror/github/state.json` (the only `Source` today), not by listing `mirror/*`.
+- **Final flush**: `floe serve` calls `CatalogWriter::shutdown` after `serve` returns, bounded by
+  `server.drain_timeout`.
+- **`floe config check`** prints the effective `[github_mirror]`/`[catalog]` when enabled and whether each env var
+  they name is set (never the value); `catalog.enabled` without the feature fails there as at startup.
+- **compose (§D.4)**: `rustfs` stays on `latest` (no tagged release verified to ship S3 Tables, R6).
+  `create-table-bucket` creates the bucket and PUTs `/iceberg/v1/buckets/floe-catalog` with SigV4 (curl
+  `--aws-sigv4`), falling back to a message; the `iceberg-rest` fixture is what the writer can reach today, since
+  `iceberg-catalog-rest` 0.10 does not sign SigV4.
+
 ## E. Push-to-GitHub seam (post-MVP, design only; D51)
 
 - **Where**: a **WAL reader on the maintaining host**, symmetric to follow: `crates/floe-server/src/push_back.rs`,

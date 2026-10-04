@@ -292,6 +292,26 @@ Normative rules live in `docs/BUNDLE_URI_DESIGN.md §3–§4`: six-field UTC cal
 slot, slot-epoch creation tokens, oldest-first backfill, contiguous-chain retention, and main-only selection
 where configured. Do not derive scheduling behavior from this interface catalog.
 
+## floe-mirror (owner: Mirror, D49)
+
+- `Source` (forge seam: `kind`, `discover(&Selection)`, `lookup(id)`; GitHub implemented in `github/`), `RemoteRepo`,
+  `Discovery`, `Lookup`, `ApiStats`, `SourceError`.
+- `Target` (floe seam: `exists`, `create`, `put_policy`, `publish_upstream`, `nudge_follow`), `WalTarget::new(registry,
+  store, Nudge)`; `Nudge = Box<dyn Fn(&RepoId) + Send + Sync>` (the server's is `floe_server::mirror::nudge`).
+- `Mirror { cfg, source, target, store }`, `reconcile_once(&Mirror, PassOptions, lost)`, `run_once_leased`,
+  `run_loop(Arc<Mirror>, on_pass)`; `PassReport` (`changes` feed `repo_inventory`). State: `state::load`.
+
+## floe-catalog (owner: Catalog, D50)
+
+- Always compiled (no arrow): `Recorder` (`record_sync_run`, `record_inventory`; non-blocking, lossy), `NoopRecorder`,
+  rows (`SyncRun`, `InventoryRecord`, `RefEventRow`, `ForcePushRow`, `rows_for_entry`, `parse_follow_archived`),
+  `CatalogWriter::{start, append_durable, is_up, max_append_rows, shutdown}`, `cursor::{catch_up, TailSource,
+  load_epoch}`.
+- Feature `iceberg`: `iceberg::IcebergCommitter` (the REST `Committer`). Enabled by `floe-server/catalog` ←
+  `floe-cli/catalog`.
+- `floe_config::refpattern::RefPatterns` (D48) lives in floe-config: parse/matches/refspecs, shared by floe-git,
+  floe-server and floe-mirror.
+
 ## floe-cli (owner: Cli)
 `floe --config floe.toml <cmd>`: `serve` | `compact [owner/name|--all] [--once]` | `bundle run [--repo] [--strategy]` |
 `repo create|list|info` | `wal ls|show|materialize --at-seq` | `synth --out DIR --size s|m|l [--commits N --files M]`

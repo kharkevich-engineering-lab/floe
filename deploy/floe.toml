@@ -35,3 +35,14 @@ max_bytes = "5GiB"
 [telemetry]
 log_format = "json"
 log_filter = "info"
+
+# Not used by the facade image; listed so a deployment knows the switches exist.
+# [github_mirror]                 # D49: needs roles ∋ "maintain" and the token env var (never the token here)
+# enabled = true
+# token_env = "FLOE_GITHUB_TOKEN"
+# orgs = ["acme"]
+# private_visible_to_all_readers = true
+# [catalog]                       # D50: needs an image built with --features catalog
+# enabled = true
+# uri = "https://catalog.example.com/iceberg"
+# warehouse = "floe-catalog"

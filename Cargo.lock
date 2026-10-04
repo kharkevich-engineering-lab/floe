@@ -2317,6 +2317,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "floe-bundle",
+ "floe-catalog",
  "floe-config",
  "floe-git",
  "floe-mirror",

@@ -31,6 +31,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. |
 | `docs/EVENTS.md` | Anyone changing WAL-derived ref events, the webhook bridge, consumer semantics or event cursors. |
 | `docs/GITHUB.md` | Anyone touching `crates/floe-server/src/github/*`, or pointing a GitHub-integrated app at floe for local development. The facade's trust boundary (it has none), URL conventions, the write primitive, known limits. |
+| `docs/design/github-mirror.md` | Anyone touching upstream follow patterns/archive (D48), `floe-mirror` (D49), `floe-catalog` (D50) or the push-to-upstream seam (D51). Design of record; dated "as landed" notes where the code won. |
 | `docs/CONTRACT.md` | When you touch a crate boundary. The cross-crate contract; *extend, don't rename*; code wins where they differ. |
 | `docs/reference/cursor-git-at-any-scale.md` | The source design, verbatim. Read once before touching WAL/publish/sync/placement. |
 | `docs/patches/README.md` | Git client patches (bundle filter matching) and the gate for advertising filtered bundle families together. |
@@ -144,6 +145,10 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `policy.json` | Per-repo push policy (rule language, not on the WAL). `docs/POLICY.md`. Missing = allow-all. |
 | `fsck.pb` | Last connectivity audit (`FsckReport`), written by the maintainer's `fsck` unit, consumed by `repair` (`docs/INTEGRITY.md`). |
 | `events/cursor.json` | Durable acknowledged WAL sequence of the events bridge; advanced only after the webhook acknowledged (D32). |
+| `catalog/cursor.json` | The catalog tail's own cursor (D50): last seq whose rows the Iceberg catalog committed. Unrelated to the bucket-root `meta/repos.pb` catalog. |
+| `refs/archive/<unix-ts>/<ref>` (a ref, not an object) | Old tips that upstream follow kept when upstream rewrote or deleted a followed ref (D48); never overwritten, never followed. |
+| bucket root: `mirror/github/state.json`, `mirror/github/http-cache.json` | The GitHub mirror's state (CAS, generation-guarded) and its disposable ETag cache (`PutMode::Overwrite`), D49. |
+| bucket root: `catalog/epoch.json`, `catalog/inventory.json`, `leases/mirror-github.pb`, `leases/catalog-inventory.pb` | When the catalog was first enabled (create-once), the daily inventory snapshot's schedule (CAS), and the two fleet-wide leases (D49/D50). |
 | `lfs/objects/<aa>/<bb>/<oid>` | LFS objects (sha256-addressed, immutable). Missing ones can be read through from `upstream.lfs` and persisted (`docs/LFS.md`). |
 Schema `crates/floe-proto/proto/floe/v1/wal.proto`; GCS over gRPC, S3 (AWS SDK) and in-memory stores share
 one contract suite (`crates/floe-store/tests/contract.rs`, incl. compose).
@@ -492,6 +497,24 @@ never deletes a floe repository (gone/excluded repositories are frozen with `fol
 (`token_env` + `upstream.token_env_by_host`), and never transfers git objects: a push seen at the forge nudges
 `ops::start(.., "follow")` on the maintaining host only. GitLab/Gitea implement `Source`. Design:
 `docs/design/github-mirror.md` §B.
+
+**D50 — Iceberg audit tables are a WAL reader, behind a feature (2026-10-04).** `floe-catalog` (`--features catalog`
+on `floe-cli`/`floe-server`, which turns on `floe-catalog/iceberg`) writes `ref_events`/`force_push_log` from the WAL
+in its own loop on the events host (`floe_server::catalog_tail`), outside the webhook's catch-up: a bucket
+notification only `try_send`s the repository to it, and its sweep runs on `events.sweep_interval`. It has its own
+cursor `repos/<o>/<r>/catalog/cursor.json` (at-least-once, dedup `(repo, seq, ref_name)`), takes
+`sync_runs`/`repo_inventory` changes from lossy telemetry (`AppState::recorder`, a `NoopRecorder` when off), and
+writes a durable daily `repo_inventory` snapshot under `leases/catalog-inventory.pb` (schedule in
+`catalog/inventory.json`). The catalog is never a source of truth and never holds git objects; its outage only adds
+catalog lag. Git, sync, follow and the mirror never await it. `catalog.enabled` in a binary built without the
+feature is a fatal startup error. Design: `docs/design/github-mirror.md` §C.
+
+**D51 (reserved, 2026-10-04) — Push to an upstream is a WAL reader on the maintaining host.** Not built. Reserved
+so the rules are on record first: a ref is either followed or pushed, never both (`validate` refuses an overlap of
+`upstream.follow` and `upstream.push`); entries with `principal = upstream` are never pushed; a push is idempotent
+(`ls-remote` first), never forced unless `push_force`, and `refs/archive/*` is never pushed. Seam:
+`floe_server::push_back`, a per-repo cursor `repos/<o>/<r>/push/<remote>.json`. Design:
+`docs/design/github-mirror.md` §E.
 
 ## 5. Working rules
 

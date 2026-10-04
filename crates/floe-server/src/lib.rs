@@ -6,6 +6,7 @@ pub mod auth;
 pub mod bridge;
 pub mod bundles;
 pub mod cache;
+pub mod catalog_tail;
 pub mod error;
 pub mod events;
 pub mod follow;
@@ -76,6 +77,15 @@ pub struct AppState {
     pub follow: follow::FollowStatuses,
     /// In-process TLS (standalone, D39); `None` behind an edge (h2c).
     pub tls: Option<Arc<tls::Tls>>,
+    /// Lossy catalog telemetry (`sync_runs`/`repo_inventory`, D50): the writer
+    /// when the catalog is compiled in and enabled, else a no-op. Follow and
+    /// the mirror call it after a write finished, like a metric.
+    pub recorder: Arc<dyn floe_catalog::Recorder>,
+    /// The Iceberg writer (`--features catalog` and `catalog.enabled`). Only
+    /// the catalog tail awaits it; shut down (final flush) after serving.
+    pub catalog: Option<Arc<floe_catalog::CatalogWriter>>,
+    /// The catalog's WAL tail (`events` role with a catalog writer).
+    pub catalog_tail: Option<Arc<catalog_tail::CatalogTail>>,
 }
 
 impl AppState {
@@ -94,6 +104,15 @@ impl AppState {
         if let Some(t) = &tls {
             tracing::info!(fingerprint = %t.fingerprint, mode = ?cfg.server.tls.mode, "TLS terminated in-process");
         }
+        let catalog = catalog_writer(&cfg.catalog)?;
+        let recorder: Arc<dyn floe_catalog::Recorder> = match &catalog {
+            Some(w) => w.clone() as Arc<dyn floe_catalog::Recorder>,
+            None => Arc::new(floe_catalog::NoopRecorder),
+        };
+        let catalog_tail = catalog
+            .as_ref()
+            .filter(|_| cfg.has_role(floe_config::Role::Events))
+            .map(|w| catalog_tail::CatalogTail::new(registry.clone(), w.clone(), cfg.catalog.backfill));
         let state = Arc::new(Self {
             cfg: cfg.clone(),
             store,
@@ -109,6 +128,9 @@ impl AppState {
             bridge,
             follow: follow::FollowStatuses::default(),
             tls,
+            recorder,
+            catalog,
+            catalog_tail,
         });
         // The GitHub sink renders its payloads out of the repository, so it
         // needs this instance — which did not exist when the bridge was built.
@@ -117,6 +139,39 @@ impl AppState {
         }
         Ok(state)
     }
+}
+
+/// The catalog writer (D50): started (it connects in the background, startup
+/// never waits for the catalog) when compiled in and enabled.
+#[cfg(feature = "catalog")]
+#[allow(clippy::unnecessary_wraps)] // the featureless variant's signature
+fn catalog_writer(
+    cfg: &floe_config::CatalogConfig,
+) -> anyhow::Result<Option<Arc<floe_catalog::CatalogWriter>>> {
+    if !cfg.enabled {
+        return Ok(None);
+    }
+    let committer = Arc::new(floe_catalog::iceberg::IcebergCommitter::new(cfg));
+    tracing::info!(uri = cfg.uri.as_deref().unwrap_or(""), namespace = %cfg.namespace, "catalog writer enabled");
+    Ok(Some(floe_catalog::CatalogWriter::start(
+        committer,
+        floe_catalog::FlushPolicy::from_config(cfg),
+    )))
+}
+
+/// Without the `catalog` feature, `catalog.enabled` is a fatal config error
+/// (fail closed): the operator asked for audit tables this binary cannot write.
+#[cfg(not(feature = "catalog"))]
+fn catalog_writer(
+    cfg: &floe_config::CatalogConfig,
+) -> anyhow::Result<Option<Arc<floe_catalog::CatalogWriter>>> {
+    if cfg.enabled {
+        anyhow::bail!(
+            "catalog.enabled = true, but this binary was built without the catalog feature \
+             (cargo build --release -p floe-cli --features catalog)"
+        );
+    }
+    Ok(None)
 }
 
 /// Build a full axum router.

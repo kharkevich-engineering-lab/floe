@@ -13,7 +13,14 @@
 //!   * **maintain** role — `floe_server::maintain::run_loop`: checkpoint-if-due
 //!     (refs-level), bundles-if-due and geometric compaction for every repo, each
 //!     as a task. It subsumes the two loops above (they are skipped when the
-//!     instance is a maintainer so work is not done twice).
+//!     instance is a maintainer so work is not done twice). It also runs the
+//!     upstream follow loop and, with `[github_mirror] enabled`, the GitHub
+//!     mirror's reconcile loop (D49).
+//!   * **catalog** (D50, `--features catalog` + `[catalog] enabled`): the
+//!     writer is built by `AppState::new` on every role (follow and the mirror
+//!     report telemetry through it); the `events` host also runs the catalog's
+//!     WAL tail. After serving, the writer gets one final flush bounded by
+//!     `server.drain_timeout`.
 
 use std::sync::Arc;
 
@@ -61,6 +68,13 @@ pub async fn run(cfg: &Arc<Config>) -> Result<()> {
         }
     }
 
+    // The catalog's WAL tail (`ref_events`/`force_push_log`, daily inventory):
+    // its own loop on the events host, never part of the webhook's catch-up.
+    if let Some(tail) = &state.catalog_tail {
+        tail.spawn(cfg.events.sweep_interval);
+        info!("catalog tail started");
+    }
+
     if !maintainer && cfg.has_role(Role::Compact) {
         let reg = state.registry.clone();
         let c = cfg.clone();
@@ -98,11 +112,22 @@ pub async fn run(cfg: &Arc<Config>) -> Result<()> {
     };
 
     info!(listen = %cfg.server.listen, "starting server");
+    let catalog = state.catalog.clone();
     serve(state, shutdown).await?;
 
     // Cancel background loops.
     for h in bg_handles {
         h.abort();
+    }
+
+    // Best-effort final catalog flush (D31 phase 2 is over): losing it costs
+    // telemetry only; durable rows are re-read from the catalog cursor.
+    if let Some(writer) = catalog
+        && tokio::time::timeout(cfg.server.drain_timeout, writer.shutdown())
+            .await
+            .is_err()
+    {
+        warn!(bound = ?cfg.server.drain_timeout, "catalog: final flush did not finish; buffered telemetry dropped");
     }
 
     Ok(())

@@ -222,6 +222,7 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<FollowReport> {
             continue;
         }
         let t0 = Instant::now();
+        let started = chrono::Utc::now();
         let probed = async {
             let snapshot = handle.local().refs()?;
             let have = matching(&snapshot, &patterns);
@@ -236,10 +237,9 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<FollowReport> {
                 report.failed += 1;
                 metrics::counter!("floe_follow_rounds_total", "repo" => repo.clone(), "outcome" => "fetch-failed").increment(1);
                 warn!(repo = %id, %upstream, error = format!("{e:#}"), elapsed_ms = elapsed_ms(t0), "follow: probing upstream failed");
-                state.follow.set(
-                    &repo,
-                    Round::failed(format!("probe of {upstream} failed: {e:#}")),
-                );
+                let round = Round::failed(format!("probe of {upstream} failed: {e:#}"));
+                record_run(state, &cfg, &repo, started, &round, RunStats::default());
+                state.follow.set(&repo, round);
                 continue;
             }
         };
@@ -296,18 +296,18 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<FollowReport> {
         if !handle.packs_fit() {
             report.failed += 1;
             warn!(repo = %id, "follow: the whole object set must be local on this host (negotiation + thin-pack bases); skipping");
-            state.follow.set(
-                &repo,
-                Round {
-                    upstream: probe.tips,
-                    ours: have,
-                    ..Round::failed(
-                        "behind upstream, but this repository's object set does not fit this host's cache (follow needs it local); skipped".into(),
-                    )
-                },
-            );
+            let round = Round {
+                upstream: probe.tips,
+                ours: have,
+                ..Round::failed(
+                    "behind upstream, but this repository's object set does not fit this host's cache (follow needs it local); skipped".into(),
+                )
+            };
+            record_run(state, &cfg, &repo, started, &round, RunStats::default());
+            state.follow.set(&repo, round);
             continue;
         }
+        let mut stats = RunStats::default();
         let round = match run_op(state, &id, HashMap::new()).await {
             Ok(v) => {
                 let n = v
@@ -318,6 +318,10 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<FollowReport> {
                     report.published += 1;
                 }
                 let seq = v.get("seq").and_then(serde_json::Value::as_u64);
+                stats = RunStats {
+                    published: Some(n),
+                    seq,
+                };
                 let strings = |key: &str| -> Vec<String> {
                     v.get(key)
                         .and_then(|r| r.as_array())
@@ -398,9 +402,49 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<FollowReport> {
                 }
             }
         };
+        record_run(state, &cfg, &repo, started, &round, stats);
         state.follow.set(&repo, round);
     }
     Ok(report)
+}
+
+/// What a round's op reported, for [`record_run`].
+#[derive(Debug, Default, Clone, Copy)]
+struct RunStats {
+    published: Option<u64>,
+    seq: Option<u64>,
+}
+
+/// Catalog telemetry for a round that did work or failed (`sync_runs`, D50):
+/// lossy, after the write finished, never awaited — like a metric. In-sync
+/// rounds are not recorded (one row per repository per tick would be noise).
+fn record_run(
+    state: &AppState,
+    cfg: &floe_config::Config,
+    repo: &str,
+    started: chrono::DateTime<chrono::Utc>,
+    round: &Round,
+    stats: RunStats,
+) {
+    if round.outcome == "in-sync" {
+        return;
+    }
+    let source = cfg
+        .upstream
+        .source
+        .as_deref()
+        .map(|s| s.split_once(':').map_or(s, |(kind, _)| kind).to_string());
+    state.recorder.record_sync_run(floe_catalog::SyncRun {
+        source,
+        repo: Some(repo.to_string()),
+        finished_at: chrono::Utc::now(),
+        outcome: round.outcome.to_string(),
+        refs_published: stats.published.and_then(|n| u32::try_from(n).ok()),
+        refs_archived: u32::try_from(round.archived.len()).ok(),
+        seq: stats.seq,
+        detail: Some(round.detail.clone()),
+        ..floe_catalog::SyncRun::new("follow", started)
+    });
 }
 
 /// The op's error when policy `refuse` left nothing to publish (the loop tells it

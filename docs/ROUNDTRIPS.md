@@ -56,6 +56,10 @@ right shape. This document is the thinking tool; apply it to every protocol chan
 | S3 transient faults (2026-09-17) | unchanged healthy path; SDK errors now retain retryability for existing WAL backoff/re-read handling after a failed request | 0 added healthy requests; extra retries only after transient failure | `floe-store/src/s3.rs` |
 | Follow round, nothing moved (D48, 2026-10-04) | refs-level only: conditional manifest GET (+ checkpoint/log tail GETs on a cold handle); no pack GETs, even for a repository the LRU evicted (was: a Serve-level `sync()` every round). Upstream: one `ls-refs` (the probe) | 1 warm | `follow/mod.rs::run_pass` |
 | Follow round, something moved (D48) | Serve-level `sync()` (pack GETs only for packs not local) → push publish (log PUT + manifest CAS); archive refs ride in the same txn. Upstream: probe `ls-refs` + fetch | push shape | `follow/mod.rs::op` |
+| Mirror pass, nothing changed (D49, 2026-10-04) | lease GET/PUT (heartbeat) + state GET + http-cache GET/PUT; GitHub: one request per listing page (304s) | ~5 bucket | `floe-mirror` `run_loop`; off every git path |
+| Mirror create (D49) | manifest PUT(Create) + policy PUT(Create) + manifest GET + log PUT + manifest CAS (settings) + state CAS (amortised per ≤ 10 steps) | ~6 | `floe-mirror` `apply.rs` via `WalTarget` |
+| Catalog catch-up per repo (D50, own loop) | cursor GET + conditional manifest GET + log GETs + cursor CAS per window; cold cursor + `catalog/epoch.json` GET (once per process) + one log GET. **While the catalog is down: no request.** Adds nothing to `/_events/notify` (a `try_send`) | 3 + log GETs | `catalog_tail.rs` → `floe_catalog::cursor::catch_up` |
+| Inventory snapshot (D50, daily) | `catalog/inventory.json` GET + lease GET/PUT + re-GET + `registry.list()` + one refs-level sync per repo + mirror state GET + schedule CAS | O(repos), once a day | `catalog_tail.rs::snapshot_if_due`; off every hot path |
 | Orphan log slot (failure path only) | +1 fresh manifest GET, +HEAD per probe, +Create at next seq | — | `publish.rs::claim_log_slot` |
 
 `healthy_request_round_trip_budgets` in `crates/floe-server/tests/sim.rs` pins the healthy MemoryStore

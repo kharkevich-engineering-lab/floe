@@ -136,6 +136,38 @@ Roles (`server.roles`): `serve` (git, API, UI, bundles, LFS), `maintain` (checkp
 fsck/repair), `events` (the webhook bridge). Empty = all. Any number of `serve` hosts may point at one bucket; give
 each repository one maintainer (placement globs) and you are done.
 
+### Mirroring GitHub
+
+floe can keep a copy of your GitHub repositories (public and private) in the bucket and keep it current. The
+mirror (`floe-mirror`, D49) **discovers** repositories (your own, orgs, stars, an explicit list; include/exclude
+globs), **creates** one floe repository each with an `[upstream]` table, and **nudges follow** when GitHub reports a
+push. Follow (D48) moves the bytes: it fetches the matching refs (`refs/heads/*`, `refs/tags/*`) through the WAL like
+any push. When upstream force-pushes, moves a tag or deletes a ref, the old tip is **archived** first, in the same
+commit, under `refs/archive/<unix-ts>/<original-ref>`. Nothing upstream rewrites is ever lost.
+
+```toml
+[github_mirror]          # on a host with roles ∋ "maintain"; FLOE_GITHUB_TOKEN in its environment
+enabled = true
+users = ["@me"]          # the token's user, private repositories included
+private_visible_to_all_readers = true    # or include_private = false
+```
+
+* Names: `Acme/Widgets` becomes `gh-acme/widgets` (`<prefix>-<owner>/<name>`, lowercased; floe ids are two segments).
+  The name stays the same when the repository is renamed on GitHub.
+* `floe github sync --once --dry-run` prints the plan and changes nothing. `floe github sync --once` runs one pass,
+  and `floe github status` shows what the mirror knows.
+* Mirrored repositories are read-only by default (a deny-all `policy.json`), so only follow moves their refs. Floe never
+  deletes them. A repository that disappears upstream is frozen. Your own repositories are untouched.
+* **No per-repository read ACL**: every principal that can read floe can read every mirrored private repository.
+  That is why `include_private` needs the explicit `private_visible_to_all_readers = true`.
+* The token is only ever read from the environment variable named by `token_env`. It is never written to the bucket.
+* LFS is read-through, not prefetched: an object nobody downloaded before the GitHub repository vanished is gone.
+
+**Audit tables** (D50): a binary built with `cargo build --release -p floe-cli --features catalog` and `[catalog]
+enabled` writes `ref_events`, `force_push_log`, `sync_runs` and `repo_inventory` to an Iceberg REST catalog (RustFS
+S3 Tables, or `podman compose --profile catalog up -d` for a local one). The tables are derived copies of the WAL
+plus telemetry. A catalog outage only adds lag, and git, sync and the mirror never wait for it.
+
 ### Authentication
 
 | mode | who gets in | how git authenticates |
@@ -170,9 +202,12 @@ crates/
   floe-wal      RepoHandle: sync levels, publish (group commit + CAS), checkpoints, log reader, remote reader, tasks
   floe-bundle   bundle-uri: slots and chains, building, header ∘ pack composition, lists, retention
   floe-server   axum: smart HTTP, LFS, bundles, auth (none/token/oidc), the maintainer loop, upstream follow,
-                  web/ (API, UI, SDK routes, SSE), setup.rs (installer + recipes), events bridge
-  floe-config   floe.toml (+ FLOE__ env overrides), per-repo settings merge, fail-closed validation
-  floe-cli      `floe serve|import|compact|bundle|wal|mirror|synth|config|repo`; `floe-server` = `floe serve`
+                  web/ (API, UI, SDK routes, SSE), setup.rs (installer + recipes), events bridge, catalog tail,
+                  the mirror's loop (`--features catalog` turns on the Iceberg writer)
+  floe-config   floe.toml (+ FLOE__ env overrides), per-repo settings merge, fail-closed validation, ref patterns
+  floe-mirror   the GitHub mirror: Source trait (GitHub implemented), discovery, plan/apply, state in the bucket
+  floe-catalog  Iceberg audit tables: rows, Recorder, group-commit buffer, WAL cursor; the writer behind `iceberg`
+  floe-cli      `floe serve|import|compact|bundle|wal|mirror|github|synth|config|repo`; `floe-server` = `floe serve`
 web/              React SPA (Vite) + sdk/repos.ts, built into the binary; the wire contract is web/API.md
 docs/             BUNDLE_URI_DESIGN, ROUNDTRIPS (the cost model), POLICY, LFS, INTEGRITY, EVENTS, CONTRACT, patches/
 ```
