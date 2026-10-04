@@ -1,5 +1,6 @@
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { client } from "../api";
 import { RouteBoundary, TopProgress, useBusy } from "./Loading";
 import { ErrorTray } from "./ErrorTray";
 import { InstanceFooter } from "./InstanceFooter";
@@ -9,6 +10,20 @@ export function Layout() {
   // On a repo page the API tab pre-fills that repo in the examples.
   const m = /^\/([^/_][^/]*)\/([^/]+)/.exec(useLocation().pathname);
   const apiHref = m && m[1] !== "services" ? `/api?repo=${m[1]}/${m[2]}` : "/api";
+  // The Admin link only for admins (D62); the API enforces it either way.
+  const [admin, setAdmin] = useState(false);
+  useEffect(() => {
+    let live = true;
+    client.me().then(
+      (me) => {
+        if (live) setAdmin(me.admin);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
   return (
     <>
       <header className="topbar">
@@ -25,6 +40,11 @@ export function Layout() {
           <NavLink to={apiHref} className={({ isActive }) => (isActive ? "topnav-link active" : "topnav-link")}>
             API
           </NavLink>
+          {admin && (
+            <NavLink to="/_admin" className={({ isActive }) => (isActive ? "topnav-link active" : "topnav-link")}>
+              Admin
+            </NavLink>
+          )}
         </nav>
       </header>
       <TopProgress />

@@ -1,0 +1,49 @@
+/* Admin area (D62): forms over the config document schema. Same tokens as styles.css. */
+.admin-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.admin-head .muted { font-size: 13px; }
+.admin-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.admin-cols > .box { margin: 0; }
+.form-group { padding: 4px 16px 12px; }
+.form-group + .form-group { border-top: 1px solid var(--border); }
+.form-group h3 { font-size: 13px; font-weight: 600; margin: 12px 0 4px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.field { display: grid; grid-template-columns: minmax(180px, 260px) 1fr; gap: 4px 16px; padding: 8px 0; align-items: start; }
+.field + .field { border-top: 1px dashed var(--bg3); }
+.field > label, .field > .label { font-weight: 500; padding-top: 5px; }
+.field .control { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.field .help { color: var(--muted); font-size: 12px; margin: 0; }
+.field .field-error { color: var(--del); font-size: 12px; margin: 0; }
+.field input[type="text"], .field input[type="password"], .field select, .field textarea, .admin input.text, .admin select.text {
+  font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); width: 100%; max-width: 560px;
+}
+.field textarea { font-family: var(--mono); font-size: 12px; resize: vertical; }
+.field [aria-invalid="true"] { border-color: var(--del); }
+.field input[type="checkbox"] { margin-top: 8px; width: 16px; height: 16px; }
+.field .secret-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.field .secret-row select { width: auto; }
+.admin :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pill.restart { background: #fff8c5; color: #7a4a00; border: 1px solid #d4a72c; }
+.pill.live { background: #dafbe1; color: #1a7f37; }
+.pill.status-active { background: #dafbe1; color: #1a7f37; }
+.pill.status-error, .pill.status-conflict, .pill.status-forbidden { background: #ffebe9; color: var(--del); }
+.pill.status-excluded, .pill.status-gone, .pill.status-detached, .pill.status-too-large { background: var(--bg3); color: var(--muted); }
+.save-bar { position: sticky; bottom: 0; background: var(--bg); border-top: 1px solid var(--border); padding: 10px 16px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; z-index: 2; }
+.save-bar .text { flex: 1 1 280px; }
+.save-bar .state { font-size: 13px; color: var(--muted); }
+.config-diff { margin: 0; padding: 8px 16px; list-style: none; font-family: var(--mono); font-size: 12px; }
+.config-diff li { padding: 2px 0; word-break: break-all; }
+.config-diff .added { color: var(--add); }
+.config-diff .removed { color: var(--del); }
+.config-diff .changed { color: #9a6700; }
+.notice { margin: 8px 16px; padding: 8px 12px; border-radius: 6px; font-size: 13px; background: var(--bg2); border: 1px solid var(--border); }
+.notice.warn { background: #fff8c5; border-color: #d4a72c; }
+.notice.error { background: #ffebe9; border-color: #ff8182; }
+.notice.ok { background: #dafbe1; border-color: #4ac26b; }
+.preview-list { max-height: 260px; overflow: auto; margin: 0; padding: 0; list-style: none; font-size: 12px; }
+.preview-list li { display: flex; gap: 8px; padding: 2px 0; }
+.preview-list .verdict { width: 6em; flex: none; font-weight: 600; }
+.preview-list .verdict.in { color: var(--add); }
+.preview-list .verdict.out { color: var(--muted); }
+.history-row { cursor: pointer; }
+.history-row.selected td { background: var(--bg2); }
+.stale { opacity: 0.6; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }

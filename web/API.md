@@ -243,8 +243,10 @@ Sorted, `[]` for an unknown/empty owner (200, not 404). Cache: SWR.
 ### `GET /api/v1/me`
 
 ```json
-{ "principal": "jane@example.com", "write": true, "anonymous": false }
+{ "principal": "jane@example.com", "write": true, "admin": false, "anonymous": false }
 ```
+
+`admin` = may use `/api/v1/admin/*`, delete repositories and change settings/policy (D24, D62).
 
 `401` without credentials. `Cache-Control: no-store`.
 
@@ -498,6 +500,35 @@ bootstrap, reconciled, size_bytes}`, `packs{live, live_bytes, pushes}`,
 kind, slot, status: built|missing|pending|blocked|unavailable|too-small|skipped|wrong-host, detail, bundle_id}],
 upcoming[], maintainers[{host, disk, max_pack_bytes, last_pass_age_secs, alive, passes, last_unit}], orphaned}`,
 `compactions[]`, `node{…counters}`. Arrays `[]` when empty.
+
+### Admin: the runtime config document, the mirror, the catalog (D60–D62)
+
+Every route — reads included — needs an **admin** principal (D24's rule: `tokens[].admin`, oidc
+`admin_emails`/`admin_domains`, `mode = none` on loopback): `401` without a credential, `403` otherwise.
+Also under the browser lane (`/api-browser/v1/admin/…`). Every answer is `Cache-Control: no-store`. Errors are
+JSON `{"error": "…", "errors": [{"path"?: "github_mirror.include", "message": "…"}]}`. Design:
+`docs/design/admin-ui.md`. SDK: `repos.admin.*`.
+
+| Route | Answer |
+|---|---|
+| `GET /api/v1/admin/config` | `{revision, updated_at, author, message, rolled_back_from, document, diff, history_mode, location, sealing_key, key_env, applied{revision, restart_required[], apply_error}}`; `revision: 0` + the default document before the first publish; `ETag: "<revision>"`. Secrets read as `{"redacted": true}` (sealed) or `{"env": "NAME"}`. |
+| `PUT /api/v1/admin/config` | body `{document, message?, base_revision?}` → `200 {revision, diff[], restart_required[]}`; **`400`** with `errors[]` and nothing published when the document is invalid (unknown key, bad value, a secret that cannot be sealed/kept/opened, the effective config failing `Config::validate`); **`409 {error, revision}`** when `base_revision` is not the current revision. |
+| `POST /api/v1/admin/config/validate` | body `{document}` → `{ok, errors[], diff[], restart_required[]}`; writes nothing. |
+| `GET /api/v1/admin/config/schema` | JSON Schema (2020-12) of the document; each key has `title`, `description`, `default`, `type`/`enum`/`oneOf` and `x-floe: {format: duration\|bytesize\|secret\|glob\|url\|env\|refpattern\|"", group, live}`. |
+| `GET /api/v1/admin/config/history?before=&n=` | `{entries: [{revision, updated_at, author, message, rolled_back_from?, diff[]}]}`, newest first, `n ≤ 50`. |
+| `GET /api/v1/admin/config/revisions/{n}` | one revision as `GET …/config` (redacted document); `404` unknown, `410` when the bucket's lifecycle expired its object version. |
+| `POST /api/v1/admin/config/rollback` | body `{revision, base_revision?, message?}` → as `PUT` (publishes the old document as a new revision). |
+| `GET /api/v1/admin/overview` | `{config, store, instance{…, applied_revision, restart_required[], apply_error, last_check, check_error}, instances[], mirror, catalog}`. |
+| `GET /api/v1/admin/mirror` | `{summary{enabled, lease, token_login, last_pass, counts}, repos[{id, full_name, floe, status, private, archived, fork, size_kb, pushed_at, last_seen, missing_since, last_error, paused}]}` (`mirror/github/state.json`). |
+| `POST /api/v1/admin/mirror/preview` | body `{section?, discover?}` → the known repositories under a candidate `github_mirror` section (`verdict: in\|too-large\|out`, `reason`); `discover: true` adds `plan` from a real dry-run pass against the forge (no lease, no writes). |
+| `POST /api/v1/admin/mirror/test` | body `{api_url?, token?}` (a secret; `redacted`/absent = the applied token) → `GET {api_url}/user`: `{ok, status, login, scopes, rate_remaining, message}`. |
+| `POST /api/v1/admin/mirror/sync` | writes `mirror/github/sync-request.json`; the mirror loop restarts at its pass boundary and runs a pass within its first tick. |
+| `POST /api/v1/admin/mirror/pause` / `resume` | body `{full_name: "owner/name"}` → a config publish adding/removing that exact entry in `github_mirror.exclude` (frozen: data kept, follow stopped); answers as `PUT`, `{unchanged: true}` when already so. |
+| `GET /api/v1/admin/catalog` | `{compiled, enabled, running, up, tail, uri, warehouse, namespace, auth, restart_required}`. |
+| `POST /api/v1/admin/catalog/test` | body `{section?}` → Iceberg REST `GET {uri}/v1/config?warehouse=` with the configured bearer: `{ok, auth, url, status, body, message}`. |
+
+`GET /api/v1/tls` (admin; read-only certificate status) belongs to the TLS change (D59); the admin overview
+treats a `404` as "not available in this build".
 
 ### Service routes (not for the browser)
 
