@@ -62,6 +62,9 @@ right shape. This document is the thinking tool; apply it to every protocol chan
 | Inventory snapshot (D50, daily) | `catalog/inventory.json` GET + lease GET/PUT + re-GET + `registry.list()` + one refs-level sync per repo + mirror state GET + schedule CAS | O(repos), once a day | `catalog_tail.rs::snapshot_if_due`; off every hot path |
 | TLS `acme` revalidation (D59, 2026-10-04) | every instance, every `poll_interval` (10 min; 10 s while no certificate is loaded): conditional GETs of `tls/acme/<set>/cert.json` and `status.json` (1 round, 2 requests) → 304; nothing on any request path (the handshake reads memory) | 2 per poll per instance; 0 per request | `floe-tls/src/acme.rs::refresh` |
 | TLS `acme` order/renewal (D59, failure-tolerant, ~every 60 days) | status GET → lease (GET + CAS) → cert GET (re-check) → status GET → account GET (+ Create first time) → CA + DNS work → cert PUT → status PUT → lease delete; heartbeats every 30 s while ordering | ≈ 9 store requests per renewal, one instance | `floe-tls/src/acme.rs::tick` |
+| Config revalidation (D60, 2026-10-04) | one conditional GET of `config/current.json` every `config_store.ttl` (15 s) per instance, in its own task; a heartbeat PUT (`Overwrite`) at most once a minute. **Never on a request path**; startup adds 1 GET (bounded 3 s) | 1 per ttl | `config_store/live.rs` |
+| Config publish (D60, admin rate) | current GET → history Create (heal) → current CAS → history Create | 4 | `config_store/mod.rs::publish` |
+| Mirror supervisor (D60) | one HEAD/conditional GET of `mirror/github/sync-request.json` per `config_store.ttl` (≥ 5 s) on maintain hosts | 1 per ttl | `mirror.rs::watch_for_restart` |
 | Orphan log slot (failure path only) | +1 fresh manifest GET, +HEAD per probe, +Create at next seq | — | `publish.rs::claim_log_slot` |
 
 `healthy_request_round_trip_budgets` in `crates/floe-server/tests/sim.rs` pins the healthy MemoryStore
