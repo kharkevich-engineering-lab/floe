@@ -10,6 +10,7 @@ members = [
     "crates/floe-bundle",
     "crates/floe-cli",
     "crates/floe-mirror",
+    "crates/floe-catalog",
 ]
 
 [workspace.package]
@@ -70,6 +71,7 @@ floe-wal = { path = "crates/floe-wal" }
 floe-server = { path = "crates/floe-server" }
 floe-bundle = { path = "crates/floe-bundle" }
 floe-mirror = { path = "crates/floe-mirror" }
+floe-catalog = { path = "crates/floe-catalog" }
 
 anyhow = "1"
 thiserror = "2"
@@ -153,6 +155,13 @@ graphql-parser = "0.4"
 libc = "0.2"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.17", default-features = false, features = ["http-listener"] }
+# Iceberg audit tables (floe-catalog's `iceberg` feature only; never in the
+# default build). Pinned exactly: iceberg-rust is pre-1.0 and its writer API
+# moves between minors. arrow-array follows the major iceberg 0.10 links against.
+iceberg = "=0.10.1"
+iceberg-catalog-rest = "=0.10.1"
+iceberg-storage-opendal = { version = "=0.10.1", default-features = false, features = ["opendal-s3"] }
+arrow-array = "58"
 # TLS (in-process termination)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"

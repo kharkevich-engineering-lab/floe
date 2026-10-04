@@ -995,7 +995,7 @@ crates/floe-catalog/
 | `flush_interval` | `"30s"` | Max age of buffered rows before a commit. |
 | `flush_rows` | `5000` | Commit when this many rows are buffered (per table). |
 | `max_buffer_rows` | `100000` | Bound on buffered rows. Beyond it, durable appends fail fast (lag stays in the WAL) and lossy telemetry is dropped. |
-| `commit_timeout` | `"60s"` | A durable append that is not committed within this fails (cursor not advanced). |
+| `commit_timeout` | `"60s"` | Bound on one commit (and one connect attempt): a durable append not committed within `flush_interval` + this fails (cursor not advanced). |
 | `backfill` | `false` | First cursor for a repository that existed **before** the catalog was first enabled: `false` = its current `head_seq` (start now); `true` = the retained log start (full history, like the events bridge). A repository created after that always starts at its retained log start, so its whole history (a mirror's initial import included) reaches `ref_events` (§C.4). |
 | `create_tables` | `true` | Create namespace and tables if missing; `false` = fail if they are missing. |
 
@@ -1226,6 +1226,59 @@ Against RustFS, `#[ignore]` (`just test-catalog`, needs `podman compose --profil
 `appends_and_reads_back_all_four_tables`, which creates the namespace and tables, appends via the writer, scans
 with `iceberg`'s reader, and asserts counts/values; and `concurrent_writers_retry_conflicts` (two writers, one
 table).
+
+### C.8 Implementation notes (2026-10-04, §C landed; the code wins)
+
+Where `crates/floe-catalog` differs from or pins down §C.1–§C.7:
+
+- **Feature deps**: `iceberg = ["dep:iceberg", "dep:iceberg-catalog-rest", "dep:iceberg-storage-opendal",
+  "dep:arrow-array", "dep:reqwest"]`. No direct `parquet`/`arrow-schema`: the Parquet writer is built with
+  `ParquetWriterBuilder::from_table_properties`, and schemas go through `iceberg::arrow`.
+  `iceberg-storage-opendal` is built with only `opendal-s3`. `iceberg-catalog-rest` 0.10.1 builds `reqwest`
+  **without a TLS backend**; `dep:reqwest` (workspace, rustls) is there only so feature unification makes an
+  `https://` catalog URI work.
+- **Conflict retry**: iceberg-rust 0.10's `Transaction::commit` already reloads the table and re-applies the
+  append on a retryable conflict. floe does not add its own loop. It sets `commit.retry.num-retries = 5` on the
+  tables it creates instead.
+- **Partitions**: rows are split with `RecordBatchPartitionSplitter` and written through `FanoutWriter`, which
+  gives one data file per partition per flush.
+- **Schema check at connect**: `schema::check_compatible` requires every floe field id to exist in the
+  catalog's current schema with the same name, type and requiredness. A catalog that reassigns field ids on
+  create, or a table someone altered, fails `connect` loudly. The writer then stays down, with lag only.
+- **Buffer** (`buffer.rs`): `max_buffer_rows` counts all tables **and rows in flight**. A failed commit fails
+  its waiters, drops its rows and takes the writer **down until a reconnect succeeds**, so later appends fail
+  fast with `Unavailable` instead of piling up. A durable waiter gives up after `flush_interval +
+  commit_timeout` (the age wait, then the commit), so a small append never times out just because
+  `flush_interval >= commit_timeout`. The flusher bounds a single commit at `flush_interval + 2 ×
+  commit_timeout`, so the waiters' `Timeout` always fires first. One connect attempt is bounded by
+  `commit_timeout` (the REST client has no request timeout) and counts as a failure with backoff when it
+  elapses; `shutdown` interrupts a connect in progress. One append carries at most
+  `max_append_rows() = min(flush_rows, max_buffer_rows)` rows (more is `Backpressure` even on an empty buffer). `ingested_at` is stamped by the writer at commit time and is not
+  a row field.
+- **Cursor** (`cursor.rs`): the catch-up itself lives in the catalog core as `cursor::catch_up(store, source,
+  sink, cold_start)`. The server's `CatalogTail` implements `cursor::TailSource` (head, retained start,
+  `committed_at(seq)`, rows of `(from, to]`) over a `RepoHandle` + `events::refs_from_entries`, and serializes
+  catch-ups per repository. Rows are built with `floe_catalog::rows_for_entry(repo, entry, transitions)`
+  (`RefTransition` is the `RefEvent` fields). `cursor::load_epoch` does the `catalog/epoch.json` create-once.
+  While the writer is down, a catch-up returns `Unavailable` **before** the cursor GET, so it costs nothing on
+  the bucket (§D.7's "cursor GET only" becomes "no request"). The range is read in windows of
+  `WINDOW_ENTRIES` (256) entries, each delivered in appends of at most `max_append_rows()` rows (one entry with
+  many rows, a mirror's initial import, is split), and the cursor is CASed after every window. A backlog larger
+  than `max_buffer_rows` therefore drains, only one window is in memory, and a failure keeps the windows already
+  committed. A lost cursor CAS ends the catch-up (the rest is the other tail's).
+- **Throughput bound (kept)**: a catch-up whose last append is under `flush_rows` waits for the age flush, up
+  to `flush_interval`, while holding one of the tail's concurrency slots. A sweep over N repositories that each
+  changed a little takes about `N / concurrency × flush_interval` when nothing else fills the buffer (other
+  tails' rows share the same group commit and shorten it). Lower `flush_interval`, or raise the tail's
+  concurrency, for many small active repositories. An early flush for durable waiters is post-MVP.
+- **Upstream URLs** in `ref_events.upstream` and `force_push_log.upstream` lose userinfo, query and fragment
+  (`rows::redact_url`): a token placed in `[upstream] git` instead of `token_env` never reaches the tables.
+- **`parse_follow_archived`** is generic over the map's hasher. It also rejects a line whose
+  `refs/archive/<ts>/<ref>` does not end in its `<original_ref>`, or whose OIDs are not full hex.
+- **Config**: `floe_config::CatalogConfig` (re-exported as `floe_catalog::CatalogConfig`) is validated by
+  `Config::validate` when `enabled`: `uri`, `warehouse` and a non-empty `namespace` are required,
+  `flush_rows > 0` and `max_buffer_rows >= flush_rows` must hold, and `flush_interval`/`commit_timeout` must
+  be non-zero. The `cfg!(feature = "catalog")` startup check stays §D's.
 
 ---
 

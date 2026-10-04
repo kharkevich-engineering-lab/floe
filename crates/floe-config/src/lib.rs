@@ -31,6 +31,8 @@ pub struct Config {
     pub events: EventsConfig,
     pub github: GithubConfig,
     pub github_mirror: GithubMirrorConfig,
+    /// Iceberg audit tables (`docs/design/github-mirror.md` §C, D50).
+    pub catalog: CatalogConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -946,6 +948,78 @@ impl Default for GithubMirrorConfig {
     }
 }
 
+/// `[catalog]` (`docs/design/github-mirror.md` §C, D50): Iceberg audit tables
+/// (`ref_events`, `force_push_log`, `sync_runs`, `repo_inventory`) behind an
+/// Iceberg REST catalog. Derived copies, never a source of truth: the WAL keeps
+/// every ref event, and a catalog outage only adds catalog lag. The section
+/// parses in every build; `enabled = true` needs a binary built with
+/// `--features catalog` (the server refuses to start otherwise).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[allow(clippy::struct_excessive_bools)] // independent config switches
+pub struct CatalogConfig {
+    pub enabled: bool,
+    /// Iceberg REST catalog base URL (`RustFS` S3 Tables: its Iceberg REST endpoint).
+    pub uri: Option<String>,
+    /// Warehouse identifier (S3 Tables: the table bucket the endpoint expects).
+    pub warehouse: Option<String>,
+    /// Iceberg namespace; created when absent (`create_tables`).
+    pub namespace: String,
+    /// Env var holding a bearer token for the catalog. Never the value itself.
+    pub token_env: Option<String>,
+    /// Env var holding `client_id:client_secret` (REST `OAuth2` client credentials).
+    pub credential_env: Option<String>,
+    /// `FileIO` endpoint for data files when the catalog does not vend credentials.
+    pub s3_endpoint: Option<String>,
+    pub s3_region: String,
+    /// Env var *names* for the data-file credentials (D43 style).
+    pub s3_access_key_env: String,
+    pub s3_secret_key_env: String,
+    /// Path-style addressing (`RustFS`/`MinIO`).
+    pub s3_path_style: bool,
+    /// Max age of buffered rows before a commit.
+    #[serde(with = "humantime_serde")]
+    pub flush_interval: Duration,
+    /// Commit a table once this many rows are buffered for it.
+    pub flush_rows: usize,
+    /// Bound on buffered rows (all tables, in flight included). Beyond it durable
+    /// appends fail fast (the lag stays in the WAL) and telemetry is dropped.
+    pub max_buffer_rows: usize,
+    /// Bound on one commit and one connect attempt: a durable append not
+    /// committed within `flush_interval` + this fails; its cursor stays.
+    #[serde(with = "humantime_serde")]
+    pub commit_timeout: Duration,
+    /// Cold cursor of a repository that predates the catalog: `false` = start at
+    /// its head, `true` = its retained log start (full history).
+    pub backfill: bool,
+    /// Create the namespace and tables when missing; `false` = fail instead.
+    pub create_tables: bool,
+}
+
+impl Default for CatalogConfig {
+    fn default() -> Self {
+        CatalogConfig {
+            enabled: false,
+            uri: None,
+            warehouse: None,
+            namespace: "floe".into(),
+            token_env: None,
+            credential_env: None,
+            s3_endpoint: None,
+            s3_region: "us-east-1".into(),
+            s3_access_key_env: "AWS_ACCESS_KEY_ID".into(),
+            s3_secret_key_env: "AWS_SECRET_ACCESS_KEY".into(),
+            s3_path_style: true,
+            flush_interval: Duration::from_secs(30),
+            flush_rows: 5000,
+            max_buffer_rows: 100_000,
+            commit_timeout: Duration::from_mins(1),
+            backfill: false,
+            create_tables: true,
+        }
+    }
+}
+
 impl GithubMirrorConfig {
     /// `validate`'s checks for this section (only when `enabled`).
     fn validate(&self, cfg: &Config) -> Result<()> {
@@ -1013,6 +1087,39 @@ impl GithubMirrorConfig {
                 "github_mirror.include_private: floe has no per-repository read ACL, so every reader would read every mirrored private repository; set github_mirror.private_visible_to_all_readers = true to accept that, or include_private = false"
             );
         }
+        Ok(())
+    }
+}
+
+impl CatalogConfig {
+    fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let set = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+        anyhow::ensure!(
+            set(&self.uri),
+            "catalog.uri must be set when catalog.enabled"
+        );
+        anyhow::ensure!(
+            set(&self.warehouse),
+            "catalog.warehouse must be set when catalog.enabled"
+        );
+        anyhow::ensure!(
+            !self.namespace.trim().is_empty(),
+            "catalog.namespace must not be empty"
+        );
+        anyhow::ensure!(self.flush_rows > 0, "catalog.flush_rows must be > 0");
+        anyhow::ensure!(
+            self.max_buffer_rows >= self.flush_rows,
+            "catalog.max_buffer_rows ({}) must be >= catalog.flush_rows ({})",
+            self.max_buffer_rows,
+            self.flush_rows
+        );
+        anyhow::ensure!(
+            !self.flush_interval.is_zero() && !self.commit_timeout.is_zero(),
+            "catalog.flush_interval and catalog.commit_timeout must be > 0"
+        );
         Ok(())
     }
 }
@@ -1306,6 +1413,7 @@ impl Default for Config {
             events: EventsConfig::default(),
             github: GithubConfig::default(),
             github_mirror: GithubMirrorConfig::default(),
+            catalog: CatalogConfig::default(),
         }
     }
 }
@@ -1695,6 +1803,7 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.store.bucket.is_empty(), "store.bucket must be set");
+        self.catalog.validate()?;
         let t = &self.server.tls;
         match t.mode {
             TlsMode::Files => anyhow::ensure!(
@@ -2530,6 +2639,44 @@ webhook_secret = "s"
         assert_eq!(c.events.webhook_secret.as_deref(), Some("s"));
         let err = Config::parse("[events]\nwebhook_url = \"ftp://x\"\n").unwrap_err();
         assert!(err.to_string().contains("webhook_url"), "{err}");
+    }
+
+    #[test]
+    fn catalog_section_parses_and_validates() {
+        let d = CatalogConfig::default();
+        assert!(!d.enabled);
+        assert_eq!(d.namespace, "floe");
+        assert_eq!(d.flush_rows, 5000);
+        assert_eq!(d.flush_interval, Duration::from_secs(30));
+        let mut c = Config::parse(
+            r#"
+[store]
+bucket = "b"
+[catalog]
+enabled = true
+uri = "http://localhost:9000/iceberg"
+warehouse = "floe-catalog"
+flush_interval = "5s"
+flush_rows = 10
+max_buffer_rows = 100
+"#,
+        )
+        .unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.catalog.flush_interval, Duration::from_secs(5));
+        assert_eq!(c.catalog.s3_access_key_env, "AWS_ACCESS_KEY_ID");
+        c.catalog.max_buffer_rows = 5;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("max_buffer_rows"), "{err}");
+        c.catalog.max_buffer_rows = 100;
+        c.catalog.uri = None;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("catalog.uri"), "{err}");
+        // Disabled: nothing is required.
+        c.catalog.enabled = false;
+        c.validate().unwrap();
+        let err = Config::parse("[catalog]\nbogus = 1\n").unwrap_err();
+        assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
     }
 
     #[test]

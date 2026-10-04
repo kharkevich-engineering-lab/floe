@@ -339,3 +339,24 @@ max_new_per_pass = 20
 min_rate_remaining = 200          # stop a pass (incomplete) below this x-ratelimit-remaining
 gone_after = "24h"                # missing (404/403) this long before gone/forbidden (frozen, never deleted)
 lease_ttl = "2m"
+
+[catalog]                         # docs/design/github-mirror.md §C — Iceberg audit tables (ref_events, force_push_log,
+                                  # sync_runs, repo_inventory). Derived, never a source of truth; an outage only adds
+                                  # catalog lag. enabled = true needs a binary built with --features catalog.
+enabled = false
+# uri = "http://localhost:9000/iceberg"        # Iceberg REST endpoint (RustFS S3 Tables)
+# warehouse = "floe-catalog"
+namespace = "floe"
+# token_env = "FLOE_CATALOG_TOKEN"             # env var with a bearer token
+# credential_env = "FLOE_CATALOG_CREDENTIAL"   # env var with "client_id:client_secret" (OAuth2 client credentials)
+# s3_endpoint = "http://localhost:9000"        # data files, when the catalog does not vend credentials
+s3_region = "us-east-1"
+s3_access_key_env = "AWS_ACCESS_KEY_ID"
+s3_secret_key_env = "AWS_SECRET_ACCESS_KEY"
+s3_path_style = true
+flush_interval = "30s"            # max age of buffered rows before a commit
+flush_rows = 5000                 # commit a table at this many buffered rows
+max_buffer_rows = 100000          # beyond it durable appends fail fast (lag stays in the WAL), telemetry drops
+commit_timeout = "60s"
+backfill = false                  # a repository older than the catalog: false = start at head, true = full history
+create_tables = true
