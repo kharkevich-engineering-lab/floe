@@ -3,6 +3,8 @@ name = "floe-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [features]
 # The Iceberg writer for the audit tables (D50, `docs/design/github-mirror.md`

@@ -18,7 +18,14 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-rust-version = "1.90"
+# Nothing here goes to crates.io (cargo-deny treats unpublished crates as private).
+publish = false
+# The MSRV, checked by CI (`just msrv`, `cargo check --locked` on exactly this version) and
+# inherited by every member. The floor is the locked dependency graph's, not floe's own code
+# (which needs 1.91 for Duration::from_mins/from_hours): aws-sdk-s3 and aws-config require
+# 1.94.1. Resolver 3 prefers dependency versions that fit it, so a dependency that wants a newer
+# rustc stays back until this line is raised on purpose.
+rust-version = "1.94.1"
 
 # The lint gate: `just clippy` runs `cargo clippy --workspace --all-targets -- -D warnings`
 # against this table (every crate opts in with `[lints] workspace = true`). Test code is
