@@ -36,7 +36,7 @@ export function OverviewPage() {
         {c.error && <div className="notice error">Config store unreachable: {c.error}</div>}
         <KV
           rows={[
-            ["Revision", c.revision === 0 ? "none yet (built-in defaults)" : <Link to="/_admin/history">{c.revision}</Link>],
+            ["Revision", c.revision === 0 ? "none yet (built-in defaults)" : <Link key="rev" to="/_admin/history">{c.revision}</Link>],
             ["Published", c.revision ? `${when(c.updated_at)} by ${c.author ?? "?"}` : "—"],
             ["Message", c.message || "—"],
             ["Store", <code key="loc">{o.store.location}</code>],
@@ -58,7 +58,7 @@ export function OverviewPage() {
             ["Version", me.version],
             ["Roles", me.roles.join(", ")],
             ["Applied revision", String(me.applied_revision)],
-            ["Last check", me.check_error ? <span className="field-error">{me.check_error}</span> : when(me.last_check)],
+            ["Last check", me.check_error ? <span key="err" className="field-error">{me.check_error}</span> : when(me.last_check)],
             ["Started", when(me.started_at)],
           ]}
         />
@@ -105,7 +105,7 @@ export function OverviewPage() {
         {o.mirror.error && <div className="notice error">{o.mirror.error}</div>}
         <KV
           rows={[
-            ["State", o.mirror.enabled ? <span className="pill live">enabled</span> : "disabled"],
+            ["State", o.mirror.enabled ? <span key="state" className="pill live">enabled</span> : "disabled"],
             ["Lease", o.mirror.lease ? `${o.mirror.lease.holder} (until ${new Date(o.mirror.lease.expires_at).toLocaleTimeString()})` : "not held"],
             ["Token user", o.mirror.token_login ?? "—"],
             [

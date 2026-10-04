@@ -166,7 +166,7 @@ function canonical(v: unknown): string {
   if (v && typeof v === "object") {
     const o = v as Record<string, unknown>;
     return `{${Object.keys(o)
-      .sort()
+      .toSorted()
       .map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`)
       .join(",")}}`;
   }
@@ -174,8 +174,9 @@ function canonical(v: unknown): string {
 }
 
 /** `owner/name` glob match as the mirror does it (`*` stops at `/`, ASCII case-insensitive). */
+const escapeRegex = (part: string) => part.replace(/[.+?^$|()[\]{}\\]/g, "\\$&");
+
 export function globMatch(glob: string, s: string): boolean {
-  const escape = (part: string) => part.replace(/[.+?^$|()[\]{}\\]/g, "\\$&");
-  const pattern = glob.toLowerCase().split("*").map(escape).join("[^/]*");
+  const pattern = glob.toLowerCase().split("*").map(escapeRegex).join("[^/]*");
   return new RegExp("^" + pattern + "$").test(s.toLowerCase());
 }
