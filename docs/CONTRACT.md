@@ -308,7 +308,11 @@ where configured. Do not derive scheduling behavior from this interface catalog.
   `CatalogWriter::{start, append_durable, is_up, max_append_rows, shutdown}`, `cursor::{catch_up, TailSource,
   load_epoch}`.
 - Feature `iceberg`: `iceberg::IcebergCommitter` (the REST `Committer`). Enabled by `floe-server/catalog` ←
-  `floe-cli/catalog`.
+  `floe-cli/catalog`. `sigv4` (D63; self-contained, meant to move to a shared Iceberg crate):
+  `CredentialSource::{from_env, fixed, from_provider, get}` (D43 credentials, refreshed before expiry),
+  `Signer::{new, sign}`, `sign_headers(&SigningInput, &mut HeaderMap, &Credentials)`, `settings_for(service)`,
+  `SigningProxy::{start, catalog_uri, client}` (the in-process signing hop `RestCatalog` talks to).
+  `floe_config::{CatalogConfig, CatalogAuth}` are re-exported.
 - `floe_config::refpattern::RefPatterns` (D48) lives in floe-config: parse/matches/refspecs, shared by floe-git,
   floe-server and floe-mirror.
 

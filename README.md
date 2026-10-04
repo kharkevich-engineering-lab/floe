@@ -167,7 +167,7 @@ private_visible_to_all_readers = true    # or include_private = false
 
 **Audit tables** (D50): a binary built with `cargo build --release -p floe-cli --features catalog` (the release
 image and tarballs are) and `[catalog] enabled` writes `ref_events`, `force_push_log`, `sync_runs` and `repo_inventory` to an Iceberg REST catalog (RustFS
-S3 Tables, or `podman compose --profile catalog up -d` for a local one). The tables are derived copies of the WAL
+or AWS S3 Tables with `auth = "sigv4"`, or `podman compose --profile catalog up -d` for a local one). The tables are derived copies of the WAL
 plus telemetry. A catalog outage only adds lag, and git, sync and the mirror never wait for it.
 
 ### Authentication
