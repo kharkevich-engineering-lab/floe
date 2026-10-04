@@ -89,6 +89,14 @@ test:
 test-editor:
     {{t5}} cargo test -p floe-server --test github --test github_reads --test github_graphql --test github_prs --test github_webhooks --test events
 
+# Simulation suite (principle IV, AGENTS.md §3): fault links per instance over one truth store —
+# crash, partition, stale, lost response, orphan. Default seeds; FLOE_SIM_SEEDS=<n> runs n
+# deterministic seeds, FLOE_SIM_SEED=<s> exactly one (the nightly workflow picks random ones).
+# One test at a time: the scenarios share process globals (TEST_ABORT_AFTER) and some assert
+# wall-clock bounds, so they do not compete. Extra args go to the harness (`just sim --skip <name>`).
+sim *ARGS:
+    {{t15}} cargo test -p floe-server --test sim -- --test-threads=1 {{ARGS}}
+
 # Smart-HTTP end-to-end against real git (≈ 20 s) — run when touching smart.rs/receive/upload-pack/wal.
 e2e *ARGS:
     {{t10}} cargo test -p floe-server --test e2e {{ARGS}}
@@ -117,6 +125,10 @@ warnings:
     fi
     echo "no rustc warnings"
 
+# Formatting gate: rustfmt (edition 2024, from Cargo.toml) over every workspace crate.
+fmt-check:
+    cargo fmt --all --check
+
 # Clippy, workspace-wide, all targets, warnings are errors. The lint set lives in
 # [workspace.lints] in Cargo.toml; test code is exempt from the panic-path restriction
 # lints via clippy.toml (allow-unwrap-in-tests etc.).
@@ -124,7 +136,20 @@ clippy:
     {{t15}} cargo clippy --workspace --all-targets -- -D warnings
 
 # Everything that must be green before a merge (what CI runs, one job per group of recipes).
-ci: warnings clippy test test-editor e2e clippy-catalog test-catalog-lib
+ci: fmt-check warnings clippy test test-editor e2e sim clippy-catalog test-catalog-lib
+
+# `cargo check` on the workspace's declared MSRV (`rust-version` in Cargo.toml, its one home).
+msrv:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    msrv="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)"
+    rustup toolchain install "$msrv" --profile minimal
+    {{t15}} cargo "+$msrv" check --workspace --all-targets --locked
+
+# Supply chain (deny.toml): advisories, licences, bans, sources. Needs cargo-deny
+# (`cargo install --locked cargo-deny`). On PRs that touch Cargo.lock/deny.toml, and nightly.
+deny:
+    cargo deny --locked check
 
 # Slow tier: #[ignore]d benches/soaks (20k-ref push, 466k-ref render, ...).
 test-slow:
