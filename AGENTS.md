@@ -142,11 +142,11 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `bundles/list.pb`, `bundles/<strategy>/…` | bundle-uri artefacts + CAS'd list. |
 | `leases/<name>.pb` | CAS lease with TTL heartbeat: `compact`, `bundle:<strategy>`. The only cross-instance mutex. |
 | `cache/api/v1/<sha1>.json` | Shared render cache of immutable web API answers. |
-| `policy.json` | Per-repo push policy (rule language, not on the WAL). `docs/POLICY.md`. Missing = allow-all. |
+| `policy.json` | Per-repo push policy (rule language, not on the WAL). `docs/POLICY.md`. Missing = allow-all, except the built-in `archive-immutable` rule on `refs/archive/**` (D48). |
 | `fsck.pb` | Last connectivity audit (`FsckReport`), written by the maintainer's `fsck` unit, consumed by `repair` (`docs/INTEGRITY.md`). |
 | `events/cursor.json` | Durable acknowledged WAL sequence of the events bridge; advanced only after the webhook acknowledged (D32). |
 | `catalog/cursor.json` | The catalog tail's own cursor (D50): last seq whose rows the Iceberg catalog committed. Unrelated to the bucket-root `meta/repos.pb` catalog. |
-| `refs/archive/<unix-ts>/<ref>` (a ref, not an object) | Old tips that upstream follow kept when upstream rewrote or deleted a followed ref (D48); never overwritten, never followed. |
+| `refs/archive/<unix-ts>/<ref>` (a ref, not an object) | Old tips that upstream follow kept when upstream rewrote or deleted a followed ref (D48); never overwritten, never followed, immutable to pushers (built-in policy rule `archive-immutable`). |
 | bucket root: `mirror/github/state.json`, `mirror/github/http-cache.json` | The GitHub mirror's state (CAS, generation-guarded) and its disposable ETag cache (`PutMode::Overwrite`), D49. |
 | bucket root: `catalog/epoch.json`, `catalog/inventory.json`, `leases/mirror-github.pb`, `leases/catalog-inventory.pb` | When the catalog was first enabled (create-once), the daily inventory snapshot's schedule (CAS), and the two fleet-wide leases (D49/D50). |
 | `lfs/objects/<aa>/<bb>/<oid>` | LFS objects (sha256-addressed, immutable). Missing ones can be read through from `upstream.lfs` and persisted (`docs/LFS.md`). |
@@ -482,7 +482,9 @@ deletion upstream publishes **one** PUSH entry that creates `refs/archive/<unix-
 atomic transaction: any ref that moved under it rejects the whole round, which the next round re-plans. An upstream
 that advertises no refs at all never causes deletions. A round probes refs first and does Serve-level work only
 when something moved. `"refuse"` is D33's behaviour. Follow still bypasses policy. Upstream tokens resolve through
-`Config::upstream_token_env` (`upstream.token_env_by_host`, host-only, then `token_env`). Supersedes D33's
+`Config::upstream_token_env` (`upstream.token_env_by_host`, host-only, then `token_env`). Pushers cannot write
+`refs/archive/**` on any repository: policy has a built-in `archive-immutable` rule (create/update/delete, no
+bypass) that a policy file replaces only by defining a rule of that name (`docs/POLICY.md`). Supersedes D33's
 "fast-forward only" clause; the rest of D33 stands. Design: `docs/design/github-mirror.md` §A.
 
 **D49 — The GitHub mirror decides, follow moves bytes (2026-10-04).** `floe-mirror` runs on a `maintain` host

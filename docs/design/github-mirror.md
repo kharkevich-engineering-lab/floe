@@ -238,7 +238,8 @@ refs/archive/1791075600/refs/heads/feat/old-api  # branch deleted upstream
   advertised by `ls-refs`, and `git fetch origin 'refs/archive/*:refs/archive/*'` retrieves them. Follow never
   deletes or moves them.
 - The mirror's read-only policy (§B.7) protects them from pushes. For own repositories, POLICY.md gains an
-  example rule `archive-immutable` (`refs/archive/**`, restricts `update`, `delete`).
+  example rule `archive-immutable` (`refs/archive/**`, restricts `update`, `delete`). *Superseded, see §A.7:
+  the rule is built in.*
 
 ### A.4 Where the change goes in `follow.rs`
 
@@ -429,6 +430,12 @@ Where the code differs from §A.1–§A.6 (the code wins):
   `GIT_HTTP_LOW_SPEED_*`). `upstream.git`/`upstream.lfs` refuse userinfo, `?` and `#`; the authority for
   `token_env_by_host` ends at the first `/`, `?` or `#`; the credential helper answers only for the
   upstream's own `host[:port]`.
+- Archive protection (2026-10-04): an example rule left every repository without a policy file open to
+  forged, moved or deleted archive refs. `floe_server::policy` now has a built-in `archive-immutable` rule
+  (`refs/archive/**`; `create`, `update`, `delete`; no bypass), evaluated after the file's rules on every
+  push. A policy file that defines a rule with that name replaces it (for example to give admins a bypass).
+  Follow does not go through policy, so it still writes archives. Tests: `policy::tests::archive_*` and
+  `tests/policy.rs` `archive_refs_are_immutable_without_a_policy`.
 
 ---
 

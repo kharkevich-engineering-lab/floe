@@ -11,7 +11,7 @@ use floe_config::OnRewrite;
 use floe_proto::v1::RefUpdate;
 
 /// Where archived tips live. Reserved: follow never follows it (`refpattern`).
-pub(crate) const ARCHIVE_PREFIX: &str = "refs/archive/";
+pub(crate) const ARCHIVE_PREFIX: &str = crate::policy::ARCHIVE_REFS;
 
 pub(crate) struct Observed<'a> {
     /// WAL refs matching the patterns.
@@ -177,7 +177,9 @@ pub(crate) fn archive_ref(ts: u64, original: &str) -> String {
 
 /// How far ahead of `now` an existing archive's `<unix-ts>` may be and still count
 /// (clock skew between maintainers). Anything later was not written by follow —
-/// `refs/archive/` is an ordinary namespace a pusher can write to — and must not
+/// pushers are kept out of `refs/archive/` by the built-in policy rule
+/// (`policy::ARCHIVE_RULE`), but a policy file may replace it with one that has
+/// a bypass, and an import may carry such names — and must not
 /// pin the timestamp (a forged `refs/archive/18446744073709551615/x` would
 /// otherwise make every later archive name collide, rejecting each round forever).
 const ARCHIVE_TS_SKEW: u64 = 24 * 60 * 60;

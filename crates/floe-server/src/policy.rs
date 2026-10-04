@@ -1,8 +1,10 @@
 //! Per-repo push policy. Language: `docs/POLICY.md`.
 //!
 //! Stored at `repos/<owner>/<repo>/policy.json` (not on the WAL). Missing file
-//! = empty rules = allow-all. Receive-pack evaluates after ingest so
-//! force-push can use `merge-base --is-ancestor`.
+//! = empty rules = allow-all, except for the built-in [`ARCHIVE_RULE`]
+//! (`refs/archive/**` is immutable to pushers unless the file names its own
+//! rule of that name). Receive-pack evaluates after ingest so force-push can
+//! use `merge-base --is-ancestor`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -33,6 +35,16 @@ pub struct RepoPolicy {
 fn default_version() -> u32 {
     1
 }
+
+/// The built-in rule that keeps upstream follow's archived tips (D48,
+/// `refs/archive/<unix-ts>/<ref>`) where they are: no pusher may create,
+/// update or delete a ref under [`ARCHIVE_REFS`]. Follow writes there without
+/// going through policy. A policy file that defines a rule with this name
+/// replaces the built-in (e.g. to give admins a bypass); see `docs/POLICY.md`.
+pub const ARCHIVE_RULE: &str = "archive-immutable";
+
+/// The namespace [`ARCHIVE_RULE`] protects.
+pub const ARCHIVE_REFS: &str = "refs/archive/";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -580,6 +592,13 @@ fn deny_reason(
             return Some(format!("rejected by rule '{}'", rule.name));
         }
     }
+    // Built-in: every op is restricted and nobody bypasses, so no ancestry
+    // check (`is_force`) is needed for it.
+    if u.name.starts_with(ARCHIVE_REFS) && !policy.rules.iter().any(|r| r.name == ARCHIVE_RULE) {
+        return Some(format!(
+            "rejected by rule '{ARCHIVE_RULE}' (built-in: {ARCHIVE_REFS}* holds tips upstream follow archived)"
+        ));
+    }
     None
 }
 
@@ -991,6 +1010,46 @@ mod tests {
           }]
         }"#;
         assert!(parse_bytes(json.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn archive_refs_are_immutable_by_default() {
+        let archive = "refs/archive/1791072000/refs/heads/main";
+        for p in [RepoPolicy::empty(), lock_main()] {
+            for (old, new) in [("", "aaa"), ("aaa", "bbb"), ("aaa", "")] {
+                let t = txn(vec![upd(archive, old, new), upd("refs/heads/dev", "", "aaa")], false);
+                let ev = evaluate(&p, "alice@example.com", &t, |_| false);
+                assert!(
+                    ev.per_ref[0].1.as_ref().unwrap_err().contains("rejected by rule 'archive-immutable'"),
+                    "{old:?} -> {new:?} on {archive} must be refused: {:?}",
+                    ev.per_ref[0]
+                );
+                assert!(ev.per_ref[1].1.is_ok(), "other refs are unaffected");
+                assert_eq!(ev.publish.updates.len(), 1);
+            }
+        }
+        // A look-alike outside the namespace is an ordinary ref.
+        let t = txn(vec![upd("refs/heads/refs/archive/x", "", "aaa")], false);
+        assert!(evaluate(&RepoPolicy::empty(), "bob@example.com", &t, |_| false).per_ref[0].1.is_ok());
+    }
+
+    #[test]
+    fn archive_rule_in_the_file_replaces_the_built_in() {
+        // The POLICY.md example: admins may clean archives up, nobody else.
+        let json = r#"{
+          "version": 1,
+          "groups": [{ "name": "admins", "members": ["alice@example.com"] }],
+          "rules": [{
+            "name": "archive-immutable",
+            "match": { "refs": ["refs/archive/**"] },
+            "effect": { "protect": { "restricts": ["create", "update", "delete"], "bypass": ["group:admins"] } }
+          }]
+        }"#;
+        let p = parse_bytes(json.as_bytes()).unwrap();
+        let t = txn(vec![upd("refs/archive/1/refs/heads/main", "aaa", "")], false);
+        assert!(evaluate(&p, "alice@example.com", &t, |_| false).per_ref[0].1.is_ok());
+        let ev = evaluate(&p, "bob@example.com", &t, |_| false);
+        assert!(ev.per_ref[0].1.as_ref().unwrap_err().contains("archive-immutable"));
     }
 
     #[test]

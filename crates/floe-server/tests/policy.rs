@@ -147,3 +147,43 @@ async fn protected_main_rejects_force_and_delete() -> TestResult {
     git_in(&src, &["push", "--force", "origin", "other:main"])?;
     Ok(())
 }
+
+/// D48: `refs/archive/*` is upstream follow's; with no policy file at all a
+/// pusher can neither forge nor delete an archive name (built-in rule
+/// `archive-immutable`), while every other ref stays allow-all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn archive_refs_are_immutable_without_a_policy() -> TestResult {
+    let server = Server::start().await?;
+    server.put_repo("t", "r").await?;
+
+    let src = TestRepo::synthetic(1, 1)?;
+    git_in(&src, &["commit", "--allow-empty", "-m", "a"])?;
+    git_in(&src, &["branch", "-M", "main"])?;
+    git_in(
+        &src,
+        &["remote", "add", "origin", &server.repo_url("t", "r")],
+    )?;
+    git_in(&src, &["push", "origin", "main"])?;
+
+    let forge = Command::new("git")
+        .current_dir(&*src)
+        .args(["push", "origin", "main:refs/archive/1791072000/refs/heads/main"])
+        .output()?;
+    let stderr = String::from_utf8_lossy(&forge.stderr);
+    assert!(!forge.status.success(), "creating an archive ref succeeded: {stderr}");
+    assert!(
+        stderr.contains("archive-immutable"),
+        "stderr should name the built-in rule: {stderr}"
+    );
+    let ls = Command::new("git")
+        .current_dir(&*src)
+        .args(["ls-remote", "origin", "refs/archive/*"])
+        .output()?;
+    assert!(ls.status.success());
+    assert!(ls.stdout.is_empty(), "nothing was published under refs/archive/");
+
+    // Everything else is still allow-all.
+    git_in(&src, &["push", "origin", "main:refs/heads/topic"])?;
+    git_in(&src, &["push", "origin", ":refs/heads/topic"])?;
+    Ok(())
+}
