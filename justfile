@@ -123,8 +123,8 @@ warnings:
 clippy:
     {{t15}} cargo clippy --workspace --all-targets -- -D warnings
 
-# Everything that must be green before a merge (what CI runs).
-ci: warnings clippy test test-editor e2e
+# Everything that must be green before a merge (what CI runs, one job per group of recipes).
+ci: warnings clippy test test-editor e2e clippy-catalog test-catalog-lib
 
 # Slow tier: #[ignore]d benches/soaks (20k-ref push, 466k-ref render, ...).
 test-slow:
@@ -151,7 +151,8 @@ store-test-s3:
 
 # Catalog (D50): the Iceberg writer against a live REST catalog, #[ignore]d tests only.
 # Needs `podman compose --profile catalog up -d`; FLOE_TEST_CATALOG_URI picks the endpoint
-# (default: the iceberg-rest fixture; RustFS S3 Tables needs SigV4, R6). Not part of `just ci`.
+# (default: the iceberg-rest fixture; RustFS S3 Tables needs SigV4, R6). Not part of `just ci`
+# (it needs a running catalog); `test-catalog-lib` + `clippy-catalog` are.
 test-catalog:
     FLOE_TEST_CATALOG_URI="${FLOE_TEST_CATALOG_URI:-http://127.0.0.1:8181}" \
     FLOE_TEST_CATALOG_WAREHOUSE="${FLOE_TEST_CATALOG_WAREHOUSE:-s3://floe-test/warehouse}" \
@@ -160,9 +161,15 @@ test-catalog:
     AWS_SECRET_ACCESS_KEY=floe-dev-secret \
     cargo test -p floe-catalog --features iceberg --test live_catalog -- --ignored --nocapture
 
-# Clippy over the catalog feature build (arrow/parquet/iceberg; slow, so not in `just clippy`).
+# Clippy over the catalog feature build (arrow/parquet/iceberg; slow, so its own recipe and its own
+# CI job rather than part of `just clippy`). Part of `just ci`.
 clippy-catalog:
     {{t15}} cargo clippy -p floe-catalog -p floe-server -p floe-cli --all-targets --features floe-cli/catalog,floe-catalog/iceberg -- -D warnings
+
+# Hermetic tests of the catalog feature build (what the release image ships): the lib tests of
+# the crates the feature changes, compiled with the Iceberg writer. No catalog needed. Part of `just ci`.
+test-catalog-lib:
+    {{t10}} cargo test -p floe-catalog -p floe-server -p floe-cli --lib --features floe-cli/catalog,floe-catalog/iceberg
 
 # Run all floe-store tests (memory + S3 if env set).
 store-test-all:

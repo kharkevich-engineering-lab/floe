@@ -187,6 +187,7 @@ and turns on `transfer.bundleURI`. `?repo=owner/name` clones right after.
 just test          # fast hermetic tier (< 1 min): unit + quick integration, in-memory store, real git
 just e2e           # real git against the server (~20 s)
 just warnings      # zero rustc warnings across all targets
+just clippy-catalog test-catalog-lib   # the `--features catalog` build (what the release ships)
 just ci            # all of the above
 cargo test -p floe-server --test sim     # fault-injection simulation (crashes, partitions, stale reads)
 just test-s3       # store contract against local rustfs

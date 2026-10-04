@@ -548,8 +548,9 @@ so the rules are on record first: a ref is either followed or pushed, never both
   old readers within the retention window.
 - Web: pnpm + Vite, `pnpm run build` must pass oxlint/tsc. Config: `floe.example.toml` documents every key;
   change it with the code.
-- Test tiers: `just test` (fast, < 1 min), `just e2e`, `just warnings`, `just clippy` (the
-  `[workspace.lints]` set, `-D warnings`), `just ci` = all four; the **simulation
+- Test tiers: `just test` (fast, < 1 min), `just e2e`, `just warnings`,
+  `just clippy` (the `[workspace.lints]` set, `-D warnings`), `just clippy-catalog` + `just test-catalog-lib`
+  (the `--features catalog` build the release ships), `just ci` = all of them; the **simulation
   suite** `cargo test -p floe-server --test sim` (fault links per instance over one truth store: crash,
   partition, stale, lost response, orphan scenarios + randomized seeds `FLOE_SIM_SEEDS`/`FLOE_SIM_SEED`);
   `just test-slow` (ignored benches); `tests/e2e.sh` against a running server (`FLOE_E2E_BASE_URL`,

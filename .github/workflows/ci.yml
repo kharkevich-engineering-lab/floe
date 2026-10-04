@@ -2,7 +2,8 @@ name: CI
 
 # The repository had no build/test workflow: only pages.yml (a site deploy). A workspace that did
 # not compile reached main because nothing ran cargo on push. This runs `just ci` — the same
-# tiers AGENTS.md documents (warnings, clippy, test, e2e) — so CI and a contributor's laptop cannot drift.
+# tiers AGENTS.md documents (warnings, clippy, test, e2e, and the catalog feature build) — split
+# into jobs, so CI and a contributor's laptop cannot drift.
 # The tier definitions live in the justfile, never duplicated here.
 
 on:
@@ -168,6 +169,58 @@ jobs:
           name: contract-test-logs-${{ matrix.arch }}
           path: '*-contracts.log'
           retention-days: 14
+
+  catalog:
+    name: catalog feature (${{ matrix.arch }})
+    # The release image and tarballs are built with `--features catalog` (Containerfile), so the
+    # feature build is linted and tested here, natively per arch. Its own job and cache: arrow,
+    # parquet and iceberg are a second dependency graph the default build never compiles. The
+    # recipes (`just clippy-catalog`, `just test-catalog-lib`) are the tier definitions.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install the pinned Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            # A fixed rustup-init checked against a hash pinned here, never `curl | sh` of
+            # whatever sh.rustup.rs serves today. Bump RUSTUP and both hashes together.
+            RUSTUP=1.29.1
+            case "$(uname -m)" in
+              aarch64) triple=aarch64-unknown-linux-gnu; sum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;;
+              x86_64) triple=x86_64-unknown-linux-gnu; sum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;;
+              *) echo "::error::no pinned rustup-init for $(uname -m)"; exit 1 ;;
+            esac
+            curl --proto '=https' --tlsv1.2 -sSfo "$RUNNER_TEMP/rustup-init" "https://static.rust-lang.org/rustup/archive/${RUSTUP}/${triple}/rustup-init"
+            echo "${sum}  $RUNNER_TEMP/rustup-init" | sha256sum -c -
+            chmod +x "$RUNNER_TEMP/rustup-init"
+            "$RUNNER_TEMP/rustup-init" -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show && cargo --version && git --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: catalog-v1-${{ matrix.arch }}
+          cache-on-failure: true
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: just
+      - name: Compile the catalog feature build before timed checks
+        timeout-minutes: 45
+        run: cargo test -p floe-catalog -p floe-server -p floe-cli --lib --features floe-cli/catalog,floe-catalog/iceberg --no-run --locked
+      - run: just test-catalog-lib
+      - run: just clippy-catalog
 
   container:
     name: release container (${{ matrix.arch }})

@@ -1417,6 +1417,9 @@ create_tables = true
   in preview.
 - `justfile`: `test-catalog` (`cargo test -p floe-catalog --features iceberg -- --ignored`); `just ci` stays
   unchanged (no catalog build in the fast tier); a `just clippy-catalog` lints the feature build.
+  *As landed (2026-10-04):* `just ci` runs `clippy-catalog` and `test-catalog-lib` (lib tests of
+  `floe-catalog`/`floe-server`/`floe-cli` with the feature), and CI runs both in their own job per arch,
+  since the release image is built with the feature. `test-catalog` (live) stays out.
 
 ### D.5 README
 
