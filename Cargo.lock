@@ -2234,6 +2234,7 @@ dependencies = [
  "cron",
  "humantime-serde",
  "serde",
+ "serde_json",
  "toml",
  "tracing",
 ]
@@ -2364,6 +2365,7 @@ dependencies = [
  "rand 0.9.5",
  "rcgen",
  "reqwest 0.12.28",
+ "ring",
  "rust-embed",
  "serde",
  "serde_json",

@@ -1,6 +1,6 @@
 //! [`GithubSource`]: the GitHub (and GitHub Enterprise Server) implementation
 //! of [`Source`] over the REST API (§B.11). The token is read from the env var
-//! `github_mirror.token_env` at every pass (rotation needs no restart) and only
+//! `github_mirror.token` (through `token_env`, D61) at every pass (rotation needs no restart) and only
 //! ever travels in the `Authorization` header.
 
 pub mod http;
@@ -42,9 +42,10 @@ impl GithubSource {
         if let Some(t) = &self.fixed_token {
             return Ok(t.clone());
         }
-        match std::env::var(&self.token_env) {
-            Ok(t) if !t.trim().is_empty() => Ok(t.trim().to_string()),
-            _ => Err(SourceError::NoToken(self.token_env.clone())),
+        // D61: the config store's alias first (a token entered in the GUI), then the env.
+        match floe_config::secret::env_var(&self.token_env) {
+            Some(t) => Ok(t.trim().to_string()),
+            None => Err(SourceError::NoToken(self.token_env.clone())),
         }
     }
 

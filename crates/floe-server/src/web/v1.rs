@@ -69,6 +69,8 @@ pub fn router(state: Arc<AppState>) -> Router {
                 get(repo_admin_sub).post(repo_admin_sub),
             );
     }
+    // D62: the admin area (config store, mirror, catalog), both lanes.
+    r = crate::web::admin_api::routes(r);
     r.with_state(state)
 }
 
@@ -251,6 +253,15 @@ async fn discovery(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respo
             "GET|PUT|DELETE /{owner}/{repo}/api/settings",
             "GET  /{owner}/{repo}/api/settings/effective | history | describe",
             "POST /{owner}/{repo}/api/settings/validate",
+            "-- admin (D62; an admin principal; also under /api-browser/v1/admin) --",
+            "GET|PUT /api/v1/admin/config",
+            "POST /api/v1/admin/config/validate | rollback",
+            "GET  /api/v1/admin/config/schema | history?before&n | revisions/{n}",
+            "GET  /api/v1/admin/overview",
+            "GET  /api/v1/admin/mirror",
+            "POST /api/v1/admin/mirror/preview | test | sync | pause | resume",
+            "GET  /api/v1/admin/catalog",
+            "POST /api/v1/admin/catalog/test",
         ],
     };
     let mut r = axum::Json(body).into_response();
@@ -266,6 +277,7 @@ async fn me(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
             let mut r = axum::Json(serde_json::json!({
                 "principal": p.name,
                 "write": p.write,
+                "admin": p.admin,
                 "anonymous": p.anonymous,
             }))
             .into_response();

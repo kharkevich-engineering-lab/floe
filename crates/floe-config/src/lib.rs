@@ -1,10 +1,17 @@
-//! `floe.toml` — the only configuration surface. Environment overrides use
+//! `floe.toml` — the **bootstrap** configuration (D8, D60). Environment overrides use
 //! `FLOE__SECTION__KEY=value` (double underscore = nesting), applied after
 //! the file is parsed. `PORT` (a serverless host) overrides `server.listen` port.
+//! Runtime sections (`[github_mirror]`, `[catalog]`, `[events]`) live in the
+//! versioned config document in the bucket ([`runtime`], `docs/design/admin-ui.md`).
 
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, time::Duration};
 
 pub mod refpattern;
+pub mod runtime;
+pub mod secret;
+
+pub use runtime::RuntimeConfig;
+pub use secret::Secret;
 
 use anyhow::{Context, Result};
 pub use bytesize::ByteSize;
@@ -39,6 +46,51 @@ pub struct Config {
     pub github_mirror: GithubMirrorConfig,
     /// Iceberg audit tables (`docs/design/github-mirror.md` §C, D50).
     pub catalog: CatalogConfig,
+    /// D60: where the runtime config document lives.
+    pub config_store: ConfigStoreConfig,
+}
+
+/// `[config_store]` (D60, `docs/design/admin-ui.md` §1.4): where the versioned
+/// runtime config document lives and how instances follow it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ConfigStoreConfig {
+    /// A dedicated bucket (same backend and credentials as `[store]`); unset = the main bucket.
+    pub bucket: Option<String>,
+    /// Key prefix inside that bucket (`config/`).
+    pub prefix: String,
+    /// Revalidation period: one conditional GET of `current.json`. `0` = only at startup.
+    #[serde(with = "humantime_serde")]
+    pub ttl: Duration,
+    /// `auto` | `records` | `versions` — where history bodies live (§2.3).
+    pub history: HistoryMode,
+    /// Env var holding the 32-byte base64 key that seals secrets (D61).
+    pub key_env: String,
+}
+
+impl Default for ConfigStoreConfig {
+    fn default() -> Self {
+        ConfigStoreConfig {
+            bucket: None,
+            prefix: "config/".into(),
+            ttl: Duration::from_secs(15),
+            history: HistoryMode::Auto,
+            key_env: "FLOE_CONFIG_KEY".into(),
+        }
+    }
+}
+
+/// How the config store keeps history (`docs/design/admin-ui.md` §2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryMode {
+    /// `versions` when the bucket has object versioning, else `records`.
+    #[default]
+    Auto,
+    /// floe writes every revision's body into `history/<rev>.json`.
+    Records,
+    /// History bodies are the bucket's object versions of `current.json`.
+    Versions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -761,12 +813,26 @@ pub struct EventsConfig {
     /// Unset = the events role has nothing to do.
     pub webhook_url: Option<String>,
     /// Shared secret for `X-Floe-Signature: sha256=<HMAC-SHA256 of the body>`. Unset = unsigned.
-    pub webhook_secret: Option<String>,
+    /// A [`Secret`] (D61): an env reference or a sealed value.
+    pub webhook_secret: Option<Secret>,
     /// Catch-all sweep over every repo (a `list` + one conditional manifest
     /// GET per repo), the backstop behind store notifications; the bridge
     /// warns when a sweep finds unpublished entries. `0` = off.
     #[serde(with = "humantime_serde")]
     pub sweep_interval: Duration,
+}
+
+impl EventsConfig {
+    /// The section's own checks.
+    pub fn check(&self) -> Result<()> {
+        if let Some(u) = &self.webhook_url {
+            anyhow::ensure!(
+                u.starts_with("http://") || u.starts_with("https://"),
+                "events.webhook_url must be an http(s) URL"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Default for EventsConfig {
@@ -826,8 +892,14 @@ pub struct GithubMirrorConfig {
     pub api_url: String,
     /// Base of clone/LFS URLs, and the `upstream.token_env_by_host` key.
     pub git_url: String,
-    /// Env var holding a PAT (classic `repo`, or fine-grained Contents:read +
-    /// Metadata:read). Read at every pass; never written to the bucket.
+    /// The credential (D61): a PAT (classic `repo`, or fine-grained Contents:read +
+    /// Metadata:read) as an env reference (`{ env = "FLOE_GITHUB_TOKEN" }`, the
+    /// default; nothing in the bucket) or a sealed value entered in the admin GUI.
+    pub token: Secret,
+    /// Derived, never configured: the env var name the token resolves through
+    /// ([`secret::env_var`]); [`secret::GITHUB_MIRROR_TOKEN_ALIAS`] once a config
+    /// document is applied. Read at every pass, so rotation needs no restart.
+    #[serde(skip)]
     pub token_env: String,
     /// Discovery/reconcile cadence. `0` = only at startup (and `floe github sync --once`).
     #[serde(with = "humantime_serde")]
@@ -893,6 +965,7 @@ impl Default for GithubMirrorConfig {
             enabled: false,
             api_url: "https://api.github.com".into(),
             git_url: "https://github.com".into(),
+            token: Secret::Env("FLOE_GITHUB_TOKEN".into()),
             token_env: "FLOE_GITHUB_TOKEN".into(),
             interval: Duration::from_mins(5),
             users: Vec::new(),
@@ -1035,17 +1108,8 @@ impl Default for CatalogConfig {
 }
 
 impl GithubMirrorConfig {
-    /// `validate`'s checks for this section (only when `enabled`).
-    fn validate(&self, cfg: &Config) -> Result<()> {
-        anyhow::ensure!(
-            cfg.has_role(Role::Maintain),
-            "github_mirror.enabled needs the maintain role on this host"
-        );
-        self.check()
-    }
-
-    /// The section's own checks, without the role rule: `floe github sync`
-    /// runs them on a CLI host, where `enabled` is normally off.
+    /// The section's own checks (D60: fleet-wide, no host-role rule; the loop
+    /// runs on `maintain` hosts). `floe github sync` runs them too.
     pub fn check(&self) -> Result<()> {
         for (key, list) in [("include", &self.include), ("exclude", &self.exclude)] {
             for g in list {
@@ -1072,10 +1136,17 @@ impl GithubMirrorConfig {
                 "github_mirror.{key} must be an https:// URL without a trailing '/', got {u:?}"
             );
         }
-        anyhow::ensure!(
-            !self.token_env.is_empty(),
-            "github_mirror.token_env must name an environment variable"
-        );
+        match &self.token {
+            Secret::Env(name) => anyhow::ensure!(
+                !name.trim().is_empty(),
+                "github_mirror.token must name an environment variable ({{ env = \"FLOE_GITHUB_TOKEN\" }}) or hold a value"
+            ),
+            Secret::Value(v) => anyhow::ensure!(
+                !v.trim().is_empty(),
+                "github_mirror.token: an empty value; enter the token or use an env reference"
+            ),
+            Secret::Sealed(_) | Secret::Redacted(_) => {}
+        }
         anyhow::ensure!(
             !self.follow.is_empty(),
             "github_mirror.follow must list at least one ref pattern"
@@ -1096,7 +1167,8 @@ impl GithubMirrorConfig {
 }
 
 impl CatalogConfig {
-    fn validate(&self) -> Result<()> {
+    /// The section's own checks.
+    pub fn validate(&self) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
@@ -1314,6 +1386,7 @@ impl Config {
         let mut cfg: Config = doc.try_into().context("settings: applying")?;
         // Load-time state, not TOML: carried over the round trip.
         cfg.github_mirror.use_token = self.github_mirror.use_token;
+        cfg.github_mirror.token_env.clone_from(&self.github_mirror.token_env);
         cfg.validate()
             .context("settings: validating the effective config")?;
         Ok(cfg)
@@ -1729,7 +1802,14 @@ impl Default for TelemetryConfig {
 
 impl Config {
     pub fn parse(toml_text: &str) -> Result<Config> {
-        let mut cfg: Config = toml::from_str(toml_text).context("parsing floe.toml")?;
+        let table: toml::Table = toml_text.parse().context("parsing floe.toml")?;
+        for section in runtime::RUNTIME_SECTIONS {
+            anyhow::ensure!(
+                !table.contains_key(*section),
+                "floe.toml: [{section}] is runtime configuration and lives in the config store (D60); publish it with `floe config import <this file>` (or the admin GUI at /_admin) and delete the section"
+            );
+        }
+        let mut cfg: Config = table.try_into().context("parsing floe.toml")?;
         cfg.apply_env(std::env::vars())?;
         cfg.normalize();
         cfg.validate()?;
@@ -1746,7 +1826,7 @@ impl Config {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut cfg = Self::parse(&text)?;
-        cfg.derive_mirror_token_env(|k| std::env::var_os(k).is_some());
+        cfg.derive_mirror_token_env(|k| secret::env_var(k).is_some());
         Ok(cfg)
     }
 
@@ -1818,6 +1898,17 @@ impl Config {
             vars_seen.push(k.clone());
             let path: Vec<String> = rest.split("__").map(str::to_ascii_lowercase).collect();
             if path.is_empty() || path.iter().any(String::is_empty) {
+                continue;
+            }
+            // D60: one home per key — runtime keys live in the config store only.
+            if path
+                .first()
+                .is_some_and(|h| runtime::RUNTIME_SECTIONS.contains(&h.as_str()))
+            {
+                ignored.push((
+                    k,
+                    "runtime key: it lives in the config store (D60; `floe config set` or /_admin)".to_string(),
+                ));
                 continue;
             }
             let value: toml::Value = v
@@ -2109,14 +2200,11 @@ impl Config {
                 );
             }
         }
-        if let Some(u) = &self.events.webhook_url {
-            anyhow::ensure!(
-                u.starts_with("http://") || u.starts_with("https://"),
-                "events.webhook_url must be an http(s) URL"
-            );
-        }
+        self.events.check()?;
+        // D60: the document is fleet-wide, so there is no host-role rule here;
+        // the mirror's loop simply runs on `maintain` hosts.
         if self.github_mirror.enabled {
-            self.github_mirror.validate(self)?;
+            self.github_mirror.check()?;
         }
         Ok(())
     }
@@ -2465,11 +2553,10 @@ listen = \"0.0.0.0:1\"\n",
         c.github_mirror.users = vec!["@me".into()];
         c.github_mirror.private_visible_to_all_readers = true;
         c.validate().unwrap();
-        // Not a maintainer: `validate` refuses, the CLI's `check` does not.
-        let mut bad = c.clone();
-        bad.server.roles = vec![Role::Serve];
-        assert!(bad.validate().is_err());
-        bad.github_mirror.check().unwrap();
+        // D60: fleet-wide, so a serve-only host accepts it (the loop runs on maintainers).
+        let mut serve_only = c.clone();
+        serve_only.server.roles = vec![Role::Serve];
+        serve_only.validate().unwrap();
         let edits: [fn(&mut GithubMirrorConfig); 8] = [
             |m: &mut GithubMirrorConfig| m.include = vec!["acme".into()],
             |m: &mut GithubMirrorConfig| m.exclude = vec!["a/b/c".into()],
@@ -2687,19 +2774,48 @@ audiences = ["floe-cli", "https://git.example.com"]
 
     #[test]
     fn events_section_parses_and_validates() {
-        let c = Config::parse(
+        let c = RuntimeConfig::from_toml(
             r#"
 [events]
 sweep_interval = "1m"
 webhook_url = "https://hooks.example.com/floe"
-webhook_secret = "s"
+webhook_secret = { value = "s" }
 "#,
         )
         .unwrap();
         assert_eq!(c.events.sweep_interval, Duration::from_mins(1));
-        assert_eq!(c.events.webhook_secret.as_deref(), Some("s"));
-        let err = Config::parse("[events]\nwebhook_url = \"ftp://x\"\n").unwrap_err();
+        assert_eq!(c.events.webhook_secret, Some(Secret::Value("s".into())));
+        let bad = RuntimeConfig::from_toml("[events]\nwebhook_url = \"ftp://x\"\n").unwrap();
+        let err = bad.validate().unwrap_err();
         assert!(err.to_string().contains("webhook_url"), "{err}");
+    }
+
+    /// D60: one home per key — the file refuses runtime sections, env
+    /// overrides of them are ignored (reported), never applied.
+    #[test]
+    fn runtime_sections_are_refused_in_the_file_and_env() {
+        for section in runtime::RUNTIME_SECTIONS {
+            let err = Config::parse(&format!("[{section}]\n")).unwrap_err();
+            assert!(err.to_string().contains("config store"), "{err}");
+        }
+        let mut c = Config::default();
+        let ignored = c
+            .apply_env_report(
+                [
+                    ("FLOE__GITHUB_MIRROR__ENABLED".to_string(), "true".to_string()),
+                    ("FLOE__EVENTS__WEBHOOK_URL".to_string(), "https://x".to_string()),
+                    ("FLOE__CONFIG_STORE__TTL".to_string(), "1m".to_string()),
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+        assert_eq!(ignored.len(), 2, "{ignored:?}");
+        assert!(!c.github_mirror.enabled);
+        assert!(c.events.webhook_url.is_none());
+        assert_eq!(c.config_store.ttl, Duration::from_mins(1));
+        let parsed = Config::parse("[config_store]\nbucket = \"cfg\"\nhistory = \"records\"\n").unwrap();
+        assert_eq!(parsed.config_store.bucket.as_deref(), Some("cfg"));
+        assert_eq!(parsed.config_store.history, HistoryMode::Records);
     }
 
     #[test]
@@ -2709,10 +2825,8 @@ webhook_secret = "s"
         assert_eq!(d.namespace, "floe");
         assert_eq!(d.flush_rows, 5000);
         assert_eq!(d.flush_interval, Duration::from_secs(30));
-        let mut c = Config::parse(
+        let rt = RuntimeConfig::from_toml(
             r#"
-[store]
-bucket = "b"
 [catalog]
 enabled = true
 uri = "http://localhost:9000/iceberg"
@@ -2723,6 +2837,7 @@ max_buffer_rows = 100
 "#,
         )
         .unwrap();
+        let mut c = Config::default().with_runtime(&rt).unwrap();
         c.validate().unwrap();
         assert_eq!(c.catalog.flush_interval, Duration::from_secs(5));
         assert_eq!(c.catalog.s3_access_key_env, "AWS_ACCESS_KEY_ID");
@@ -2756,7 +2871,7 @@ max_buffer_rows = 100
         // Disabled: nothing is required.
         c.catalog.enabled = false;
         c.validate().unwrap();
-        let err = Config::parse("[catalog]\nbogus = 1\n").unwrap_err();
+        let err = RuntimeConfig::from_toml("[catalog]\nbogus = 1\n").unwrap_err();
         assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
     }
 

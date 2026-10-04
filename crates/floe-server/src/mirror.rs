@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use floe_git::RepoId;
@@ -55,14 +56,121 @@ pub fn nudge(state: Arc<AppState>) -> floe_mirror::Nudge {
     })
 }
 
-/// The mirror loop for a maintainer with `github_mirror.enabled`: its own loop,
-/// never a unit of the priority loop (discovery must not wait behind a base
-/// rebuild). Returns when draining.
+/// `mirror/github/sync-request.json` (bucket root, `Overwrite`): the admin
+/// GUI's "sync now" (D62). Every mirror supervisor polls its version.
+pub const SYNC_REQUEST_KEY: &str = "mirror/github/sync-request.json";
+
+/// Ask the fleet's mirror loop to run a pass now: it restarts at its next pass
+/// boundary and runs one within its first tick.
+pub async fn request_sync(store: &floe_store::DynStore, by: &str) -> anyhow::Result<()> {
+    use floe_store::ObjectStoreExt;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "requested_at": chrono::Utc::now().to_rfc3339(),
+        "by": by,
+    }))?;
+    store
+        .put_bytes(SYNC_REQUEST_KEY, body, floe_store::PutMode::Overwrite)
+        .await?;
+    Ok(())
+}
+
+/// The mirror supervisor on a `maintain` host (D49, D60): runs the mirror
+/// loop while the live config enables it, and restarts it at a pass boundary
+/// when the `github_mirror` section changes or a "sync now" arrives. Its own
+/// loop, never a unit of the priority loop. Returns when draining.
 pub async fn run_loop(state: Arc<AppState>) {
-    let source = match floe_mirror::github::GithubSource::new(&state.cfg.github_mirror) {
+    let mut rx = state.config.subscribe();
+    loop {
+        if floe_wal::tasks::draining() {
+            return;
+        }
+        let applied = rx.borrow_and_update().clone();
+        let cfg = applied.cfg;
+        if !cfg.github_mirror.enabled {
+            tokio::select! {
+                changed = rx.changed() => if changed.is_err() { return; },
+                () = until_draining() => return,
+            }
+            continue;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let watcher = tokio::spawn(watch_for_restart(
+            state.clone(),
+            rx.clone(),
+            section_of(&cfg),
+            stop.clone(),
+        ));
+        run_mirror(&state, cfg, &stop).await;
+        watcher.abort();
+    }
+}
+
+/// The `github_mirror` section as JSON (what a change is compared on).
+fn section_of(cfg: &floe_config::Config) -> serde_json::Value {
+    serde_json::to_value(&cfg.github_mirror).unwrap_or_default()
+}
+
+async fn until_draining() {
+    while !floe_wal::tasks::draining() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Set `stop` when the live `github_mirror` section differs from `section`, or
+/// when `sync-request.json` changes (polled every `config_store.ttl`, ≥ 5 s).
+async fn watch_for_restart(
+    state: Arc<AppState>,
+    mut rx: tokio::sync::watch::Receiver<crate::config_store::live::Applied>,
+    section: serde_json::Value,
+    stop: Arc<AtomicBool>,
+) {
+    use floe_store::ObjectStoreExt;
+    let every = state.cfg.config_store.ttl.max(Duration::from_secs(5));
+    let known = state
+        .store
+        .head(SYNC_REQUEST_KEY)
+        .await
+        .ok()
+        .flatten()
+        .map(|m| m.version);
+    loop {
+        tokio::select! {
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let now = section_of(&rx.borrow_and_update().cfg);
+                if now != section {
+                    tracing::info!("github mirror: config changed; restarting the loop at the next pass boundary");
+                    stop.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+            () = tokio::time::sleep(every) => {
+                let got = match &known {
+                    Some(v) => state.store.get_if_changed(SYNC_REQUEST_KEY, v).await.map(|g| g.map(|(m, _)| m.version)),
+                    None => state.store.head(SYNC_REQUEST_KEY).await.map(|m| m.map(|m| m.version)),
+                };
+                if let Ok(Some(_)) = got {
+                    tracing::info!("github mirror: sync requested; running a pass now");
+                    stop.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// One run of the mirror loop with `cfg`, until it stops (drain or `stop`).
+async fn run_mirror(state: &Arc<AppState>, cfg: Arc<floe_config::Config>, stop: &AtomicBool) {
+    let source = match floe_mirror::github::GithubSource::new(&cfg.github_mirror) {
         Ok(s) => Arc::new(s),
         Err(e) => {
-            tracing::error!(error = %e, "github mirror disabled: client setup failed");
+            tracing::error!(error = %e, "github mirror not started: client setup failed");
+            // Wait for a config change (or drain) instead of spinning.
+            while !stop.load(Ordering::SeqCst) && !floe_wal::tasks::draining() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             return;
         }
     };
@@ -72,16 +180,17 @@ pub async fn run_loop(state: Arc<AppState>) {
         nudge(state.clone()),
     );
     let mirror = Arc::new(floe_mirror::Mirror {
-        cfg: state.cfg.clone(),
+        cfg,
         source,
         target: Arc::new(target),
         store: state.store.clone(),
     });
     // Catalog telemetry (`sync_runs`/`repo_inventory`, §C.6): lossy, after the pass.
     let recorder = state.recorder.clone();
-    floe_mirror::run_loop(
+    floe_mirror::run_loop_until(
         mirror,
         Box::new(move |r: &floe_mirror::PassReport| record_pass(recorder.as_ref(), r)),
+        stop,
     )
     .await;
 }

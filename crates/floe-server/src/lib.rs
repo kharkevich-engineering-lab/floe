@@ -7,6 +7,7 @@ pub mod bridge;
 pub mod bundles;
 pub mod cache;
 pub mod catalog_tail;
+pub mod config_store;
 pub mod error;
 pub mod events;
 pub mod follow;
@@ -86,6 +87,9 @@ pub struct AppState {
     pub catalog: Option<Arc<floe_catalog::CatalogWriter>>,
     /// The catalog's WAL tail (`events` role with a catalog writer).
     pub catalog_tail: Option<Arc<catalog_tail::CatalogTail>>,
+    /// D60: this instance's view of the runtime config document. `cfg` is the
+    /// effective config the process started with; the live one is here.
+    pub config: Arc<config_store::live::Live>,
 }
 
 impl AppState {
@@ -95,9 +99,15 @@ impl AppState {
         reason = "public constructor awaited by callers across the workspace"
     )]
     pub async fn new(
-        cfg: Arc<floe_config::Config>,
+        bootstrap: Arc<floe_config::Config>,
         store: DynStore,
     ) -> anyhow::Result<Arc<Self>> {
+        // D60: read the runtime config document first (bounded; an outage
+        // starts the instance on the built-in runtime defaults), so the bridge
+        // and the catalog writer are built from its values.
+        let config_store = Arc::new(config_store::ConfigStore::open(&bootstrap, &store).await?);
+        let config = config_store::live::Live::start(bootstrap, config_store).await;
+        let cfg = config.current().cfg;
         let registry = floe_wal::Registry::new(store.clone(), cfg.clone());
         let bridge = bridge::Bridge::new(&cfg, registry.clone());
         let bundle_source: Arc<dyn floe_bundle::BundleSource> =
@@ -109,7 +119,15 @@ impl AppState {
             let s = t.status();
             tracing::info!(mode = ?cfg.server.tls.mode, loaded = s.loaded, not_after = ?s.not_after, issuer = ?s.issuer, "TLS terminated in-process");
         }
-        let catalog = catalog_writer(&cfg.catalog)?;
+        // The catalog section comes from the config document: one that this
+        // binary cannot honour disables the catalog here, never the instance.
+        let catalog = match catalog_writer(&cfg.catalog) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "catalog disabled on this instance");
+                None
+            }
+        };
         let recorder: Arc<dyn floe_catalog::Recorder> = match &catalog {
             Some(w) => w.clone() as Arc<dyn floe_catalog::Recorder>,
             None => Arc::new(floe_catalog::NoopRecorder),
@@ -136,6 +154,7 @@ impl AppState {
             recorder,
             catalog,
             catalog_tail,
+            config,
         });
         // The GitHub sink renders its payloads out of the repository, so it
         // needs this instance — which did not exist when the bridge was built.
@@ -620,6 +639,7 @@ pub async fn serve(
         t.spawn(Arc::new(tls::TaskNarrator(state.registry.tasks().clone())));
     }
     bridge::spawn_sweeper(state.clone());
+    state.config.spawn();
     spawn_runtime_watchdog(state.registry.tasks().clone(), state.inflight.clone());
     let app = router(state);
     let listener = TcpAccept::bind(addr).await?;

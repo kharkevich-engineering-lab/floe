@@ -36,17 +36,6 @@ max_bytes = "5GiB"
 log_format = "json"
 log_filter = "info"
 
-# Not used by the facade image; listed so a deployment knows the switches exist.
-# [github_mirror]                 # D49: needs roles ∋ "maintain" and the token env var (never the token here)
-# enabled = true
-# token_env = "FLOE_GITHUB_TOKEN"
-# orgs = ["acme"]
-# private_visible_to_all_readers = true
-# [catalog]                       # D50: needs an image built with --features catalog
-# enabled = true
-# uri = "https://s3tables.us-east-1.amazonaws.com/iceberg"  # AWS S3 Tables (or RustFS: http://<rustfs>:9000/iceberg)
-# warehouse = "arn:aws:s3tables:us-east-1:<account>:bucket/floe-catalog"
-# auth = "sigv4"                  # D63: signed with the task role (D43 chain) unless AWS_ACCESS_KEY_ID/SECRET are set
-# sigv4_service = "s3tables"      # RustFS: "s3"
-# s3_region = "us-east-1"         # also the signing region (sigv4_region unset)
-# s3_path_style = false           # AWS; RustFS: true, with s3_endpoint
+# Runtime configuration — the GitHub mirror (D49), the catalog (D50), the events webhook — is not in this
+# file: it is the versioned config document in the bucket (D60), edited at https://<host>/_admin or with
+# `floe config set|import`. Secrets entered there are sealed with FLOE_CONFIG_KEY (D61).

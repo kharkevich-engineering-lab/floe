@@ -436,6 +436,18 @@ async fn release(guard: Arc<tokio::sync::Mutex<LeaseGuard>>, hb: tokio::task::Jo
 /// `on_pass` sees every finished pass (telemetry), a failed one as a report
 /// with `outcome = failed` and [`PassReport::error`] set.
 pub async fn run_loop(m: Arc<Mirror>, on_pass: Box<dyn Fn(&PassReport) + Send + Sync>) {
+    run_loop_until(m, on_pass, &AtomicBool::new(false)).await;
+}
+
+/// [`run_loop`] that also returns, at the next pass boundary, once `stop` is
+/// set (after releasing the lease): the server restarts it with a new config
+/// (D60, a config change applied live) or to run a pass now ("sync now"). A
+/// pass in flight is never interrupted.
+pub async fn run_loop_until(
+    m: Arc<Mirror>,
+    on_pass: Box<dyn Fn(&PassReport) + Send + Sync>,
+    stop: &AtomicBool,
+) {
     let gm = &m.cfg.github_mirror;
     let kind = m.source.kind();
     if m.cfg.maintenance.follow_interval.is_zero() {
@@ -445,7 +457,7 @@ pub async fn run_loop(m: Arc<Mirror>, on_pass: Box<dyn Fn(&PassReport) + Send + 
     }
     let interval = gm.interval;
     let ttl = gm.lease_ttl;
-    if !sleep_or_drain(jitter(FIRST_TICK), None).await {
+    if !sleep_or_drain(jitter(FIRST_TICK), None, stop).await {
         return;
     }
     loop {
@@ -461,14 +473,14 @@ pub async fn run_loop(m: Arc<Mirror>, on_pass: Box<dyn Fn(&PassReport) + Send + 
             Ok(Some(g)) => g,
             Ok(None) => {
                 metrics::counter!("floe_mirror_pass_total", "source" => kind, "outcome" => "lease-held").increment(1);
-                if interval.is_zero() || !sleep_or_drain(jitter(interval), None).await {
+                if interval.is_zero() || !sleep_or_drain(jitter(interval), None, stop).await {
                     return;
                 }
                 continue;
             }
             Err(e) => {
                 tracing::warn!(error = %e, "mirror lease unavailable");
-                if !sleep_or_drain(jitter(interval.max(ttl)), None).await {
+                if !sleep_or_drain(jitter(interval.max(ttl)), None, stop).await {
                     return;
                 }
                 continue;
@@ -517,16 +529,16 @@ pub async fn run_loop(m: Arc<Mirror>, on_pass: Box<dyn Fn(&PassReport) + Send + 
                     });
                 }
             }
-            if interval.is_zero() || flag.load(Ordering::SeqCst) {
+            if interval.is_zero() || flag.load(Ordering::SeqCst) || stop.load(Ordering::SeqCst) {
                 break;
             }
-            if !sleep_or_drain(wait, Some(&flag)).await || flag.load(Ordering::SeqCst) {
+            if !sleep_or_drain(wait, Some(&flag), stop).await || flag.load(Ordering::SeqCst) {
                 break;
             }
         }
         let lost = flag.load(Ordering::SeqCst);
         release(guard, hb).await;
-        if floe_wal::tasks::draining() || interval.is_zero() {
+        if floe_wal::tasks::draining() || interval.is_zero() || stop.load(Ordering::SeqCst) {
             return;
         }
         if !lost {
@@ -534,17 +546,18 @@ pub async fn run_loop(m: Arc<Mirror>, on_pass: Box<dyn Fn(&PassReport) + Send + 
             return;
         }
         tracing::warn!("mirror lease lost; retrying after one interval");
-        if !sleep_or_drain(jitter(interval), None).await {
+        if !sleep_or_drain(jitter(interval), None, stop).await {
             return;
         }
     }
 }
 
-/// Sleep `d` in short steps; `false` when draining began (or `lost` was set).
-async fn sleep_or_drain(d: Duration, lost: Option<&AtomicBool>) -> bool {
+/// Sleep `d` in short steps; `false` when draining began or `stop` was set
+/// (`true` early when `lost` was set).
+async fn sleep_or_drain(d: Duration, lost: Option<&AtomicBool>, stop: &AtomicBool) -> bool {
     let deadline = tokio::time::Instant::now() + d;
     loop {
-        if floe_wal::tasks::draining() {
+        if floe_wal::tasks::draining() || stop.load(Ordering::SeqCst) {
             return false;
         }
         if lost.is_some_and(|f| f.load(Ordering::SeqCst)) {

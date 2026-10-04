@@ -78,7 +78,10 @@ impl Bridge {
         if let Some(url) = &cfg.events.webhook_url {
             sinks.push(Box::new(events::WebhookSink::new(
                 url.clone(),
-                cfg.events.webhook_secret.clone().filter(|s| !s.is_empty()),
+                cfg.events
+                    .webhook_secret
+                    .as_ref()
+                    .and_then(floe_config::Secret::reveal),
             )));
         }
         // The GitHub facade's own sink (`docs/GITHUB.md` §Webhooks): the same
