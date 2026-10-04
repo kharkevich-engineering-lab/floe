@@ -132,9 +132,6 @@ export interface SetupRecipes {
   /** The repository's unfiltered bundle list URL. */
   bundle_list: string;
   setup_text: string;
-  /** Self-signed TLS: the CA to pin and the one-liner that does it (null behind a public certificate). */
-  ca_url: string | null;
-  trust: string | null;
 }
 
 export interface BundleInfo {

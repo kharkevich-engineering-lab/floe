@@ -466,7 +466,7 @@ async fn instance_info(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     st.auth.require_read(&headers).await.map_err(auth_err)?;
-    let mut r = axum::Json(crate::instance::info(&st.cfg)).into_response();
+    let mut r = axum::Json(crate::instance::info_for(&st)).into_response();
     r.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(r)

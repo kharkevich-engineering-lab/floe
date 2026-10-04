@@ -42,6 +42,7 @@ const repos = createClient({ base: "https://git.example.com", token: process.env
 
 ```ts
 repos.me()                                   → { principal, write, anonymous }
+repos.tls()                                  → admin: { mode, domains, not_after, issuer, last_error, … } (D59)
 repos.owners.list()                          → ["acme", …]
 repos.owners.repos("acme")                   → ["monorepo", …]
 repos.repo("acme/monorepo")                     → RepoClient (no request)

@@ -93,9 +93,6 @@ pub fn router(state: Arc<AppState>) -> Router {
 pub fn public_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/services/public/install.sh", get(install_sh))
-        // The certificate this process presents (self_signed/files, D39): public
-        // material, what the installer pins for git. 404 behind an edge (h2c).
-        .route("/services/public/ca.pem", get(ca_pem))
         // Nothing else lives on the public lane: explicit 404 so no gated route can ever be
         // reached through it by accident.
         .route(
@@ -103,25 +100,6 @@ pub fn public_router(state: Arc<AppState>) -> Router {
             get(|| async { StatusCode::NOT_FOUND }),
         )
         .with_state(state)
-}
-
-async fn ca_pem(State(state): State<Arc<AppState>>) -> Response {
-    match &state.tls {
-        Some(t) => (
-            [
-                (header::CONTENT_TYPE, "application/x-pem-file"),
-                (header::CACHE_CONTROL, "no-cache"),
-                (header::CONTENT_DISPOSITION, "inline; filename=\"ca.pem\""),
-            ],
-            t.cert_pem.clone(),
-        )
-            .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            "this host does not terminate TLS itself",
-        )
-            .into_response(),
-    }
 }
 
 async fn root(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
@@ -985,7 +963,7 @@ async fn overview(
     let body = Overview {
         repo: id.to_string(),
         description,
-        instance: crate::instance::info(&state.cfg),
+        instance: crate::instance::info_for(&state),
         clone_url,
         setup,
         install: recipes.install.clone(),
