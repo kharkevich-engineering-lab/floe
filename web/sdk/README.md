@@ -41,7 +41,7 @@ const repos = createClient({ base: "https://git.example.com", token: process.env
 ## Surface
 
 ```ts
-repos.me()                                   → { principal, write, anonymous }
+repos.me()                                   → { principal, write, admin, anonymous }
 repos.tls()                                  → admin: { mode, domains, not_after, issuer, last_error, … } (D59)
 repos.owners.list()                          → ["acme", …]
 repos.owners.repos("acme")                   → ["monorepo", …]
@@ -69,6 +69,14 @@ r.settings.get() / .put(toml, message) / .delete()
 r.settings.effective() / .history() / .describe() / .validate(toml)
                                              → per-repository WAL settings and their effective host overlay
 r.urls.{html, clone, api, raw(rev,path), tree(rev,path), blob(rev,path), commit(sha)}
+
+repos.admin.config.get() / .put(doc, {base_revision, message}) / .validate(doc) / .schema()
+repos.admin.config.history({before, n}) / .revision(n) / .rollback(n, {base_revision, message})
+repos.admin.overview()
+repos.admin.mirror.status() / .preview(section, {discover}) / .test({api_url, token}) / .sync() / .pause(full) / .resume(full)
+repos.admin.catalog.status() / .test(section)
+                                             → the admin area (D60–D62): admin principals only; ReposError.details
+                                               carries {error, errors[{path, message}]} on a 400
 
 repos.configure({ token, base, lane, onProgress, interactive })
 repos.createClient(opts)   repos.ReposError   repos.version
