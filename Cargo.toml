@@ -11,6 +11,7 @@ members = [
     "crates/floe-cli",
     "crates/floe-mirror",
     "crates/floe-catalog",
+    "crates/floe-tls",
 ]
 
 [workspace.package]
@@ -72,6 +73,7 @@ floe-server = { path = "crates/floe-server" }
 floe-bundle = { path = "crates/floe-bundle" }
 floe-mirror = { path = "crates/floe-mirror" }
 floe-catalog = { path = "crates/floe-catalog" }
+floe-tls = { path = "crates/floe-tls" }
 
 anyhow = "1"
 thiserror = "2"
@@ -173,6 +175,15 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "logging", "ring"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+# ACME (RFC 8555) client for `server.tls.mode = "acme"` (D59). ring for JWS signing (the
+# provider the listener already uses), rcgen for the CSR; HTTP goes through our reqwest.
+instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "rcgen"] }
+# AES-256-GCM sealing of private keys at rest (already in the tree under rustls).
+ring = "0.17"
+# DNS-01 propagation: ask the zone's authoritative nameservers for the challenge TXT.
+hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config"] }
+# Expiry, issuer and SANs of the presented certificate (status, renewal timing).
+x509-parser = "0.18"
 
 [profile.release]
 # thin LTO + a few codegen units: near-fat performance, much faster rebuilds
