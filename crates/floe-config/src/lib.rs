@@ -2305,8 +2305,12 @@ mod tests {
         assert_eq!(c.server.listen.port(), 8080);
         assert_eq!(c.bundles.strategy.len(), 3);
         c.validate().unwrap();
-        // Round trip through TOML.
-        let text = toml::to_string(&c).unwrap();
+        // Round trip through TOML (the bootstrap: runtime sections live in the config store, D60).
+        let mut doc = toml::Table::try_from(&c).unwrap();
+        for section in runtime::RUNTIME_SECTIONS {
+            doc.remove(*section);
+        }
+        let text = toml::to_string(&doc).unwrap();
         let back = Config::parse(&text).unwrap();
         assert_eq!(back.store.bucket, c.store.bucket);
     }
