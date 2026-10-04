@@ -6,8 +6,10 @@ import { SectionEditor, errorMessage } from "./SectionEditor";
 
 /** Page 3: the `catalog` section (auth fields are plain env references, so new schemes render without UI work), a connection test, writer status. */
 export function CatalogPage() {
-  return <SectionEditor section="catalog" title="Catalog (Iceberg audit tables)" header={(current) => <CatalogStatusBox current={current} />} />;
+  return <SectionEditor section="catalog" title="Catalog (Iceberg audit tables)" header={catalogHeader} />;
 }
+
+const catalogHeader = (current: Record<string, unknown>) => <CatalogStatusBox current={current} />;
 
 function CatalogStatusBox({ current }: { current: Record<string, unknown> }) {
   const s: CatalogStatus = useData("admin:catalog", () => api.admin.catalog.status(), 10_000);

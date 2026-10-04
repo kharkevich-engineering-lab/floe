@@ -715,7 +715,7 @@ impl ConfigStore {
                 }
             }
         }
-        out.sort_by(|a, b| b.seen_at.cmp(&a.seen_at));
+        out.sort_by_key(|s| std::cmp::Reverse(s.seen_at));
         Ok(out)
     }
 }
