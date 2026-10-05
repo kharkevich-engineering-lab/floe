@@ -138,25 +138,25 @@ mod tests {
     #[test]
     fn reloads_on_change_and_keeps_the_old_cert_on_garbage() {
         let dir = tempfile::tempdir().unwrap();
-        let (c, k) = (dir.path().join("c.pem"), dir.path().join("k.pem"));
+        let (cert_path, key_path) = (dir.path().join("c.pem"), dir.path().join("k.pem"));
         let (c1, k1) = pair(&["a.example.com"]);
-        std::fs::write(&c, &c1).unwrap();
-        std::fs::write(&k, &k1).unwrap();
-        let r = CertResolver::new();
-        let f = FilesCert::load(&c, &k, r.clone()).unwrap();
-        let fp1 = r.current().unwrap().info.fingerprint.clone();
-        assert!(f.reload_if_changed().is_none(), "unchanged");
+        std::fs::write(&cert_path, &c1).unwrap();
+        std::fs::write(&key_path, &k1).unwrap();
+        let resolver = CertResolver::new();
+        let files = FilesCert::load(&cert_path, &key_path, resolver.clone()).unwrap();
+        let fp1 = resolver.current().unwrap().info.fingerprint.clone();
+        assert!(files.reload_if_changed().is_none(), "unchanged");
         let (c2, k2) = pair(&["b.example.com", "c.example.com"]);
-        std::fs::write(&c, &c2).unwrap();
-        std::fs::write(&k, &k2).unwrap();
-        f.reload_if_changed().expect("size changed").unwrap();
-        assert_ne!(r.current().unwrap().info.fingerprint, fp1);
-        assert_eq!(f.status().domains, vec!["b.example.com", "c.example.com"]);
-        std::fs::write(&k, "not a key, and a different length entirely").unwrap();
-        assert!(f.reload_if_changed().unwrap().is_err());
-        assert_eq!(r.current().unwrap().info.sans, vec!["b.example.com", "c.example.com"]);
-        assert!(f.status().last_error.is_some());
+        std::fs::write(&cert_path, &c2).unwrap();
+        std::fs::write(&key_path, &k2).unwrap();
+        files.reload_if_changed().expect("size changed").unwrap();
+        assert_ne!(resolver.current().unwrap().info.fingerprint, fp1);
+        assert_eq!(files.status().domains, vec!["b.example.com", "c.example.com"]);
+        std::fs::write(&key_path, "not a key, and a different length entirely").unwrap();
+        assert!(files.reload_if_changed().unwrap().is_err());
+        assert_eq!(resolver.current().unwrap().info.sans, vec!["b.example.com", "c.example.com"]);
+        assert!(files.status().last_error.is_some());
         // Startup is fail-closed.
-        assert!(FilesCert::load(&c, &k, CertResolver::new()).is_err());
+        assert!(FilesCert::load(&cert_path, &key_path, CertResolver::new()).is_err());
     }
 }

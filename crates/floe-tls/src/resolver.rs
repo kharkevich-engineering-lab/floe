@@ -243,10 +243,10 @@ pub(crate) mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             loop {
-                let (s, _) = listener.accept().await.unwrap();
+                let (sock, _) = listener.accept().await.unwrap();
                 let acceptor = acceptor.clone();
                 tokio::spawn(async move {
-                    if let Ok(mut tls) = acceptor.accept(s).await {
+                    if let Ok(mut tls) = acceptor.accept(sock).await {
                         let mut b = [0u8; 1];
                         let _ = tls.read_exact(&mut b).await;
                         let _ = tls.write_all(b"k").await;
