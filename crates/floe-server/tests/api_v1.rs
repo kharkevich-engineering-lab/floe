@@ -561,11 +561,11 @@ async fn tls_status_is_admin_only_and_describes_the_certificate() -> TestResult 
     let cert = rcgen::CertificateParams::new(vec!["git.example.com".to_string()])?.self_signed(&key)?;
     std::fs::write(dir.join("cert.pem"), cert.pem())?;
     std::fs::write(dir.join("key.pem"), key.serialize_pem())?;
-    let (c, k) = (dir.join("cert.pem"), dir.join("key.pem"));
+    let (cert_path, key_path) = (dir.join("cert.pem"), dir.join("key.pem"));
     let server = Server::start_with_tweak(move |cfg| {
         cfg.server.tls.mode = floe_config::TlsMode::Files;
-        cfg.server.tls.cert = Some(c.clone());
-        cfg.server.tls.key = Some(k.clone());
+        cfg.server.tls.cert = Some(cert_path.clone());
+        cfg.server.tls.key = Some(key_path.clone());
         cfg.server.auth.mode = floe_config::AuthMode::Token;
         cfg.server.auth.anonymous_read = false;
         cfg.server.auth.tokens = vec![
@@ -596,7 +596,7 @@ async fn tls_status_is_admin_only_and_describes_the_certificate() -> TestResult 
     )
     .await?;
     assert_eq!(st, 403, "write is not admin");
-    let (st, body, h) = req(
+    let (st, body, headers) = req(
         &server,
         reqwest::Method::GET,
         "/api/v1/tls",
@@ -604,7 +604,7 @@ async fn tls_status_is_admin_only_and_describes_the_certificate() -> TestResult 
     )
     .await?;
     assert_eq!(st, 200, "{body}");
-    assert_eq!(hdr(&h, "cache-control"), "no-store");
+    assert_eq!(hdr(&headers, "cache-control"), "no-store");
     let v: Value = serde_json::from_str(&body)?;
     assert_eq!(v["mode"], "files");
     assert_eq!(v["loaded"], true);
