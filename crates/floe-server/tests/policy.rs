@@ -216,7 +216,7 @@ async fn policy_and_settings_writes_are_conditional() -> TestResult {
     assert_ne!(etag, "\"none\"");
     assert_eq!(put(etag).await?.status(), 204);
 
-    let settings = format!("{}/t/r/settings", server.base_url);
+    let settings = format!("{}/t/r/api/settings", server.base_url);
     let put_settings = |base: u64| {
         client
             .put(format!("{settings}?base_revision={base}"))
