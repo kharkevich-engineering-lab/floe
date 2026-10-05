@@ -82,7 +82,7 @@ impl FilesCert {
     /// Reload if either file's mtime or size moved since the last read.
     pub fn reload_if_changed(&self) -> Option<Result<()>> {
         let now = (stamp(&self.cert), stamp(&self.key));
-        let changed = self.seen.lock().map(|s| *s != now).unwrap_or(false);
+        let changed = self.seen.lock().is_ok_and(|s| *s != now);
         changed.then(|| self.reload())
     }
 
@@ -103,15 +103,14 @@ impl FilesCert {
         let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).ok();
         loop {
             #[cfg(unix)]
-            let forced = match hup.as_mut() {
-                Some(h) => tokio::select! {
+            let forced = if let Some(h) = hup.as_mut() {
+                tokio::select! {
                     _ = h.recv() => true,
                     () = tokio::time::sleep(POLL) => false,
-                },
-                None => {
-                    tokio::time::sleep(POLL).await;
-                    false
                 }
+            } else {
+                tokio::time::sleep(POLL).await;
+                false
             };
             #[cfg(not(unix))]
             let forced = {

@@ -2,13 +2,13 @@
 //! from the bootstrap environment (`server.tls.acme.storage_key_env`).
 //!
 //! **AES-256-GCM through `ring`.** `ring` is already in the tree (it is the listener's rustls
-//! provider), so this adds no dependency; its AEAD is BoringSSL's, constant-time and
+//! provider), so this adds no dependency; its AEAD is `BoringSSL`'s, constant-time and
 //! hardware-accelerated on both arches floe ships (AES-NI + CLMUL, `ARMv8` crypto extensions).
 //! GCM's one sharp edge is the 96-bit nonce: a random nonce is safe up to ~2^32 messages per
 //! key, and this key seals a handful of objects per renewal (tens per year), so random nonces
 //! from the system CSPRNG are far inside the bound without any nonce state — which matters,
 //! because instances keep no state (principle I) and could not keep a counter.
-//! XChaCha20-Poly1305 would lift that bound but is a new crate for no practical gain here.
+//! `XChaCha20-Poly1305` would lift that bound but is a new crate for no practical gain here.
 //!
 //! Format: `v1.` + base64(`key_id[8] ‖ nonce[12] ‖ ciphertext ‖ tag[16]`). `key_id` is a
 //! fingerprint of the key so a wrong key is reported as such, not as corruption. The caller
