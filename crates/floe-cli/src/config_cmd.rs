@@ -184,8 +184,8 @@ pub async fn run(action: ConfigAction, cfg: &Arc<Config>) -> Result<()> {
 }
 
 async fn open(cfg: &Arc<Config>) -> Result<ConfigStore> {
-    let main = floe_store::open_store(cfg).await?;
-    ConfigStore::open(cfg, &main).await
+    let main = Box::pin(floe_store::open_store(cfg)).await?;
+    Box::pin(ConfigStore::open(cfg, &main)).await
 }
 
 fn author() -> String {

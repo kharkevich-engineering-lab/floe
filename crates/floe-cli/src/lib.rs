@@ -585,7 +585,7 @@ fn run(config: &std::path::Path, command: Command) -> Result<()> {
 async fn dispatch(command: Command, cfg: Config) -> Result<()> {
     let cfg = std::sync::Arc::new(cfg);
     match command {
-        Command::Config { action } => config_cmd::run(action, &cfg).await,
+        Command::Config { action } => Box::pin(config_cmd::run(action, &cfg)).await,
         Command::Synth {
             out,
             size,

@@ -105,8 +105,9 @@ impl AppState {
         // D60: read the runtime config document first (bounded; an outage
         // starts the instance on the built-in runtime defaults), so the bridge
         // and the catalog writer are built from its values.
-        let config_store = Arc::new(config_store::ConfigStore::open(&bootstrap, &store).await?);
-        let config = config_store::live::Live::start(bootstrap, config_store).await;
+        // Boxed: opening a dedicated bucket is a backend client's large future.
+        let config_store = Arc::new(Box::pin(config_store::ConfigStore::open(&bootstrap, &store)).await?);
+        let config = Box::pin(config_store::live::Live::start(bootstrap, config_store)).await;
         let cfg = config.current().cfg;
         let registry = floe_wal::Registry::new(store.clone(), cfg.clone());
         let bridge = bridge::Bridge::new(&cfg, registry.clone());
