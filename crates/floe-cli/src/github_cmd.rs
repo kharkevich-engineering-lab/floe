@@ -24,7 +24,7 @@ pub async fn run(action: GithubAction, cfg: &Arc<Config>) -> Result<()> {
         GithubAction::Status { json } => status(&store, json).await,
         GithubAction::Sync { once, dry_run } => {
             // D60: `[github_mirror]` lives in the config store.
-            let cs = floe_server::config_store::ConfigStore::open(cfg, &store).await?;
+            let cs = Box::pin(floe_server::config_store::ConfigStore::open(cfg, &store)).await?;
             let cfg = &floe_server::config_store::live::effective_once(cfg, &cs).await?;
             let gm = &cfg.github_mirror;
             // `validate` checks the section only where the mirror is enabled
