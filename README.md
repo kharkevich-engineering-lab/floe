@@ -233,10 +233,15 @@ just test          # fast hermetic tier (< 1 min): unit + quick integration, in-
 just e2e           # real git against the server (~20 s)
 just warnings      # zero rustc warnings across all targets
 just clippy-catalog test-catalog-lib   # the `--features catalog` build (what the release ships)
+just sim           # fault-injection simulation (crashes, partitions, stale reads)
+just fmt-check     # rustfmt
 just ci            # all of the above
-cargo test -p floe-server --test sim     # fault-injection simulation (crashes, partitions, stale reads)
 just test-s3       # store contract against local rustfs
 ```
+
+CI runs on every pull request, but only the jobs its changed paths need (a docs-only PR runs no build);
+`main` is protected and merges once the `CI result` and PR-title checks are green and the branch is up to
+date with `main`. Which job runs when, and what runs nightly, is in [AGENTS.md §5](AGENTS.md#5-working-rules).
 
 Code map:
 

@@ -634,14 +634,36 @@ renders the runtime sections from `GET …/config/schema`. TLS is never editable
   old readers within the retention window.
 - Web: pnpm + Vite, `pnpm run build` must pass oxlint/tsc. Config: `floe.example.toml` documents every key;
   change it with the code.
-- Test tiers: `just test` (fast, < 1 min; includes D48 `--test follow` and `--test policy`), `just e2e`, `just warnings`,
+- Test tiers: `just test` (fast, < 1 min; includes D48 `--test follow` and `--test policy`), `just e2e`, `just fmt-check`, `just warnings`,
   `just clippy` (the `[workspace.lints]` set, `-D warnings`), `just clippy-catalog` + `just test-catalog-lib`
-  (the `--features catalog` build the release ships), `just ci` = all of them; the **simulation
-  suite** `cargo test -p floe-server --test sim` (fault links per instance over one truth store: crash,
+  (the `--features catalog` build the release ships), `just ci` = all of them, including the **simulation
+  suite** `just sim` = `cargo test -p floe-server --test sim` (fault links per instance over one truth store: crash,
   partition, stale, lost response, orphan scenarios + randomized seeds `FLOE_SIM_SEEDS`/`FLOE_SIM_SEED`);
   `just test-slow` (ignored benches); `tests/e2e.sh` against a running server (`FLOE_E2E_BASE_URL`,
   `FLOE_TOKEN`). Never `cargo test --workspace --no-fail-fast` in a session; wrap ad-hoc cargo in `timeout`.
 - Known flaky (find the cause, not the assertion): `fetch_from_front_that_serves_the_base_remotely` (~1 in 3
   under the full e2e suite: base published without `has_commit_graph`) and
   `sim::base_rebuild_resumes_after_a_kill_between_any_two_phases` (~1 in 7, shared `TEST_ABORT_AFTER`). Both
-  pass alone.
+  pass alone (`just sim` runs one test at a time). `sim::sim_cache_pressure_keeps_pinned_repos_and_refuses_too_large`
+  sees a cold refs read take > 1 s on CI runners even run alone (#12); the PR gate skips it, nightly runs it.
+- **CI runs what a change needs** (`.github/workflows/ci.yml`; a `changes` job reads the PR's file list). Push
+  to `main` and a manual run run everything. On a pull request:
+
+  | Job | Runs when the PR changes |
+  |---|---|
+  | warnings + test, Git/editor contracts + `just sim` (both arches) | anything but docs (`docs/**`, `**/*.md`, `site/**`, `LICENSE`, `NOTICE`) |
+  | catalog feature (both arches), rustfmt, MSRV (`just msrv`, x86_64) | `crates/**`, `Cargo.*`, `rust-toolchain.toml`, `.cargo/**`, `clippy.toml`, `justfile`, `.github/workflows/**` |
+  | ACME against Pebble (both arches) | `crates/floe-{tls,store,config,proto}/**`, `Cargo.*`, `rust-toolchain.toml`, `.cargo/**`, `.github/workflows/**` |
+  | release container (both arches) | `Containerfile`, `.dockerignore`, `compose.yaml`, `deploy/**`, `Cargo.lock`, `rust-toolchain.toml`, `web/package.json`, `web/pnpm-lock.yaml`, `scripts/**`, `.github/workflows/**` |
+  | cargo-deny (`deny.toml`) | `Cargo.lock`, `deny.toml` |
+  | actionlint | `.github/**` |
+
+  `CI result` aggregates them: green when every job succeeded or was skipped by its filter, and is the one CI
+  check branch protection requires. **`main` is protected**: a merge needs `CI result` and `Conventional commit
+  title validation` green on a branch up to date with `main`; no review is required (the owner merges their own
+  PRs), admins can bypass, force pushes and deletion are refused. (`CI result` joins the required checks once
+  this workflow is on `main`: `echo '{"strict":true,"checks":[{"context":"CI result","app_id":15368},{"context":"Conventional commit title validation","app_id":15368}]}' | gh api -X PATCH repos/kharkevich-engineering-lab/floe/branches/main/protection/required_status_checks --input -`.) Rust and BuildKit
+  caches are written from `main` only (a PR push saving ~5 GB evicted the next run's cache from the 10 GB
+  budget). The **nightly** workflow (03:17 and 15:47 UTC) runs `just test-slow`, the sim with random seeds and
+  `just deny`, and opens or refreshes one `nightly` issue when it fails. The MSRV is `rust-version` in
+  `Cargo.toml` (1.94.1, the floor of the locked aws-sdk graph); the toolchain pin is `rust-toolchain.toml`.
