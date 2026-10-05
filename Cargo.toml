@@ -98,7 +98,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.9"
+toml = "1.1"
 rust-embed = "8"
 prost = "0.14"
 prost-types = "0.14"
@@ -108,7 +108,7 @@ axum = { version = "0.8", features = ["http2", "macros"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "compression-gzip", "compression-br", "decompression-gzip", "timeout", "limit", "catch-panic", "set-header"] }
+tower-http = { version = "0.7", features = ["trace", "compression-gzip", "compression-br", "decompression-gzip", "timeout", "limit", "catch-panic", "set-header"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
@@ -116,7 +116,7 @@ gix = { version = "0.86", default-features = false, features = ["sha1", "sha256"
 gix-pack = { version = "0.73", features = ["streaming-input", "object-cache-dynamic", "generate"] }
 gix-hash = { version = "0.26", features = ["sha1", "sha256"] }
 gix-object = "0.63"
-gix-features = { version = "0.49", features = ["parallel", "walkdir", "progress"] }
+gix-features = { version = "0.50", features = ["parallel", "walkdir", "progress"] }
 gix-packetline = { version = "0.22", features = ["blocking-io"] }
 gix-packetline-blocking = "0.22"
 gix-protocol = { version = "0.64", features = ["blocking-client"] }
@@ -127,11 +127,11 @@ gix-traverse = "0.60"
 gix-revwalk = "0.34"
 gix-negotiate = "0.34"
 gix-commitgraph = "0.38"
-gix-tempfile = "24"
-gix-lock = "24"
-gix-date = "0.15"
-gix-actor = "0.41"
-gix-hashtable = "0.16"
+gix-tempfile = "25"
+gix-lock = "25"
+gix-date = "0.17"
+gix-actor = "0.43"
+gix-hashtable = "0.17"
 gix-validate = "0.12"
 google-cloud-storage = "1"
 google-cloud-gax = "1"
@@ -145,7 +145,7 @@ aws-sigv4 = "1"
 aws-credential-types = "1"
 clap = { version = "4", features = ["derive", "env"] }
 rand = "0.10"
-sha1 = "0.10"
+sha1 = "0.11"
 sha2 = "0.11"
 hmac = "0.13"
 hex = "0.4"
@@ -164,21 +164,21 @@ flate2 = "1"
 async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 pin-project-lite = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
-base64 = "0.22"
+base64 = "0.23"
 jsonwebtoken = { version = "11.0.0", features = ["rust_crypto"] }
 # The GitHub facade parses a GraphQL operation only to name it in the
 # not-implemented error (docs/GITHUB.md); no execution, no schema.
 graphql-parser = "0.4"
 libc = "0.2"
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.17", default-features = false, features = ["http-listener"] }
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 # Iceberg audit tables (floe-catalog's `iceberg` feature only; never in the
 # default build). Pinned exactly: iceberg-rust is pre-1.0 and its writer API
 # moves between minors. arrow-array follows the major iceberg 0.10 links against.
 iceberg = "=0.10.1"
 iceberg-catalog-rest = "=0.10.1"
 iceberg-storage-opendal = { version = "=0.10.1", default-features = false, features = ["opendal-s3"] }
-arrow-array = "58"
+arrow-array = "60"
 # The credential trait iceberg-storage-opendal's custom S3 loader takes (D63).
 reqsign-core = "3"
 # MCP server (D55; floe-server's `mcp` feature only, never in the default build). Pinned exactly:
