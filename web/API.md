@@ -527,8 +527,8 @@ JSON `{"error": "…", "errors": [{"path"?: "github_mirror.include", "message": 
 | `GET /api/v1/admin/catalog` | `{compiled, enabled, running, up, tail, uri, warehouse, namespace, auth, restart_required}`. |
 | `POST /api/v1/admin/catalog/test` | body `{section?}` → Iceberg REST `GET {uri}/v1/config?warehouse=` with the configured bearer: `{ok, auth, url, status, body, message}`. |
 
-`GET /api/v1/tls` (admin; read-only certificate status) belongs to the TLS change (D59); the admin overview
-treats a `404` as "not available in this build".
+`GET /api/v1/tls` (admin; read-only certificate status, D59) is what the admin overview shows; TLS itself is
+bootstrap config and never editable here.
 
 ### Service routes (not for the browser)
 
