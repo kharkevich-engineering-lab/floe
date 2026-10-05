@@ -118,10 +118,12 @@ impl Spec {
                         info.doc_adjacent = Some(*c);
                     }
                     ("strip!", Some(QueryPredicateArg::String(re))) => {
-                        info.doc_strip = Some(Regex::new(re).map_err(|e| Error::Query {
-                            lang,
-                            message: format!("#strip! regex: {e}"),
-                        })?);
+                        // Multi-line: a block comment's every line is cleaned, not only the first.
+                        info.doc_strip =
+                            Some(Regex::new(&format!("(?m){re}")).map_err(|e| Error::Query {
+                                lang,
+                                message: format!("#strip! regex: {e}"),
+                            })?);
                     }
                     _ => {}
                 }

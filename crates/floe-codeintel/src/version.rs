@@ -5,7 +5,7 @@
 //! language and a chunker bump re-chunks everything once. A language's string is
 //!
 //! ```text
-//! ts-tags/1;cast/1;rust=0.24.2@<sha256 of the pinned tags query, 8 hex>
+//! ts-tags/1;cast/2;rust=0.24.2@<sha256 of the pinned tags query, 8 hex>
 //! ```
 //!
 //! The grammar version and the query digest change by themselves when the grammar pin or the
@@ -25,12 +25,12 @@ pub const EXTRACTOR_FAMILY: &str = "ts-tags/1";
 /// The tree-sitter runtime the extraction code was written against (pinned in Cargo.toml).
 pub const TREE_SITTER_VERSION: &str = "0.27.0";
 /// The chunker's version (§5.7); part of every extractor string.
-pub const CHUNKER_ID: &str = "cast/1";
+pub const CHUNKER_ID: &str = "cast/2";
 /// The chunk budget, in non-whitespace characters (≈ 400–500 code tokens).
 pub const CHUNK_BUDGET_NWS: usize = 1500;
 /// The chunker string (`code.blobs.chunker`, `ShardMeta.chunker`); also the first input of
 /// every chunk hash.
-pub const CHUNKER: &str = "cast/1;budget=1500nws";
+pub const CHUNKER: &str = "cast/2;budget=1500nws";
 
 /// The pinned grammar version of a language (exact pins in Cargo.toml).
 pub fn grammar_version(lang: Lang) -> Option<&'static str> {
@@ -130,13 +130,13 @@ mod tests {
     #[test]
     fn extractor_strings_have_the_designed_shape() {
         let text = extractor(Lang::Text);
-        assert_eq!(text, "ts-tags/1;cast/1;text");
+        assert_eq!(text, "ts-tags/1;cast/2;text");
         let all = extractors();
         assert_eq!(all.get("text"), Some(&text));
         for l in Lang::ALL {
             let e = extractor(l);
             if l.has_grammar() {
-                let prefix = format!("ts-tags/1;cast/1;{}=", l.name());
+                let prefix = format!("ts-tags/1;cast/2;{}=", l.name());
                 assert!(e.starts_with(&prefix), "{e}");
                 let sha8 = e.rsplit('@').next().unwrap();
                 assert_eq!(sha8.len(), 8, "{e}");

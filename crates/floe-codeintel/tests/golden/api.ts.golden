@@ -1,15 +1,15 @@
 file web/src/api.ts lang=typescript flags= size=692 lines=38
-extractor ts-tags/1;cast/1;typescript=0.23.2@089967c5
-def #0 interface Repo @2:18-2:22 body=2-5 parent=- in="" flags=1 sig="export interface Repo {" doc=""
+extractor ts-tags/1;cast/2;typescript=0.23.2@7ea4efce
+def #0 interface Repo @2:18-2:22 body=2-5 parent=- in="" flags=1 sig="export interface Repo {" doc="API client (fixture)."
 def #1 type RepoId @7:13-7:19 body=7-7 parent=- in="" flags=1 sig="export type RepoId = string;" doc=""
 def #2 enum Visibility @9:13-9:23 body=9-12 parent=- in="" flags=1 sig="export enum Visibility {" doc=""
-def #3 function getRepo @15:23-15:30 body=15-18 parent=- in="" flags=1 sig="export async function getRepo(id: RepoId): Promise<Repo> {" doc=""
+def #3 function getRepo @15:23-15:30 body=15-18 parent=- in="" flags=1 sig="export async function getRepo(id: RepoId): Promise<Repo> {" doc="Fetches one repository."
 def #4 function parse @20:10-20:15 body=20-22 parent=- in="" flags=0 sig="function parse(res: Response): Repo {" doc=""
 def #5 class RepoImpl @24:14-24:22 body=24-32 parent=- in="" flags=1 sig="export class RepoImpl implements Repo {" doc=""
 def #6 method fullName @29:3-29:11 body=29-31 parent=5 in="RepoImpl" flags=1 sig="fullName(): string {" doc="The full name."
 def #7 function join @34:7-34:11 body=34-34 parent=- in="" flags=0 sig="const join = (a: string, b: string) => `${a}/${b}`;" doc=""
 def #8 module Legacy @36:11-36:17 body=36-38 parent=- in="" flags=0 sig="namespace Legacy {" doc=""
-def #9 function old @37:19-37:22 body=37-37 parent=8 in="Legacy" flags=1 sig="export function old(): void {}" doc=""
+def #9 function old @37:19-37:22 body=37-37 parent=8 in="Legacy" flags=0 sig="export function old(): void {}" doc=""
 ref type RepoId @15:35-41 in=3
 ref call fetch @16:21-26 in=3
 ref call parse @17:10-15 in=3
@@ -17,11 +17,11 @@ ref type Response @20:21-29 in=4
 ref type Repo @20:32-36 in=4
 ref type RepoImpl @21:14-22 in=4
 ref call join @30:12-16 in=6
-chunk lines=1-5 bytes=0-83 kind=interface def=0 symbol="Repo" tokens=23 hash=ce272bbdcb9cebceb5675c852940aedbd800d9174f6b02478019fac0332df13d
-chunk lines=7-7 bytes=85-113 kind=type def=1 symbol="RepoId" tokens=8 hash=ecbb8db2aac1877d9659a291f8469fc4d166b7280631324acc0facc749bbc514
-chunk lines=9-12 bytes=115-162 kind=enum def=2 symbol="Visibility" tokens=13 hash=f99697e929125a43df591decd88a7fe0d44758526409d96f5fcbf6e00aa909ca
-chunk lines=14-18 bytes=164-323 kind=function def=3 symbol="getRepo" tokens=46 hash=1e8b0e59907a70ace05b2ea3ac78ae0dc4def3675b0cc4923e13f56d39f1129d
-chunk lines=20-22 bytes=325-396 kind=function def=4 symbol="parse" tokens=21 hash=e2e0fd75b718d44322a2eec56bad6d3cc6c624074681bffe3d7fa9e9166ca782
-chunk lines=24-32 bytes=398-583 kind=class def=5 symbol="RepoImpl" tokens=49 hash=ebcd54d887a0ff265e01f90a5807710abe44812e760f47e7c052ac3244a809e9
-chunk lines=34-34 bytes=585-636 kind=function def=7 symbol="join" tokens=15 hash=8bfd97fa30894a5cb24f818f4873abcdad65dc51c1cce7878388bed9677330d5
-chunk lines=36-38 bytes=638-691 kind=module def=8 symbol="Legacy" tokens=15 hash=39f605093590150ce6378fe16b6f7566b1bde3764d2a14babd55ecd1e8cf6bd3
+chunk lines=1-5 bytes=0-83 kind=interface def=0 symbol="Repo" tokens=23 hash=a4fdb733b667f998539074943daf09a46f8a233ec9d9ca32c041649dc3f05adc
+chunk lines=7-7 bytes=85-113 kind=type def=1 symbol="RepoId" tokens=8 hash=337e1eb0d485b38bdfb2af54c9549d38b4268514266fd998098bbc5a9d71016d
+chunk lines=9-12 bytes=115-162 kind=enum def=2 symbol="Visibility" tokens=13 hash=456c0669d0411c3c53fa2ee58512201d31bde54bdf10c2d09921e0c0f64af3cb
+chunk lines=14-18 bytes=164-323 kind=function def=3 symbol="getRepo" tokens=46 hash=81168d4dc9ac4d08d7c506e663ad163307d9a0b12f5b3b78118cddc5d8c065eb
+chunk lines=20-22 bytes=325-396 kind=function def=4 symbol="parse" tokens=21 hash=856713fdb3b21b0f2eda83963b2c4ed46a330b5f8887dc4fb54f653e08d85d58
+chunk lines=24-32 bytes=398-583 kind=class def=5 symbol="RepoImpl" tokens=49 hash=fcdd78aceb0c341836ac4365e74bfe63f0d721c088927e78f19543664ae18e3c
+chunk lines=34-34 bytes=585-636 kind=function def=7 symbol="join" tokens=15 hash=5a5e24d60e262d5191fab2aa5d622c0d15013ffa49d7f72b02f8566a82a3f7bf
+chunk lines=36-38 bytes=638-691 kind=module def=8 symbol="Legacy" tokens=15 hash=20067824cf44cb703dcecaf4be664dd58d32f6d20a408bad54e3df0bf05b7cd5

@@ -1,5 +1,5 @@
 file server/server.go lang=go flags= size=532 lines=32
-extractor ts-tags/1;cast/1;go=0.25.0@c84950c8
+extractor ts-tags/1;cast/2;go=0.25.0@c84950c8
 def #0 const DefaultPort @6:7-6:18 body=6-6 parent=- in="" flags=1 sig="const DefaultPort = 8080" doc=""
 def #1 struct Server @10:6-10:12 body=10-12 parent=- in="" flags=1 sig="type Server struct {" doc=""
 def #2 interface Handler @14:6-14:13 body=14-16 parent=- in="" flags=1 sig="type Handler interface {" doc=""
@@ -22,11 +22,11 @@ ref call helper @27:18-24 in=5
 ref type string @30:15-21 in=6
 ref type string @30:23-29 in=6
 ref call ToUpper @31:17-24 in=6
-chunk lines=1-4 bytes=0-64 kind=block def=- symbol="" tokens=18 hash=ac895e44dc13f477d25de842d126163f8d5941a6e9f05521410e44b4591b1a8f
-chunk lines=6-6 bytes=66-90 kind=const def=0 symbol="DefaultPort" tokens=7 hash=084b50597150ca76dfeec3899d17251096f7213bf1069b83840b4a9b0693d32f
-chunk lines=8-12 bytes=92-177 kind=struct def=1 symbol="Server" tokens=23 hash=3c6f13e3f9991154fbca8f28db140a35110aaf72f9d1ae73cefa1e1bf0f1f357
-chunk lines=14-16 bytes=179-232 kind=interface def=2 symbol="Handler" tokens=15 hash=560811ca4034d641a521739b8bd428b0808f9af1e77701986be32fa41d345337
-chunk lines=18-18 bytes=234-247 kind=type def=3 symbol="Port" tokens=4 hash=8a939522c533e6eae3aa978304cdd8bf4e5cd9914c990b842f6eb933e217c687
-chunk lines=20-23 bytes=249-365 kind=function def=4 symbol="NewServer" tokens=34 hash=4e4539ca04f656a6a88e55c53e53a2061c457d75a5f2bf7ca24371dba40d90f9
-chunk lines=25-28 bytes=367-470 kind=method def=5 symbol="Server.Serve" tokens=29 hash=0b652e61c141292b302fc315783d675d86568eb4d51f4e71b0cabe29ad26dfac
-chunk lines=30-32 bytes=472-531 kind=function def=6 symbol="helper" tokens=17 hash=403f83407c7a438f16c5ca5f5b0a102bda7ae79a054964dd59ca50ae577d7e30
+chunk lines=1-4 bytes=0-64 kind=block def=- symbol="" tokens=18 hash=90032e6ea6a51573319e9dfb2e058c43ff0baeaf30659b5809e924aa61b50343
+chunk lines=6-6 bytes=66-90 kind=const def=0 symbol="DefaultPort" tokens=7 hash=3a3dde6c058b4f05bd9dc033d2c9994230e6b87cf2048f79554fee782495e244
+chunk lines=8-12 bytes=92-177 kind=struct def=1 symbol="Server" tokens=23 hash=26828f4b3ad1b310496997226491d191464df82d67d1dedff5885de1deead8a7
+chunk lines=14-16 bytes=179-232 kind=interface def=2 symbol="Handler" tokens=15 hash=5be58753b3940202f20b8a569798ccd57ac6b80c07c7bef74319f5c0391612c8
+chunk lines=18-18 bytes=234-247 kind=type def=3 symbol="Port" tokens=4 hash=c9e9810c6190b77d470c7a24da63431537fd147d54f6cefbb8f6aadabb71f2fc
+chunk lines=20-23 bytes=249-365 kind=function def=4 symbol="NewServer" tokens=34 hash=798e23dd41cb488bca3fb386c1529d6a6cc2c9ab330bfa3be793adda3d7bb502
+chunk lines=25-28 bytes=367-470 kind=method def=5 symbol="Server.Serve" tokens=29 hash=42522653ef56a393928074df651d9680ab1beeaece059b9af76f7d867ec4d69f
+chunk lines=30-32 bytes=472-531 kind=function def=6 symbol="helper" tokens=17 hash=2388d3da7357215495ca6940bc5edcf9c19649a481139ed56e28113a7d28475f

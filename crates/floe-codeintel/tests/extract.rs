@@ -363,6 +363,8 @@ fn typescript_and_tsx() {
     def(&f, "Visibility", DefKind::Enum);
     let get = def(&f, "getRepo", DefKind::Function);
     assert_eq!(get.flags, def_flags::EXPORTED);
+    // The doc comment above an `export` declaration is the declaration's.
+    assert_eq!(get.doc, "Fetches one repository.");
     let parse = def(&f, "parse", DefKind::Function);
     assert_eq!(parse.flags, 0);
     let class = def(&f, "RepoImpl", DefKind::Class);
@@ -378,6 +380,10 @@ fn typescript_and_tsx() {
     def(&f, "Legacy", DefKind::Module);
     let old = def(&f, "old", DefKind::Function);
     assert_eq!(old.container, "Legacy");
+    assert_eq!(
+        old.flags, 0,
+        "exported from a namespace that is not exported"
+    );
     assert!(has_ref(&f, "fetch", RefKind::Call, Some("getRepo")));
     assert!(has_ref(&f, "parse", RefKind::Call, Some("getRepo")));
     assert!(has_ref(&f, "RepoImpl", RefKind::Type, Some("parse")));
@@ -458,7 +464,7 @@ fn java_classes_methods_and_interfaces() {
 fn text_files_are_windowed_without_definitions() {
     let (_, f) = extract("notes.md");
     assert_eq!(f.lang, Lang::Text);
-    assert_eq!(f.extractor, "ts-tags/1;cast/1;text");
+    assert_eq!(f.extractor, "ts-tags/1;cast/2;text");
     assert!(f.defs.is_empty() && f.refs.is_empty());
     assert_eq!(f.chunks.len(), 1);
     assert_eq!(
@@ -591,4 +597,71 @@ fn shard_meta_extractors_cover_every_language_of_the_build() {
         );
     }
     assert_eq!(all.len(), 8, "seven grammars and text: {all:?}");
+}
+
+fn extract_src(path: &str, src: &str) -> FileFacts {
+    extractor().extract(path, src.as_bytes(), &Attributes::default())
+}
+
+#[test]
+fn block_doc_comments_are_cleaned_on_every_line() {
+    let f = extract_src(
+        "lib/a.js",
+        "/**\n * First line.\n * Second line.\n */\nfunction f() {}\n",
+    );
+    assert_eq!(
+        def(&f, "f", DefKind::Function).doc,
+        "First line.\nSecond line."
+    );
+}
+
+#[test]
+fn rust_test_attributes_are_parsed_not_grepped() {
+    let src = "#[test]\n#[should_panic]\nfn a() {}\n\n#[cfg(not(test))]\nfn b() {}\n\n\
+               #[tokio::test(flavor = \"multi_thread\")]\nasync fn c() {}\n\n/// doc\n#[test]\nfn d() {}\n\n\
+               #[cfg(test)]\nmod tests {\n    fn helper() {}\n}\n\n#[cfg(feature = \"test\")]\nfn e() {}\n";
+    let f = extract_src("src/t.rs", src);
+    let test = |name: &str, kind: DefKind| def(&f, name, kind).flags & def_flags::TEST != 0;
+    assert!(
+        test("a", DefKind::Function),
+        "#[test] above #[should_panic]"
+    );
+    assert!(!test("b", DefKind::Function), "#[cfg(not(test))]");
+    assert!(test("c", DefKind::Function), "#[tokio::test(...)]");
+    assert!(test("d", DefKind::Function), "doc comment between");
+    assert!(test("tests", DefKind::Module), "#[cfg(test)] mod");
+    assert!(
+        test("helper", DefKind::Function),
+        "inside a #[cfg(test)] mod"
+    );
+    assert!(
+        !test("e", DefKind::Function),
+        "a feature named test is not cfg(test)"
+    );
+}
+
+#[test]
+fn only_direct_exports_are_exported() {
+    let f = extract_src(
+        "web/x.ts",
+        "export function outer() {\n  function inner() {}\n  return inner;\n}\n\
+         export namespace Pub {\n  export function g() {}\n}\n\
+         namespace Priv {\n  export function h() {}\n}\n\
+         export const k = () => 1;\n\
+         export class C {\n  pub() {}\n  private hid() {}\n  #own() {}\n}\n\
+         class D {\n  m() {}\n}\n",
+    );
+    let exported = |name: &str| def(&f, name, DefKind::Function).flags & def_flags::EXPORTED != 0;
+    assert!(exported("outer"));
+    assert!(!exported("inner"), "nested in an exported function");
+    assert!(exported("g"), "exported from an exported namespace");
+    assert!(
+        !exported("h"),
+        "exported from a namespace that is not exported"
+    );
+    assert!(exported("k"));
+    let method = |name: &str| def(&f, name, DefKind::Method).flags & def_flags::EXPORTED != 0;
+    assert!(method("pub"), "a public member of an exported class");
+    assert!(!method("hid"), "a private member");
+    assert!(!method("m"), "a member of a class that is not exported");
 }

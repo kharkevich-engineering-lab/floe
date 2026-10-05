@@ -1,7 +1,45 @@
 ; floe-codeintel tags query for JavaScript/JSX (also the first half of TypeScript/TSX).
-; Pinned copy of tree-sitter-javascript 0.25.0 queries/tags.scm (MIT, Max Brunsfeld and
-; contributors), unmodified. Editing this file changes the extractor string (src/version.rs)
-; and re-extracts every JavaScript and TypeScript blob.
+; Based on tree-sitter-javascript 0.25.0 queries/tags.scm (MIT, Max Brunsfeld and
+; contributors). Change: the first block, doc comments above an `export` declaration (upstream
+; anchors them to the inner declaration, so `/** … */ export function f` lost its doc). It comes
+; first so it wins over the generic patterns for the same name. Editing this file changes the
+; extractor string (src/version.rs) and re-extracts every JavaScript and TypeScript blob.
+
+(
+  (comment)* @doc
+  .
+  (export_statement
+    declaration: [
+      (function_declaration
+        name: (identifier) @name)
+      (generator_function_declaration
+        name: (identifier) @name)
+    ] @definition.function)
+  (#strip! @doc "^[\\s\\*/]+|^[\\s\\*/]$")
+  (#select-adjacent! @doc @definition.function)
+)
+
+(
+  (comment)* @doc
+  .
+  (export_statement
+    declaration: (class_declaration
+      name: (_) @name) @definition.class)
+  (#strip! @doc "^[\\s\\*/]+|^[\\s\\*/]$")
+  (#select-adjacent! @doc @definition.class)
+)
+
+(
+  (comment)* @doc
+  .
+  (export_statement
+    declaration: (lexical_declaration
+      (variable_declarator
+        name: (identifier) @name
+        value: [(arrow_function) (function_expression)]) @definition.function))
+  (#strip! @doc "^[\\s\\*/]+|^[\\s\\*/]$")
+  (#select-adjacent! @doc @definition.function)
+)
 
 (
   (comment)* @doc

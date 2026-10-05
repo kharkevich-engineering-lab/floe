@@ -13,8 +13,10 @@
 //! 4. Each chunk carries a header (`// path: …  lang: …  in: …  sig: …`) that is embedded
 //!    with the body but is not part of the stored byte range. The path is in the header, so
 //!    the text an embedder receives always names where it came from (§6.5 privacy gate).
-//! 5. `hash = sha256(chunker ‖ header ‖ body)`: identical code at the same path in 100
-//!    mirrors is embedded once.
+//! 5. `hash = sha256(chunker ‖ header ‖ body)`, each field length-prefixed: identical code at
+//!    the same path in 100 mirrors is embedded once.
+//! 6. When a container (an `impl` block, a class) is split, its header and closing brace join
+//!    the first and last member chunk instead of becoming chunks of their own.
 
 use sha2::{Digest, Sha256};
 
@@ -144,14 +146,21 @@ pub fn header(src: Source<'_>, symbol: &str, signature: &str) -> String {
     h
 }
 
-/// `sha256(chunker ‖ header ‖ body)`, the embedding key.
+/// `sha256(chunker ‖ header ‖ body)`, the embedding key. Each field is length-prefixed
+/// (u64 little-endian) so no split of the same bytes between fields can collide.
 pub fn chunk_hash(header: &str, body: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(CHUNKER.as_bytes());
-    h.update(header.as_bytes());
-    h.update(body);
+    for field in [CHUNKER.as_bytes(), header.as_bytes(), body] {
+        h.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
+        h.update(field);
+    }
     h.finalize().into()
 }
+
+/// Glue at the edges of a split container (an `impl Foo {` header, the closing `}`) at most
+/// this many non-whitespace characters joins the first/last member chunk instead of
+/// becoming a chunk of its own.
+const EDGE_GLUE_MAX_NWS: usize = CHUNK_BUDGET_NWS / 4;
 
 #[derive(Debug, Clone, Copy)]
 struct Piece {
@@ -213,11 +222,12 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// The final ranges covering `node`'s children.
-    fn level<N: SyntaxNode>(&self, node: &N) -> Vec<(usize, usize)> {
+    /// The final ranges covering `node`'s children. `edges`: `node` is a split container,
+    /// so small glue before its first and after its last member unit joins that unit.
+    fn level<N: SyntaxNode>(&self, node: &N, edges: bool) -> Vec<(usize, usize)> {
         let mut items = Vec::new();
         self.collect(node, &mut items);
-        self.merge(items)
+        self.merge(items, edges)
     }
 
     /// The units under `node`. An oversized child that holds a definition is chunked on its
@@ -241,12 +251,12 @@ impl Ctx<'_, '_> {
                     def,
                 });
             } else if def {
-                let ranges = self.level(&kid);
+                let ranges = self.level(&kid, true);
                 if ranges.is_empty() {
                     let mut lines = Vec::new();
                     self.split_lines(s, e, &mut lines);
                     items.push(Item::Group {
-                        ranges: self.merge(lines),
+                        ranges: self.merge(lines, false),
                     });
                 } else {
                     items.push(Item::Group { ranges });
@@ -282,7 +292,7 @@ impl Ctx<'_, '_> {
         lead
     }
 
-    fn merge(&self, items: Vec<Item>) -> Vec<(usize, usize)> {
+    fn merge(&self, items: Vec<Item>, edges: bool) -> Vec<(usize, usize)> {
         fn flush(acc: &mut Vec<Piece>, out: &mut Vec<(usize, usize)>) {
             if let (Some(f), Some(l)) = (acc.first(), acc.last()) {
                 out.push((f.start, l.end));
@@ -291,6 +301,12 @@ impl Ctx<'_, '_> {
         }
         let mut out = Vec::new();
         let mut acc: Vec<Piece> = Vec::new();
+        let mut units = 0usize;
+        // Leading edge glue: everything before the first unit, when small.
+        let small = |acc: &[Piece]| match (acc.first(), acc.last()) {
+            (Some(f), Some(l)) => self.text.nws(f.start, l.end) <= EDGE_GLUE_MAX_NWS,
+            _ => false,
+        };
         for item in items {
             match item {
                 Item::Single { piece, def: false } => {
@@ -304,20 +320,43 @@ impl Ctx<'_, '_> {
                     acc.push(piece);
                 }
                 Item::Single { piece, def: true } => {
-                    let lead = self.take_attached_comments(&mut acc, piece.start);
+                    let lead = if edges && units == 0 && small(&acc) {
+                        let lead = acc.first().map(|p| p.start);
+                        acc.clear();
+                        lead
+                    } else {
+                        self.take_attached_comments(&mut acc, piece.start)
+                    };
                     flush(&mut acc, &mut out);
                     out.push((lead.unwrap_or(piece.start), piece.end));
+                    units += 1;
                 }
                 Item::Group { ranges } => {
                     let first = ranges.first().map_or(0, |r| r.0);
-                    let lead = self.take_attached_comments(&mut acc, first);
+                    let lead = if edges && units == 0 && small(&acc) {
+                        let lead = acc.first().map(|p| p.start);
+                        acc.clear();
+                        lead
+                    } else {
+                        self.take_attached_comments(&mut acc, first)
+                    };
                     flush(&mut acc, &mut out);
+                    units += 1;
                     for (i, (s, e)) in ranges.into_iter().enumerate() {
                         let s = if i == 0 { lead.unwrap_or(s) } else { s };
                         out.push((s, e));
                     }
                 }
             }
+        }
+        // Trailing edge glue (a closing brace) joins the last unit.
+        if edges
+            && units > 0
+            && small(&acc)
+            && let (Some(last), Some(end)) = (out.last_mut(), acc.last().map(|p| p.end))
+        {
+            last.1 = end;
+            acc.clear();
         }
         flush(&mut acc, &mut out);
         out
@@ -373,14 +412,23 @@ fn make_chunk(
     }
 }
 
-/// The definition a chunk belongs to: the innermost one containing it, else the first one it
-/// contains.
+/// The definition a chunk belongs to: the innermost definition containing it, or the scope
+/// it is exactly (a whole `impl` block); else the first definition it contains (a split
+/// container's member that took the container's header); else the containing scope.
 fn owner(defs: &[ChunkDef], start: usize, end: usize) -> Option<&ChunkDef> {
     let containing = defs
         .iter()
         .filter(|d| d.start <= start && end <= d.end)
         .max_by_key(|d| (d.start, std::cmp::Reverse(d.end)));
-    containing.or_else(|| defs.iter().find(|d| start <= d.start && d.end <= end))
+    let contained = || {
+        defs.iter()
+            .find(|d| start <= d.start && d.end <= end && (d.start, d.end) != (start, end))
+    };
+    match containing {
+        Some(d) if d.ordinal.is_some() || (d.start, d.end) == (start, end) => Some(d),
+        Some(scope) => contained().filter(|d| d.ordinal.is_some()).or(Some(scope)),
+        None => contained(),
+    }
 }
 
 /// Chunk a parsed file. `defs` sorted by `(start, Reverse(end))`. The root is always split
@@ -393,11 +441,11 @@ pub fn chunk_syntax<N: SyntaxNode>(
 ) -> Vec<Chunk> {
     let ctx = Ctx { text, defs };
     let (s, e) = root.byte_range();
-    let mut ranges = ctx.level(root);
+    let mut ranges = ctx.level(root, false);
     if ranges.is_empty() && text.nws(s, e) > 0 {
         let mut items = Vec::new();
         ctx.split_lines(s, e, &mut items);
-        ranges = ctx.merge(items);
+        ranges = ctx.merge(items, false);
     }
     ranges
         .into_iter()
@@ -505,9 +553,22 @@ mod tests {
         assert_ne!(a[0].hash, other_path[0].hash);
         assert_eq!(a[0].header, "// path: src/a.rs  lang: rust\n");
         let mut h = Sha256::new();
-        h.update(b"cast/1;budget=1500nws// path: src/a.rs  lang: rust\nfn a() {}");
+        for field in [
+            &b"cast/2;budget=1500nws"[..],
+            b"// path: src/a.rs  lang: rust\n",
+            b"fn a() {}",
+        ] {
+            h.update(u64::try_from(field.len()).unwrap().to_le_bytes());
+            h.update(field);
+        }
         let want: [u8; 32] = h.finalize().into();
         assert_eq!(a[0].hash, want);
+        // Length prefixes: moving bytes between header and body changes the hash.
+        assert_ne!(
+            chunk_hash("// h\n", b"x"),
+            chunk_hash("// h", b"\nx"),
+            "fields are length-prefixed"
+        );
         assert_eq!(
             header(SRC, "Router::route", "pub fn route(&self)"),
             "// path: src/a.rs  lang: rust  in: Router::route  sig: pub fn route(&self)\n"
@@ -666,5 +727,74 @@ mod tests {
         }
         assert_eq!(split[0].start_byte, 0);
         assert_eq!(split.last().unwrap().end_byte as usize, close + 1);
+    }
+
+    /// A split container's header and braces join its first and last member chunks: no
+    /// `impl Foo`, `{` or `}` chunk of its own.
+    #[test]
+    fn split_containers_keep_header_and_braces_with_their_members() {
+        let body = |n: usize| "x".repeat(n);
+        let m1 = format!("    fn a() {{ {} }}\n", body(800));
+        let m2 = format!("    fn b() {{ {} }}\n", body(800));
+        let src = format!("impl Foo {{\n{m1}{m2}}}\n");
+        let at = |needle: &str| src.find(needle).unwrap();
+        let leaf = |s: usize, e: usize| Toy {
+            range: (s, e),
+            comment: false,
+            kids: Vec::new(),
+        };
+        let open = at("{\n");
+        let (a, b) = (at("fn a"), at("fn b"));
+        let (a_end, b_end) = (a + m1.trim().len(), b + m2.trim().len());
+        let close = src.rfind('}').unwrap();
+        let block = Toy {
+            range: (open, close + 1),
+            comment: false,
+            kids: vec![
+                leaf(open, open + 1),
+                leaf(a, a_end),
+                leaf(b, b_end),
+                leaf(close, close + 1),
+            ],
+        };
+        let imp = Toy {
+            range: (0, close + 1),
+            comment: false,
+            kids: vec![leaf(0, "impl Foo".len()), block],
+        };
+        let root = Toy {
+            range: (0, src.len()),
+            comment: false,
+            kids: vec![imp],
+        };
+        let def = |start: usize, end: usize, ordinal: u32, name: &str| ChunkDef {
+            start,
+            end,
+            ordinal: Some(ordinal),
+            kind: "method".into(),
+            qualified: name.into(),
+            signature: String::new(),
+        };
+        let defs = [
+            ChunkDef {
+                start: 0,
+                end: close + 1,
+                ordinal: None,
+                kind: "impl".into(),
+                qualified: "Foo".into(),
+                signature: String::new(),
+            },
+            def(a, a_end, 0, "Foo::a"),
+            def(b, b_end, 1, "Foo::b"),
+        ];
+        let text = Text::new(src.as_bytes());
+        let chunks = chunk_syntax(SRC, &text, &root, &defs);
+        let spans: Vec<(usize, usize)> = chunks
+            .iter()
+            .map(|c| (c.start_byte as usize, c.end_byte as usize))
+            .collect();
+        assert_eq!(spans, [(0, a_end), (b, close + 1)], "{chunks:?}");
+        assert_eq!(chunks[0].def, Some(0));
+        assert_eq!(chunks[1].def, Some(1));
     }
 }

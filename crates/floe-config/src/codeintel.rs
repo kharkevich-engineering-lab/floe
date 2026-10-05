@@ -308,6 +308,53 @@ fn is_env_var_name(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// An RFC 6454 origin as browsers send it: `http(s)://host[:port]`, nothing else.
+fn is_origin(o: &str) -> bool {
+    let Some(rest) = o
+        .strip_prefix("https://")
+        .or_else(|| o.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    if rest.is_empty()
+        || rest.contains(['/', '?', '#', '@', '\\'])
+        || rest.chars().any(char::is_whitespace)
+    {
+        return false;
+    }
+    // `[v6]` or `[v6]:port`, else `host` or `host:port`.
+    let (host, port) = if let Some(v6) = rest.strip_prefix('[') {
+        let Some((addr, after)) = v6.split_once(']') else {
+            return false;
+        };
+        if addr.is_empty()
+            || !addr
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
+            return false;
+        }
+        match after {
+            "" => ("v6", None),
+            p => match p.strip_prefix(':') {
+                Some(port) => ("v6", Some(port)),
+                None => return false,
+            },
+        }
+    } else {
+        match rest.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (rest, None),
+        }
+    };
+    let host_ok = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+    let port_ok = port.is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.parse::<u16>().is_ok());
+    host_ok && port_ok
+}
+
 /// One `[access] read` entry, checked for syntax.
 fn validate_access_entry(e: &str) -> Result<()> {
     anyhow::ensure!(
@@ -435,10 +482,8 @@ pub(crate) fn check_document(ci: &CodeIntelConfig, mcp: &McpConfig) -> Result<()
     );
     for o in &mcp.allowed_origins {
         anyhow::ensure!(
-            (o.starts_with("https://") || o.starts_with("http://"))
-                && !o.trim_end_matches('/').contains("/*")
-                && !o.ends_with('/'),
-            "mcp.allowed_origins entries are origins with a scheme and no path (got {o:?})"
+            is_origin(o),
+            "mcp.allowed_origins entries are origins, exactly http(s)://host[:port] with no path, query, fragment or userinfo (got {o:?})"
         );
     }
     for (key, list) in [
@@ -778,8 +823,34 @@ mcp_handle_secret = "0123456789abcdef0123456789abcdef"
         c.server.public_url = None;
         c.mcp.allowed_origins = vec!["https://agents.example.com".into()];
         c.validate().unwrap();
-        c.mcp.allowed_origins = vec!["agents.example.com".into()];
-        assert!(err(&c).contains("scheme"), "{}", err(&c));
+        for bad in [
+            "agents.example.com",
+            "https://example.com/app",
+            "https://example.com/",
+            "https://example.com?x=1",
+            "https://example.com#f",
+            "https://user@example.com",
+            "https://example.com:99999",
+            "https://example.com:",
+            "ftp://example.com",
+            "https://[::1",
+        ] {
+            c.mcp.allowed_origins = vec![bad.into()];
+            assert!(
+                err(&c).contains("exactly http(s)://host[:port]"),
+                "{bad}: {}",
+                err(&c)
+            );
+        }
+        for good in [
+            "https://example.com",
+            "https://example.com:8443",
+            "http://localhost:5173",
+            "http://[::1]:8080",
+        ] {
+            c.mcp.allowed_origins = vec![good.into()];
+            c.validate().unwrap();
+        }
     }
 
     #[test]

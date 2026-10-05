@@ -136,27 +136,124 @@ fn is_exported(lang: Lang, node: Node<'_>, name: &str, src: &[u8]) -> bool {
         Lang::Java => child_kind_text("modifiers")
             .is_some_and(|m| m.split_whitespace().any(|w| w == "public")),
         Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
-            let mut cur = node.parent();
-            for _ in 0..3 {
-                match cur {
-                    Some(p) if p.kind() == "export_statement" => return true,
-                    Some(p) => cur = p.parent(),
-                    None => break,
-                }
+            if matches!(
+                node.kind(),
+                "method_definition" | "method_signature" | "abstract_method_signature"
+            ) {
+                js_member_exported(node, name, src)
+            } else {
+                js_exported(node)
             }
-            false
         }
         Lang::Text => false,
     }
 }
 
+/// The `export_statement` a JS/TS declaration is exported by: its direct parent, or (for a
+/// `const f = () => …` declarator) its declaration's parent. Nothing further up counts: a
+/// function nested in an exported one is not exported.
+fn export_statement_of(node: Node<'_>) -> Option<Node<'_>> {
+    let parent = node.parent()?;
+    if parent.kind() == "export_statement" {
+        return Some(parent);
+    }
+    if matches!(
+        parent.kind(),
+        "lexical_declaration" | "variable_declaration"
+    ) {
+        return parent.parent().filter(|g| g.kind() == "export_statement");
+    }
+    None
+}
+
+/// Exported, and every enclosing namespace exported too (an `export` inside a namespace that
+/// is not itself exported is visible to that namespace only).
+fn js_exported(node: Node<'_>) -> bool {
+    let Some(export) = export_statement_of(node) else {
+        return false;
+    };
+    let mut cur = export.parent();
+    while let Some(n) = cur {
+        if matches!(n.kind(), "internal_module" | "module") {
+            // `export namespace X {}` parses as an export_statement around the module, or
+            // around an expression_statement holding it.
+            let wrapper = n
+                .parent()
+                .filter(|p| p.kind() == "expression_statement")
+                .unwrap_or(n);
+            if export_statement_of(wrapper).is_none()
+                && wrapper
+                    .parent()
+                    .is_none_or(|p| p.kind() != "export_statement")
+            {
+                return false;
+            }
+        }
+        cur = n.parent();
+    }
+    true
+}
+
+/// A class or interface member is visible outside the module when its type is exported and the
+/// member is not `private`/`protected`/`#private`.
+fn js_member_exported(node: Node<'_>, name: &str, src: &[u8]) -> bool {
+    if name.starts_with('#') {
+        return false;
+    }
+    let mut c = node.walk();
+    let hidden = node.children(&mut c).any(|k| {
+        k.kind() == "accessibility_modifier"
+            && matches!(text_of(k, src).as_str(), "private" | "protected")
+    });
+    if hidden {
+        return false;
+    }
+    // member → class_body / interface_body (object_type) → the type's declaration
+    node.parent()
+        .and_then(|body| body.parent())
+        .is_some_and(js_exported)
+}
+
+/// A Rust attribute's path and arguments, whitespace removed: `#[tokio::test]` →
+/// `("tokio::test", "")`, `#[cfg(not(test))]` → `("cfg", "(not(test))")`.
+fn rust_attribute(text: &str) -> Option<(String, String)> {
+    let inner = text.trim().strip_prefix("#[")?.strip_suffix(']')?;
+    let compact: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
+    let split = compact.find(['(', '=']).unwrap_or(compact.len());
+    let (path, args) = compact.split_at(split);
+    Some((path.to_string(), args.to_string()))
+}
+
+/// The attributes directly above a Rust item (doc comments in between are skipped).
+fn rust_attributes(node: Node<'_>, src: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut cur = node.prev_sibling();
+    while let Some(p) = cur {
+        match p.kind() {
+            "attribute_item" => {
+                if let Some(a) = rust_attribute(&text_of(p, src)) {
+                    out.push(a);
+                }
+            }
+            "line_comment" | "block_comment" => {}
+            _ => break,
+        }
+        cur = p.prev_sibling();
+    }
+    out
+}
+
+/// `#[test]`, `#[<runtime>::test]` (`tokio`, `async_std`, …) or `#[cfg(test)]`.
+fn rust_is_test(node: Node<'_>, src: &[u8]) -> bool {
+    rust_attributes(node, src).iter().any(|(path, args)| {
+        path == "test" || path.ends_with("::test") || (path == "cfg" && args == "(test)")
+    })
+}
+
 /// Per-language test-function heuristics (`def_flags::TEST`).
 fn is_test(lang: Lang, path: &str, node: Node<'_>, name: &str, src: &[u8]) -> bool {
     match lang {
-        Lang::Rust => node
-            .prev_named_sibling()
-            .filter(|p| p.kind() == "attribute_item")
-            .is_some_and(|p| text_of(p, src).contains("test")),
+        Lang::Rust => rust_is_test(node, src),
         Lang::Go => {
             path.ends_with("_test.go")
                 && ["Test", "Benchmark", "Example", "Fuzz"]
@@ -540,7 +637,12 @@ fn build_records(lang: Lang, cands: Vec<Candidate>, scopes: &[Scope]) -> (Vec<De
             if c.exported {
                 flags |= def_flags::EXPORTED;
             }
-            if c.test {
+            // Inside a test module (`#[cfg(test)] mod tests`) everything is test code.
+            let in_test_module = ch.iter().any(|it| {
+                matches!(it, Item::Def(p)
+                    if defs.get(*p).is_some_and(|(a, k)| *k == DefKind::Module && a.test))
+            });
+            if c.test || in_test_module {
                 flags |= def_flags::TEST;
             }
             Def {
