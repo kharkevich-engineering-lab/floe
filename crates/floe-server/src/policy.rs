@@ -668,12 +668,31 @@ fn policy_etag(version: Option<&floe_store::Version>) -> String {
     format!("\"{}\"", version.map_or("none", floe_store::Version::as_str))
 }
 
-/// `If-Match` of a policy write: `None` = unconditional; `Some(None)` = the
-/// file must not exist; `Some(Some(v))` = it must be at version `v`.
-fn if_match(headers: &HeaderMap) -> Option<Option<floe_store::Version>> {
-    let v = headers.get(axum::http::header::IF_MATCH)?.to_str().ok()?.trim();
-    let v = v.trim_start_matches("W/").trim_matches('"');
-    Some((v != "none").then(|| floe_store::Version::new(v)))
+/// The precondition of a policy write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expected {
+    /// Unconditional (D24's original write).
+    Any,
+    /// The file must not exist (`If-Match: "none"`).
+    Absent,
+    /// The file must be at this version (`If-Match: "<etag>"`).
+    At(floe_store::Version),
+}
+
+/// The precondition an `If-Match` header asks for.
+fn if_match(headers: &HeaderMap) -> Expected {
+    let Some(v) = headers
+        .get(axum::http::header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return Expected::Any;
+    };
+    let v = v.trim().trim_start_matches("W/").trim_matches('"');
+    if v == "none" {
+        Expected::Absent
+    } else {
+        Expected::At(floe_store::Version::new(v))
+    }
 }
 
 /// Parse + validate a policy document (Settings tab validate / dry-run).
@@ -691,25 +710,25 @@ fn parse_bytes(bytes: &[u8]) -> Result<RepoPolicy, StoreError> {
 }
 
 pub async fn save(store: &DynStore, id: &RepoId, policy: &RepoPolicy) -> Result<(), StoreError> {
-    save_if(store, id, policy, None).await
+    save_if(store, id, policy, Expected::Any).await
 }
 
-/// [`save`] with a precondition (see [`if_match`]): a policy changed since the
+/// [`save`] with a precondition ([`Expected`]): a policy changed since the
 /// editor read it is `PreconditionFailed`, never overwritten.
 pub async fn save_if(
     store: &DynStore,
     id: &RepoId,
     policy: &RepoPolicy,
-    expected: Option<Option<floe_store::Version>>,
+    expected: Expected,
 ) -> Result<(), StoreError> {
     policy.validate().map_err(StoreError::InvalidArgument)?;
     let key = store_key(id);
     let body = serde_json::to_vec_pretty(policy)
         .map_err(|e| StoreError::InvalidArgument(format!("encode policy: {e}")))?;
     let mode = match expected {
-        None => PutMode::Overwrite,
-        Some(None) => PutMode::Create,
-        Some(Some(v)) => PutMode::Update(v),
+        Expected::Any => PutMode::Overwrite,
+        Expected::Absent => PutMode::Create,
+        Expected::At(v) => PutMode::Update(v),
     };
     store.put(&key, PutBody::from(body), mode.into()).await?;
     Ok(())
