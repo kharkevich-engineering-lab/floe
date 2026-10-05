@@ -68,10 +68,7 @@ pub fn extractor(lang: Lang) -> String {
         (Some(v), Some(q)) => {
             let digest = Sha256::digest(q.as_bytes());
             let sha8 = hex::encode(digest.get(..4).unwrap_or_default());
-            format!(
-                "{EXTRACTOR_FAMILY};{CHUNKER_ID};{}={v}@{sha8}",
-                lang.name()
-            )
+            format!("{EXTRACTOR_FAMILY};{CHUNKER_ID};{}={v}@{sha8}", lang.name())
         }
         _ => format!("{EXTRACTOR_FAMILY};{CHUNKER_ID};{}", Lang::Text.name()),
     }
@@ -93,7 +90,10 @@ mod tests {
 
     #[test]
     fn chunker_string_names_the_budget() {
-        assert_eq!(CHUNKER, format!("{CHUNKER_ID};budget={CHUNK_BUDGET_NWS}nws"));
+        assert_eq!(
+            CHUNKER,
+            format!("{CHUNKER_ID};budget={CHUNK_BUDGET_NWS}nws")
+        );
     }
 
     /// The version constants must follow the exact pins in Cargo.toml: a grammar bump that
@@ -109,7 +109,11 @@ mod tests {
             let v = line.split("version = \"=").nth(1).unwrap();
             v.split('"').next().unwrap().to_string()
         };
-        assert_eq!(pin("tree-sitter"), TREE_SITTER_VERSION, "bump EXTRACTOR_FAMILY too");
+        assert_eq!(
+            pin("tree-sitter"),
+            TREE_SITTER_VERSION,
+            "bump EXTRACTOR_FAMILY too"
+        );
         for (krate, lang) in [
             ("tree-sitter-rust", Lang::Rust),
             ("tree-sitter-go", Lang::Go),

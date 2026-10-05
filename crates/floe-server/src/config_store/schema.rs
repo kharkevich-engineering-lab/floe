@@ -351,11 +351,106 @@ const ANNOTATIONS: &[(&str, &str, &str, &str, &str)] = &[
         "duration",
         "Webhook",
     ),
+    // --- codeintel (D52; restart-only) ---
+    (
+        "codeintel.enabled",
+        "Code intelligence",
+        "Index what this fleet maintains and serve it (needs a binary built with --features codeintel).",
+        "",
+        "General",
+    ),
+    (
+        "codeintel.default_enabled",
+        "Index repositories by default",
+        "A repository's settings ([codeintel] enabled) override this per repository.",
+        "",
+        "General",
+    ),
+    (
+        "codeintel.refs",
+        "Indexed refs",
+        "HEAD or ref patterns under refs/ whose tips are indexed; refs/archive/* and refs/follow/* never are.",
+        "refpattern",
+        "Selection",
+    ),
+    (
+        "codeintel.exclude",
+        "Exclude",
+        "Path globs never indexed (on top of .gitattributes linguist-vendored/-generated).",
+        "glob",
+        "Selection",
+    ),
+    (
+        "codeintel.max_file_bytes",
+        "Max file size",
+        "Larger files are not indexed (read and grep through git only).",
+        "bytesize",
+        "Selection",
+    ),
+    (
+        "codeintel.require_catalog",
+        "Require the catalog",
+        "Write facts and embeddings to the code.* Iceberg tables (needs catalog.enabled); off = standalone.",
+        "",
+        "Storage",
+    ),
+    (
+        "codeintel.cache_bytes",
+        "Shard cache",
+        "Local shard cache, counted inside cache.max_bytes.",
+        "bytesize",
+        "Storage",
+    ),
+    (
+        "codeintel.retention",
+        "Retention",
+        "GC keeps retired generations this long; at least mcp.snapshot_ttl + 1h.",
+        "duration",
+        "Storage",
+    ),
+    (
+        "codeintel.head_ttl",
+        "Head revalidation",
+        "A cached head.pb older than this is revalidated before use.",
+        "duration",
+        "Storage",
+    ),
+    // --- mcp (D55; restart-only; the HMAC key is server.auth.mcp_handle_secret) ---
+    (
+        "mcp.enabled",
+        "MCP endpoints",
+        "Serve /api/v1/mcp and /{owner}/{repo}/mcp (needs --features mcp, codeintel.enabled and server.auth.mcp_handle_secret or session_secret).",
+        "",
+        "General",
+    ),
+    (
+        "mcp.allowed_origins",
+        "Allowed origins",
+        "Browser origins allowed to call the endpoints; empty = server.public_url.",
+        "url",
+        "Access",
+    ),
+    (
+        "mcp.snapshot_ttl",
+        "Snapshot lifetime",
+        "Lifetime of a pinned snapshot handle (D57).",
+        "duration",
+        "Handles",
+    ),
+    (
+        "mcp.min_handle_ttl",
+        "Minimum handle lifetime",
+        "pin refuses a retired generation with less lifetime left.",
+        "duration",
+        "Handles",
+    ),
 ];
 
 const ENUMS: &[(&str, &[&str])] = &[
     ("github_mirror.on_rewrite", &["archive", "refuse"]),
     ("catalog.auth", &["none", "bearer", "sigv4"]),
+    ("codeintel.embed.provider", &["none", "local", "http"]),
+    ("mcp.query_log", &["off", "sampled", "all"]),
 ];
 
 /// Optional keys whose default is `null`, and the type they take when set.
@@ -387,6 +482,29 @@ fn secret_schema(nullable: bool) -> Value {
         v.push(json!({"type": "null"}));
     }
     json!({ "oneOf": v })
+}
+
+/// A table of the document (a section, or a sub-table such as `codeintel.embed`).
+fn object_schema(path: &str, body: &Value) -> Value {
+    let mut props = Map::new();
+    if let Some(fields) = body.as_object() {
+        for (key, default) in fields {
+            let p = format!("{path}.{key}");
+            let schema = if default.is_object() && !SECRET_PATHS.contains(&p.as_str()) {
+                object_schema(&p, default)
+            } else {
+                property(&p, default)
+            };
+            props.insert(key.clone(), schema);
+        }
+    }
+    json!({
+        "type": "object",
+        "title": section_title(path),
+        "additionalProperties": false,
+        "properties": props,
+        "x-floe": {"live": live(path)},
+    })
 }
 
 fn property(path: &str, default: &Value) -> Value {
@@ -435,22 +553,7 @@ pub fn document_schema() -> Value {
     let mut sections = Map::new();
     if let Some(top) = defaults.as_object() {
         for (section, body) in top {
-            let mut props = Map::new();
-            if let Some(fields) = body.as_object() {
-                for (key, default) in fields {
-                    props.insert(key.clone(), property(&format!("{section}.{key}"), default));
-                }
-            }
-            sections.insert(
-                section.clone(),
-                json!({
-                    "type": "object",
-                    "title": section_title(section),
-                    "additionalProperties": false,
-                    "properties": props,
-                    "x-floe": {"live": live(section)},
-                }),
-            );
+            sections.insert(section.clone(), object_schema(section, body));
         }
     }
     json!({
@@ -468,6 +571,10 @@ fn section_title(section: &str) -> &str {
         "github_mirror" => "GitHub mirroring",
         "catalog" => "Catalog (Iceberg audit tables)",
         "events" => "Events webhook",
+        "codeintel" => "Code intelligence",
+        "codeintel.embed" => "Embeddings",
+        "codeintel.catalog" => "Code tables (Iceberg)",
+        "mcp" => "MCP endpoints",
         other => other,
     }
 }
@@ -481,21 +588,44 @@ mod tests {
     fn schema_covers_the_document() {
         let s = document_schema();
         let defaults = RuntimeConfig::default().to_json().unwrap();
-        for (section, body) in defaults.as_object().unwrap() {
-            for key in body.as_object().unwrap().keys() {
-                assert!(
-                    s["properties"][section]["properties"].get(key).is_some(),
-                    "{section}.{key} missing from the schema"
-                );
+        fn walk(schema: &Value, doc: &Value, path: &str) {
+            for (key, v) in doc.as_object().unwrap() {
+                let node = schema["properties"].get(key);
+                assert!(node.is_some(), "{path}.{key} missing from the schema");
+                let p = format!("{path}.{key}");
+                if v.is_object() && !SECRET_PATHS.contains(&p.as_str()) {
+                    assert_eq!(node.unwrap()["type"], "object", "{p}");
+                    walk(node.unwrap(), v, &p);
+                }
             }
         }
-        for (path, ..) in ANNOTATIONS {
-            let (section, key) = path.split_once('.').unwrap();
-            assert!(
-                defaults[section].get(key).is_some(),
-                "stale annotation {path}"
-            );
+        for (section, body) in defaults.as_object().unwrap() {
+            walk(&s["properties"][section], body, section);
         }
+        for (path, ..) in ANNOTATIONS {
+            let found = path.split('.').try_fold(&defaults, |v, part| v.get(part));
+            assert!(found.is_some(), "stale annotation {path}");
+        }
+        // Nested tables and runtime code-intel sections (D52, D55): restart-only, typed.
+        let ci = &s["properties"]["codeintel"];
+        assert_eq!(ci["x-floe"]["live"], false);
+        assert_eq!(
+            ci["properties"]["embed"]["properties"]["provider"]["enum"][0],
+            "none"
+        );
+        assert_eq!(
+            ci["properties"]["retention"]["x-floe"]["format"],
+            "duration"
+        );
+        assert_eq!(
+            s["properties"]["mcp"]["properties"]["enabled"]["x-floe"]["live"],
+            false
+        );
+        assert!(
+            s["properties"]["mcp"]["properties"]
+                .get("handle_secret")
+                .is_none()
+        );
         let token = &s["properties"]["github_mirror"]["properties"]["token"];
         assert_eq!(token["x-floe"]["format"], "secret");
         assert_eq!(token["x-floe"]["live"], true);

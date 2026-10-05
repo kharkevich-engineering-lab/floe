@@ -1,7 +1,12 @@
 //! `[codeintel]`, `[codeintel.embed]`, `[codeintel.catalog]`, `[mcp]` and `[access]`
 //! (`docs/design/code-intelligence.md` §11, D52–D58).
 //!
-//! The sections are always parsed, whatever the binary was built with, so a config file never
+//! `[codeintel]` and `[mcp]` are runtime sections (D60): they live in the versioned config
+//! document (`RuntimeConfig`), never in `floe.toml`; the MCP HMAC key is the bootstrap
+//! `server.auth.mcp_handle_secret`. `[access]` is a host default in the file, overridable per
+//! repository (D24) like `[bundles]`.
+//!
+//! The sections are always parsed, whatever the binary was built with, so a config never
 //! depends on cargo features. What the binary can *do* is checked separately by
 //! [`Config::validate_build`] against the [`BuildFeatures`] the server reports: a key that needs
 //! a feature this build lacks is a fatal error naming the build flag.
@@ -234,10 +239,6 @@ pub struct McpConfig {
     /// `pin` refuses a retired generation with less lifetime left than this.
     #[serde(with = "humantime_serde")]
     pub min_handle_ttl: Duration,
-    /// HMAC key (≥ 32 bytes, the same on every serving host) for snapshot handles and
-    /// cursors. Unset or empty = derived from `server.auth.session_secret`. Prefer
-    /// `FLOE__MCP__HANDLE_SECRET` over the file.
-    pub handle_secret: Option<String>,
     pub semantic_deadline_ms: u32,
     pub max_concurrent_per_principal: u32,
     pub query_log: QueryLog,
@@ -254,7 +255,6 @@ impl Default for McpConfig {
             scopes: vec!["floe.code.read".into(), "floe.code.admin".into()],
             snapshot_ttl: Duration::from_hours(24),
             min_handle_ttl: Duration::from_mins(10),
-            handle_secret: None,
             semantic_deadline_ms: 40,
             max_concurrent_per_principal: 8,
             query_log: QueryLog::Sampled,
@@ -297,7 +297,7 @@ pub struct BuildFeatures {
     pub embed_http: bool,
 }
 
-/// The minimum length of an HMAC key (`mcp.handle_secret`, `server.auth.session_secret`).
+/// The minimum length of an HMAC key (`server.auth.mcp_handle_secret`, `session_secret`).
 const MIN_SECRET_BYTES: usize = 32;
 
 fn is_env_var_name(s: &str) -> bool {
@@ -329,6 +329,141 @@ fn validate_access_entry(e: &str) -> Result<()> {
     Ok(())
 }
 
+/// The rules of the `[codeintel]` and `[mcp]` sections on their own (§11): what the config
+/// document must satisfy on every host (`RuntimeConfig::validate`). Host-coupled rules
+/// (auth, listener, cache budget, the catalog) are `Config::validate_codeintel`'s.
+pub(crate) fn check_document(ci: &CodeIntelConfig, mcp: &McpConfig) -> Result<()> {
+    // §3.4: a live record must outlive every handle that can name it by ≥ 1 h.
+    let min_retention = mcp.snapshot_ttl.saturating_add(Duration::from_hours(1));
+    anyhow::ensure!(
+        ci.retention >= min_retention,
+        "codeintel.retention ({}) must be at least mcp.snapshot_ttl + 1h ({}): GC would delete generations a snapshot handle can still name",
+        humantime::format_duration(ci.retention),
+        humantime::format_duration(min_retention)
+    );
+    anyhow::ensure!(ci.max_refs >= 1, "codeintel.max_refs must be at least 1");
+    for r in &ci.refs {
+        anyhow::ensure!(
+            r == "HEAD" || (r.starts_with("refs/") && !r.ends_with('/')),
+            "codeintel.refs entries are HEAD or ref patterns under refs/ (got {r:?})"
+        );
+        anyhow::ensure!(
+            !r.starts_with("refs/archive/") && !r.starts_with("refs/follow/"),
+            "codeintel.refs: {r:?} is never indexed (refs/archive/* and refs/follow/* are excluded)"
+        );
+    }
+    for g in ci.exclude.iter().chain(&ci.prewarm) {
+        anyhow::ensure!(
+            !g.trim().is_empty(),
+            "codeintel.exclude / codeintel.prewarm entries must not be empty"
+        );
+    }
+    anyhow::ensure!(
+        ci.max_file_bytes.as_u64() > 0 && ci.max_file_bytes <= ci.part_max_bytes,
+        "codeintel.max_file_bytes must be > 0 and <= codeintel.part_max_bytes"
+    );
+    anyhow::ensure!(
+        ci.delta_max_ratio > 0.0 && ci.delta_max_ratio <= 1.0,
+        "codeintel.delta_max_ratio must be in (0, 1] (got {})",
+        ci.delta_max_ratio
+    );
+    anyhow::ensure!(
+        ci.delta_max_files >= 1 && ci.recent_max >= 1 && ci.adhoc_max_files >= 1,
+        "codeintel.delta_max_files, recent_max and adhoc_max_files must be at least 1"
+    );
+    anyhow::ensure!(
+        ci.catalog.flush_rows > 0 && !ci.catalog.flush_interval.is_zero(),
+        "codeintel.catalog.flush_rows and flush_interval must be > 0"
+    );
+    anyhow::ensure!(
+        !ci.catalog.table_bucket.is_empty() && !ci.catalog.namespace.is_empty(),
+        "codeintel.catalog.table_bucket and namespace must not be empty"
+    );
+    if ci.enabled {
+        anyhow::ensure!(
+            !ci.refs.is_empty(),
+            "codeintel.refs must list at least one ref pattern when codeintel.enabled"
+        );
+    }
+
+    let e = &ci.embed;
+    anyhow::ensure!(
+        e.batch >= 1 && e.max_rps >= 1,
+        "codeintel.embed.batch and max_rps must be at least 1"
+    );
+    if !e.api_key_env.is_empty() {
+        anyhow::ensure!(
+            is_env_var_name(&e.api_key_env),
+            "codeintel.embed.api_key_env names an environment variable (A-Z, 0-9, _), never the key itself"
+        );
+    }
+    match e.provider {
+        EmbedProvider::None => {}
+        EmbedProvider::Local => anyhow::ensure!(
+            !e.model_object.is_empty(),
+            "codeintel.embed.provider = \"local\" needs codeintel.embed.model_object (the pinned weights in the bucket; nothing is downloaded at runtime)"
+        ),
+        EmbedProvider::Http => {
+            anyhow::ensure!(
+                e.http_url.starts_with("https://") || e.http_url.starts_with("http://"),
+                "codeintel.embed.provider = \"http\" needs codeintel.embed.http_url (an http(s) URL)"
+            );
+            anyhow::ensure!(
+                !e.http_model.is_empty(),
+                "codeintel.embed.provider = \"http\" needs codeintel.embed.http_model"
+            );
+            if !ci.embed_remote {
+                tracing::warn!(
+                    "codeintel.embed.provider = \"http\": only repositories whose settings set [codeintel] embed_remote = true are sent to it (§6.5)"
+                );
+            }
+        }
+    }
+    if ci.enabled && e.provider != EmbedProvider::None && !ci.require_catalog {
+        tracing::warn!(
+            "codeintel.require_catalog = false: embeddings live only in vector artifacts; a lost artifact means re-embedding"
+        );
+    }
+
+    anyhow::ensure!(
+        !mcp.snapshot_ttl.is_zero() && mcp.min_handle_ttl < mcp.snapshot_ttl,
+        "mcp.snapshot_ttl must be > 0 and longer than mcp.min_handle_ttl"
+    );
+    anyhow::ensure!(
+        mcp.semantic_deadline_ms >= 1 && mcp.max_concurrent_per_principal >= 1,
+        "mcp.semantic_deadline_ms and max_concurrent_per_principal must be at least 1"
+    );
+    for o in &mcp.allowed_origins {
+        anyhow::ensure!(
+            (o.starts_with("https://") || o.starts_with("http://"))
+                && !o.trim_end_matches('/').contains("/*")
+                && !o.ends_with('/'),
+            "mcp.allowed_origins entries are origins with a scheme and no path (got {o:?})"
+        );
+    }
+    for (key, list) in [
+        ("mcp.allowed_hosts", &mcp.allowed_hosts),
+        ("mcp.audiences", &mcp.audiences),
+        ("mcp.scopes", &mcp.scopes),
+    ] {
+        anyhow::ensure!(
+            list.iter().all(|v| !v.trim().is_empty()),
+            "{key} entries must not be empty"
+        );
+    }
+    if mcp.enabled {
+        anyhow::ensure!(
+            ci.enabled,
+            "mcp.enabled serves code intelligence: it needs codeintel.enabled"
+        );
+        anyhow::ensure!(
+            mcp.scopes.iter().any(|s| s == "floe.code.read"),
+            "mcp.scopes must include floe.code.read"
+        );
+    }
+    Ok(())
+}
+
 impl Config {
     /// Whether code intelligence covers this (effective, per-repository) configuration:
     /// the host switch and the repository's own switch (`[codeintel] enabled` in its
@@ -337,66 +472,15 @@ impl Config {
         self.codeintel.enabled && self.codeintel.default_enabled
     }
 
-    /// The fail-closed rules of `[codeintel]`, `[mcp]` and `[access]` (§11). Pure config
-    /// consistency; what the binary can run is [`Config::validate_build`].
+    /// The fail-closed rules of `[codeintel]`, `[mcp]` and `[access]` (§11) that involve this
+    /// host's bootstrap (auth, listener, cache, the catalog): run on the effective config. The
+    /// sections' own rules are [`check_document`]; what the binary can run is
+    /// [`Config::validate_build`].
     pub(crate) fn validate_codeintel(&self) -> Result<()> {
         let ci = &self.codeintel;
         let mcp = &self.mcp;
-
-        // §3.4: a live record must outlive every handle that can name it by ≥ 1 h.
-        let min_retention = mcp.snapshot_ttl.saturating_add(Duration::from_hours(1));
-        anyhow::ensure!(
-            ci.retention >= min_retention,
-            "codeintel.retention ({}) must be at least mcp.snapshot_ttl + 1h ({}): GC would delete generations a snapshot handle can still name",
-            humantime::format_duration(ci.retention),
-            humantime::format_duration(min_retention)
-        );
-        anyhow::ensure!(
-            ci.max_refs >= 1,
-            "codeintel.max_refs must be at least 1"
-        );
-        for r in &ci.refs {
-            anyhow::ensure!(
-                r == "HEAD" || (r.starts_with("refs/") && !r.ends_with('/')),
-                "codeintel.refs entries are HEAD or ref patterns under refs/ (got {r:?})"
-            );
-            anyhow::ensure!(
-                !r.starts_with("refs/archive/") && !r.starts_with("refs/follow/"),
-                "codeintel.refs: {r:?} is never indexed (refs/archive/* and refs/follow/* are excluded)"
-            );
-        }
-        for g in ci.exclude.iter().chain(&ci.prewarm) {
-            anyhow::ensure!(
-                !g.trim().is_empty(),
-                "codeintel.exclude / codeintel.prewarm entries must not be empty"
-            );
-        }
-        anyhow::ensure!(
-            ci.max_file_bytes.as_u64() > 0 && ci.max_file_bytes <= ci.part_max_bytes,
-            "codeintel.max_file_bytes must be > 0 and <= codeintel.part_max_bytes"
-        );
-        anyhow::ensure!(
-            ci.delta_max_ratio > 0.0 && ci.delta_max_ratio <= 1.0,
-            "codeintel.delta_max_ratio must be in (0, 1] (got {})",
-            ci.delta_max_ratio
-        );
-        anyhow::ensure!(
-            ci.delta_max_files >= 1 && ci.recent_max >= 1 && ci.adhoc_max_files >= 1,
-            "codeintel.delta_max_files, recent_max and adhoc_max_files must be at least 1"
-        );
-        anyhow::ensure!(
-            ci.catalog.flush_rows > 0 && !ci.catalog.flush_interval.is_zero(),
-            "codeintel.catalog.flush_rows and flush_interval must be > 0"
-        );
-        anyhow::ensure!(
-            !ci.catalog.table_bucket.is_empty() && !ci.catalog.namespace.is_empty(),
-            "codeintel.catalog.table_bucket and namespace must not be empty"
-        );
+        check_document(ci, mcp)?;
         if ci.enabled {
-            anyhow::ensure!(
-                !ci.refs.is_empty(),
-                "codeintel.refs must list at least one ref pattern when codeintel.enabled"
-            );
             if !self.cache_is_disk() {
                 anyhow::ensure!(
                     ci.cache_bytes <= self.cache.max_bytes,
@@ -405,98 +489,20 @@ impl Config {
                     self.cache.max_bytes
                 );
             }
-            // The Iceberg catalog connection is not part of this build yet (it arrives with
-            // the github-mirror design's [catalog] section, D50). Until then only the
-            // standalone shape can run.
             anyhow::ensure!(
-                !ci.require_catalog,
-                "codeintel.require_catalog = true needs the Iceberg catalog ([catalog], D50), which this build does not configure; set codeintel.require_catalog = false (standalone: shards from git only)"
+                !ci.require_catalog || self.catalog.enabled,
+                "codeintel.require_catalog = true needs the Iceberg catalog (catalog.enabled, D50); set codeintel.require_catalog = false for the standalone shape (shards from git only)"
             );
         }
-
-        let e = &ci.embed;
-        anyhow::ensure!(
-            e.batch >= 1 && e.max_rps >= 1,
-            "codeintel.embed.batch and max_rps must be at least 1"
-        );
-        if !e.api_key_env.is_empty() {
-            anyhow::ensure!(
-                is_env_var_name(&e.api_key_env),
-                "codeintel.embed.api_key_env names an environment variable (A-Z, 0-9, _), never the key itself"
-            );
-        }
-        match e.provider {
-            EmbedProvider::None => {}
-            EmbedProvider::Local => anyhow::ensure!(
-                !e.model_object.is_empty(),
-                "codeintel.embed.provider = \"local\" needs codeintel.embed.model_object (the pinned weights in the bucket; nothing is downloaded at runtime)"
-            ),
-            EmbedProvider::Http => {
-                anyhow::ensure!(
-                    e.http_url.starts_with("https://") || e.http_url.starts_with("http://"),
-                    "codeintel.embed.provider = \"http\" needs codeintel.embed.http_url (an http(s) URL)"
-                );
-                anyhow::ensure!(
-                    !e.http_model.is_empty(),
-                    "codeintel.embed.provider = \"http\" needs codeintel.embed.http_model"
-                );
-                if !ci.embed_remote {
-                    tracing::warn!(
-                        "codeintel.embed.provider = \"http\": only repositories whose settings set [codeintel] embed_remote = true are sent to it (§6.5)"
-                    );
-                }
-            }
-        }
-        if ci.enabled && e.provider != EmbedProvider::None && !ci.require_catalog {
-            tracing::warn!(
-                "codeintel.require_catalog = false: embeddings live only in vector artifacts; a lost artifact means re-embedding"
-            );
-        }
-
-        // [mcp]
-        let handle_secret = mcp.handle_secret.as_deref().filter(|s| !s.is_empty());
+        let auth = &self.server.auth;
+        let handle_secret = auth.mcp_handle_secret.as_deref().filter(|s| !s.is_empty());
         if let Some(s) = handle_secret {
             anyhow::ensure!(
                 s.len() >= MIN_SECRET_BYTES,
-                "mcp.handle_secret must be at least {MIN_SECRET_BYTES} bytes when set"
-            );
-        }
-        anyhow::ensure!(
-            !mcp.snapshot_ttl.is_zero() && mcp.min_handle_ttl < mcp.snapshot_ttl,
-            "mcp.snapshot_ttl must be > 0 and longer than mcp.min_handle_ttl"
-        );
-        anyhow::ensure!(
-            mcp.semantic_deadline_ms >= 1 && mcp.max_concurrent_per_principal >= 1,
-            "mcp.semantic_deadline_ms and max_concurrent_per_principal must be at least 1"
-        );
-        for o in &mcp.allowed_origins {
-            anyhow::ensure!(
-                (o.starts_with("https://") || o.starts_with("http://"))
-                    && !o.trim_end_matches('/').contains("/*")
-                    && !o.ends_with('/'),
-                "mcp.allowed_origins entries are origins with a scheme and no path (got {o:?})"
-            );
-        }
-        for (key, list) in [
-            ("mcp.allowed_hosts", &mcp.allowed_hosts),
-            ("mcp.audiences", &mcp.audiences),
-            ("mcp.scopes", &mcp.scopes),
-        ] {
-            anyhow::ensure!(
-                list.iter().all(|v| !v.trim().is_empty()),
-                "{key} entries must not be empty"
+                "server.auth.mcp_handle_secret must be at least {MIN_SECRET_BYTES} bytes when set"
             );
         }
         if mcp.enabled {
-            anyhow::ensure!(
-                ci.enabled,
-                "mcp.enabled serves code intelligence: it needs codeintel.enabled"
-            );
-            anyhow::ensure!(
-                mcp.scopes.iter().any(|s| s == "floe.code.read"),
-                "mcp.scopes must include floe.code.read"
-            );
-            let auth = &self.server.auth;
             anyhow::ensure!(
                 auth.mode != AuthMode::None || self.server.listen.ip().is_loopback(),
                 "mcp.enabled with server.auth.mode = \"none\" is loopback-only (listen is {}): every agent would read every repository",
@@ -505,7 +511,7 @@ impl Config {
             let session = auth.session_secret.as_deref().filter(|s| !s.is_empty());
             anyhow::ensure!(
                 handle_secret.is_some() || session.is_some_and(|s| s.len() >= MIN_SECRET_BYTES),
-                "mcp.enabled needs an HMAC key for snapshot handles and cursors: set mcp.handle_secret (>= {MIN_SECRET_BYTES} bytes, the same on every host; FLOE__MCP__HANDLE_SECRET) or server.auth.session_secret"
+                "mcp.enabled needs an HMAC key for snapshot handles and cursors: set server.auth.mcp_handle_secret (>= {MIN_SECRET_BYTES} bytes, the same on every host; FLOE__SERVER__AUTH__MCP_HANDLE_SECRET) or server.auth.session_secret"
             );
             if matches!(auth.mode, AuthMode::Oidc | AuthMode::Token) {
                 anyhow::ensure!(
@@ -605,7 +611,8 @@ enabled = true
 require_catalog = false
 [mcp]
 enabled = true
-handle_secret = "0123456789abcdef0123456789abcdef"
+[server.auth]
+mcp_handle_secret = "0123456789abcdef0123456789abcdef"
 "#;
 
     const SECRET: &str = "0123456789abcdef0123456789abcdef";
@@ -678,13 +685,14 @@ audiences = ["https://floe.example.com/api/v1/mcp"]
 scopes = ["floe.code.read"]
 snapshot_ttl = "12h"
 min_handle_ttl = "5m"
-handle_secret = "0123456789abcdef0123456789abcdef"
 semantic_deadline_ms = 30
 max_concurrent_per_principal = 2
 query_log = "off"
 query_log_text = true
 [access]
 read = ["authenticated"]
+[server.auth]
+mcp_handle_secret = "0123456789abcdef0123456789abcdef"
 "#);
         c.validate().unwrap();
         assert_eq!(c.codeintel.max_file_bytes, ByteSize::mib(2));
@@ -713,21 +721,21 @@ read = ["authenticated"]
     #[test]
     fn mcp_needs_an_hmac_key_of_at_least_32_bytes() {
         let mut c = cfg(ON);
-        c.mcp.handle_secret = None;
-        assert!(err(&c).contains("mcp.handle_secret"), "{}", err(&c));
+        c.server.auth.mcp_handle_secret = None;
+        assert!(err(&c).contains("mcp_handle_secret"), "{}", err(&c));
         // Empty is "unset" (derive from session_secret), not a key.
-        c.mcp.handle_secret = Some(String::new());
-        assert!(err(&c).contains("mcp.handle_secret"), "{}", err(&c));
-        c.mcp.handle_secret = Some("short".into());
+        c.server.auth.mcp_handle_secret = Some(String::new());
+        assert!(err(&c).contains("mcp_handle_secret"), "{}", err(&c));
+        c.server.auth.mcp_handle_secret = Some("short".into());
         assert!(err(&c).contains("at least 32 bytes"), "{}", err(&c));
         // A short handle secret is refused even with MCP off: it would be used later.
         c.mcp.enabled = false;
         assert!(err(&c).contains("at least 32 bytes"), "{}", err(&c));
         c.mcp.enabled = true;
-        c.mcp.handle_secret = None;
+        c.server.auth.mcp_handle_secret = None;
         c.server.auth.session_secret = Some(SECRET.into());
         c.validate().unwrap();
-        c.mcp.handle_secret = Some(SECRET.into());
+        c.server.auth.mcp_handle_secret = Some(SECRET.into());
         c.server.auth.session_secret = None;
         c.validate().unwrap();
     }
@@ -778,7 +786,12 @@ read = ["authenticated"]
     fn codeintel_needs_the_catalog_or_standalone() {
         let mut c = cfg(ON);
         c.codeintel.require_catalog = true;
-        assert!(err(&c).contains("require_catalog"), "{}", err(&c));
+        assert!(err(&c).contains("catalog.enabled"), "{}", err(&c));
+        c.catalog.enabled = true;
+        c.catalog.uri = Some("http://127.0.0.1:9000/iceberg".into());
+        c.catalog.warehouse = Some("floe-catalog".into());
+        c.validate().unwrap();
+        c.catalog.enabled = false;
         // Off, the default require_catalog = true is fine.
         c.codeintel.enabled = false;
         c.mcp.enabled = false;
@@ -835,7 +848,10 @@ read = ["authenticated"]
         let c = cfg(ON);
         c.validate_build(all).unwrap();
         let e = c
-            .validate_build(BuildFeatures { codeintel: false, ..all })
+            .validate_build(BuildFeatures {
+                codeintel: false,
+                ..all
+            })
             .unwrap_err()
             .to_string();
         assert!(e.contains("--features codeintel"), "{e}");
@@ -847,13 +863,19 @@ read = ["authenticated"]
         let mut c = Config::default();
         c.codeintel.embed.provider = EmbedProvider::Local;
         let e = c
-            .validate_build(BuildFeatures { embed_local: false, ..all })
+            .validate_build(BuildFeatures {
+                embed_local: false,
+                ..all
+            })
             .unwrap_err()
             .to_string();
         assert!(e.contains("--features embed-local"), "{e}");
         c.codeintel.embed.provider = EmbedProvider::Http;
         let e = c
-            .validate_build(BuildFeatures { embed_http: false, ..all })
+            .validate_build(BuildFeatures {
+                embed_http: false,
+                ..all
+            })
             .unwrap_err()
             .to_string();
         assert!(e.contains("--features embed-http"), "{e}");
@@ -876,7 +898,13 @@ read = ["authenticated"]
         }
         c.access.read = Vec::new();
         assert!(err(&c).contains("must not be empty"), "{}", err(&c));
-        for good in ["public", "group:eng", "domain:example.com", "email:a@example.com", "robot"] {
+        for good in [
+            "public",
+            "group:eng",
+            "domain:example.com",
+            "email:a@example.com",
+            "robot",
+        ] {
             c.access.read = vec![good.into()];
             assert!(err(&c).contains("not enforced"), "{good}: {}", err(&c));
         }
@@ -888,9 +916,14 @@ read = ["authenticated"]
     fn repository_settings_set_the_repo_switch_and_nothing_host_only() {
         let host = cfg(ON);
         let repo = host
-            .with_settings("[codeintel]\nenabled = false\nrefs = [\"HEAD\", \"refs/heads/release/*\"]\n")
+            .with_settings(
+                "[codeintel]\nenabled = false\nrefs = [\"HEAD\", \"refs/heads/release/*\"]\n",
+            )
             .unwrap();
-        assert!(repo.codeintel.enabled, "the host switch is never set per repo");
+        assert!(
+            repo.codeintel.enabled,
+            "the host switch is never set per repo"
+        );
         assert!(!repo.codeintel_repo_enabled());
         assert_eq!(repo.codeintel.refs.len(), 2);
         // A repo on a host whose default is off can opt in.
@@ -911,7 +944,8 @@ read = ["authenticated"]
         }
         let e = format!(
             "{:#}",
-            host.with_settings("[access]\nread = [\"public\"]\n").unwrap_err()
+            host.with_settings("[access]\nread = [\"public\"]\n")
+                .unwrap_err()
         );
         assert!(e.contains("not enforced"), "{e}");
         host.with_settings("[access]\nread = [\"authenticated\"]\n")
@@ -926,20 +960,64 @@ read = ["authenticated"]
         assert!(shown.contains_key("access") && !shown.contains_key("mcp"));
     }
 
-    /// `floe.example.toml` documents every key with its default (AGENTS §5): the code-intel
-    /// sections there must parse and equal the built-in defaults.
+    /// `floe.example.toml` documents every key with its default (AGENTS §5): `[access]` in the
+    /// file, and the runtime `[codeintel]`/`[mcp]` sections as the commented document form
+    /// `floe config set` takes, both equal to the built-in defaults.
     #[test]
     fn example_toml_documents_the_defaults() {
-        let c: Config = toml::from_str(include_str!("../../../floe.example.toml")).unwrap();
-        let d = Config::default();
+        let text = include_str!("../../../floe.example.toml");
+        let c: Config = toml::from_str(text).unwrap();
+        assert_eq!(c.access.read, Config::default().access.read);
+        // The commented document block: from `# [codeintel]` to the end, uncommented.
+        let start = text.find("\n# [codeintel]").unwrap() + 1;
+        let doc: String = text
+            .get(start..)
+            .unwrap()
+            .lines()
+            .map(|l| {
+                l.strip_prefix("# ")
+                    .or_else(|| l.strip_prefix('#'))
+                    .unwrap_or(l)
+            })
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let rt = crate::RuntimeConfig::from_toml(&doc).unwrap();
+        let d = crate::RuntimeConfig::default();
         assert_eq!(
-            toml::to_string(&c.codeintel).unwrap(),
+            toml::to_string(&rt.codeintel).unwrap(),
             toml::to_string(&d.codeintel).unwrap()
         );
         assert_eq!(
-            toml::to_string(&c.mcp).unwrap(),
+            toml::to_string(&rt.mcp).unwrap(),
             toml::to_string(&d.mcp).unwrap()
         );
-        assert_eq!(c.access.read, d.access.read);
+    }
+
+    /// D60: the sections are runtime — refused in the file, carried by the document, and
+    /// validated there on their own.
+    #[test]
+    fn codeintel_and_mcp_are_runtime_sections() {
+        for section in ["codeintel", "mcp"] {
+            let e = Config::parse(&format!("[{section}]\nenabled = false\n")).unwrap_err();
+            assert!(format!("{e:#}").contains("runtime configuration"), "{e:#}");
+        }
+        let rt = crate::RuntimeConfig::from_toml(
+            "[codeintel]\nenabled = true\nrequire_catalog = false\n[mcp]\nenabled = true\n",
+        )
+        .unwrap();
+        rt.validate().unwrap();
+        // The host supplies the HMAC key; without one the effective config is refused.
+        let e = Config::default().with_runtime(&rt).unwrap_err();
+        assert!(format!("{e:#}").contains("mcp_handle_secret"), "{e:#}");
+        let host = cfg(ON);
+        let eff = host.with_runtime(&rt).unwrap();
+        assert!(eff.codeintel.enabled && eff.mcp.enabled);
+        let bad = crate::RuntimeConfig::from_toml("[mcp]\nenabled = true\n").unwrap();
+        let e = bad.validate().unwrap_err();
+        assert!(
+            format!("{e:#}").contains("needs codeintel.enabled"),
+            "{e:#}"
+        );
+        assert!(crate::RuntimeConfig::from_toml("[mcp]\nhandle_secret = \"x\"\n").is_err());
     }
 }

@@ -220,7 +220,10 @@ mod tests {
             b.extractors.insert(k.into(), v.into());
         }
         assert_eq!(a.encode_to_vec(), b.encode_to_vec());
-        assert_eq!(v1::ShardMeta::decode(a.encode_to_vec().as_slice()).unwrap(), a);
+        assert_eq!(
+            v1::ShardMeta::decode(a.encode_to_vec().as_slice()).unwrap(),
+            a
+        );
 
         let mut head = v1::IndexHead {
             purge_epoch: 2,

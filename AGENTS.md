@@ -632,6 +632,8 @@ records are immutable, and artifact liveness follows generation retirement, neve
 "agent-facing code navigation and search over hosted repositories, as derived, rebuildable artifacts". Everything
 is behind cargo features (`codeintel`, `mcp`), off by default; the default build is unchanged, and a
 `[codeintel]`/`[mcp]` key that needs a feature the binary lacks is a fatal config error naming the build flag.
+`[codeintel]` and `[mcp]` are runtime sections of the config document (D60, restart-only); `[access]` is a
+bootstrap host default overridable per repository (D24).
 The extraction core is the pure library `crates/floe-codeintel` (bytes in, records out: no store, no tokio, no
 axum). Design of record: `docs/design/code-intelligence.md`.
 
@@ -662,8 +664,9 @@ owed, tracked per ref as `catalog_commit`, and re-derived from the published sha
 embeddings must commit to Iceberg before any artifact derived from them is published.
 
 **D57 — Agent state is explicit, signed and re-authorized (2026-10-04).** The snapshot handle pins (repo,
-commit, generation, purge epoch) with an HMAC under a key derived from `mcp.handle_secret` (default
-`server.auth.session_secret`; one of the two, ≥ 32 bytes, is required when MCP is on), lives 24 h, and is
+commit, generation, purge epoch) with an HMAC under a key derived from `server.auth.mcp_handle_secret`
+(a bootstrap key, so never in the config document; default `server.auth.session_secret`; one of the two, ≥ 32
+bytes, is required when MCP is on), lives 24 h, and is
 re-checked against `authorize_read` on every call; continuation cursors are HMAC'd positions; there are no MCP
 sessions; MCP tasks live in the bucket and are durable before `CreateTaskResult` is returned (a `reindex` task is
 durable as a record and as a queued `head.pb` request; queued tasks are judged by their request, running ones by

@@ -477,7 +477,11 @@ impl ConfigStore {
         if errors.is_empty() {
             if let Err(e) = opened.validate() {
                 errors.push(FieldError::from_error(&e));
-            } else if let Err(e) = bootstrap.with_runtime(&opened) {
+            } else if let Err(e) = bootstrap
+                .with_runtime(&opened)
+                .and_then(|eff| crate::check_build(&eff))
+            {
+                // D52: also refuse what this binary cannot run (codeintel/mcp features).
                 errors.push(FieldError::from_error(&e));
             } else if opened.catalog.enabled && !cfg!(feature = "catalog") {
                 errors.push(FieldError::at(

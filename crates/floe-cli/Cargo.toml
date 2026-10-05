@@ -10,6 +10,9 @@ default-run = "floe"
 [features]
 # `floe serve` with the Iceberg audit tables (`[catalog]`, D50).
 catalog = ["floe-server/catalog"]
+# Code intelligence and the MCP endpoints (D52, D55); off by default.
+codeintel = ["floe-server/codeintel"]
+mcp = ["floe-server/mcp"]
 
 [lib]
 name = "floe_cli"
@@ -55,11 +58,6 @@ reqwest.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
 axum.workspace = true
 tempfile.workspace = true
-
-[features]
-# Code intelligence and the MCP endpoints (D52, D55); off by default.
-codeintel = ["floe-server/codeintel"]
-mcp = ["floe-server/mcp"]
 
 [dev-dependencies]
 

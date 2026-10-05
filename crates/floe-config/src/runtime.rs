@@ -11,10 +11,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::secret::{GITHUB_MIRROR_TOKEN_ALIAS, Secret};
-use crate::{CatalogConfig, Config, EventsConfig, GithubMirrorConfig};
+use crate::{CatalogConfig, CodeIntelConfig, Config, EventsConfig, GithubMirrorConfig, McpConfig};
 
 /// The top-level sections of the config document.
-pub const RUNTIME_SECTIONS: &[&str] = &["github_mirror", "catalog", "events"];
+pub const RUNTIME_SECTIONS: &[&str] = &["github_mirror", "catalog", "events", "codeintel", "mcp"];
 
 /// Dotted paths of the document's secret fields (D61).
 pub const SECRET_PATHS: &[&str] = &["github_mirror.token", "events.webhook_secret"];
@@ -22,7 +22,14 @@ pub const SECRET_PATHS: &[&str] = &["github_mirror.token", "events.webhook_secre
 /// Paths (a section or one key) whose change needs a process restart: the
 /// events bridge and the catalog writer are built once per process, and follow
 /// scopes the mirror token to `git_url` from the registry's config.
-pub const RESTART_ONLY: &[&str] = &["catalog", "events", "github_mirror.git_url"];
+/// Code intelligence (D52) and MCP (D55) are built once per process too.
+pub const RESTART_ONLY: &[&str] = &[
+    "catalog",
+    "events",
+    "github_mirror.git_url",
+    "codeintel",
+    "mcp",
+];
 
 /// The config document (`config/current.json` → `document`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -34,6 +41,10 @@ pub struct RuntimeConfig {
     pub catalog: CatalogConfig,
     /// D32: the events bridge's webhook.
     pub events: EventsConfig,
+    /// D52: code intelligence (indexer and serving knobs; a subset is per-repository, D24).
+    pub codeintel: CodeIntelConfig,
+    /// D55: the MCP endpoints (the HMAC key stays in the bootstrap file).
+    pub mcp: McpConfig,
 }
 
 impl RuntimeConfig {
@@ -45,6 +56,7 @@ impl RuntimeConfig {
         }
         self.catalog.validate()?;
         self.events.check()?;
+        crate::codeintel::check_document(&self.codeintel, &self.mcp)?;
         Ok(())
     }
 
@@ -121,6 +133,8 @@ impl RuntimeConfig {
             github_mirror: cfg.github_mirror.clone(),
             catalog: cfg.catalog.clone(),
             events: cfg.events.clone(),
+            codeintel: cfg.codeintel.clone(),
+            mcp: cfg.mcp.clone(),
         }
     }
 }
@@ -144,6 +158,8 @@ impl Config {
         cfg.github_mirror.clone_from(&rt.github_mirror);
         cfg.catalog.clone_from(&rt.catalog);
         cfg.events.clone_from(&rt.events);
+        cfg.codeintel.clone_from(&rt.codeintel);
+        cfg.mcp.clone_from(&rt.mcp);
         // Resolved live through the alias (registered by whoever applies the
         // document); unset resolves to "no token", as an unset variable did.
         cfg.github_mirror.token_env = GITHUB_MIRROR_TOKEN_ALIAS.to_string();

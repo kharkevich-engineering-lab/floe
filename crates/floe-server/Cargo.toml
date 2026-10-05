@@ -11,6 +11,12 @@ publish.workspace = true
 # §C). Off by default: without it the catalog core still compiles (Recorder,
 # rows, cursor), and `catalog.enabled = true` is a fatal startup error.
 catalog = ["floe-catalog/iceberg"]
+# Code intelligence (D52, docs/design/code-intelligence.md). Off by default: the default build
+# is unchanged, and `codeintel.enabled` / `mcp.enabled` in a binary without the feature is a
+# fatal config error naming the flag (`check_build`).
+codeintel = ["dep:floe-codeintel"]
+# The MCP endpoints (D55); implies codeintel.
+mcp = ["codeintel", "dep:rmcp"]
 
 [dependencies]
 humantime.workspace = true
@@ -77,14 +83,6 @@ tempfile.workspace = true
 graphql-parser.workspace = true
 floe-codeintel = { workspace = true, optional = true, features = ["extract", "lang-rust", "lang-go", "lang-python", "lang-typescript", "lang-javascript", "lang-java"] }
 rmcp = { workspace = true, optional = true }
-
-[features]
-# Code intelligence (D52, docs/design/code-intelligence.md). Off by default: the default build
-# is unchanged, and `codeintel.enabled` / `mcp.enabled` in a binary without the feature is a
-# fatal config error naming the flag (`check_build`).
-codeintel = ["dep:floe-codeintel"]
-# The MCP endpoints (D55); implies codeintel.
-mcp = ["codeintel", "dep:rmcp"]
 
 [dev-dependencies]
 reqwest.workspace = true

@@ -266,7 +266,11 @@ impl Ctx<'_, '_> {
         let mut boundary = next;
         let mut lead = None;
         while let Some(last) = acc.last() {
-            let gap = self.text.bytes().get(last.end..boundary).unwrap_or_default();
+            let gap = self
+                .text
+                .bytes()
+                .get(last.end..boundary)
+                .unwrap_or_default();
             let newlines = gap.iter().fold(0usize, |n, &b| n + usize::from(b == b'\n'));
             if !last.comment || newlines > 1 {
                 break;
@@ -343,7 +347,11 @@ fn make_chunk(
         Some(d) => (
             d.qualified.as_str(),
             d.kind.clone(),
-            if start <= d.start { d.signature.as_str() } else { "" },
+            if start <= d.start {
+                d.signature.as_str()
+            } else {
+                ""
+            },
         ),
         None if window => ("", "window".to_string(), ""),
         None => ("", "block".to_string(), ""),
@@ -372,10 +380,7 @@ fn owner(defs: &[ChunkDef], start: usize, end: usize) -> Option<&ChunkDef> {
         .iter()
         .filter(|d| d.start <= start && end <= d.end)
         .max_by_key(|d| (d.start, std::cmp::Reverse(d.end)));
-    containing.or_else(|| {
-        defs.iter()
-            .find(|d| start <= d.start && d.end <= end)
-    })
+    containing.or_else(|| defs.iter().find(|d| start <= d.start && d.end <= end))
 }
 
 /// Chunk a parsed file. `defs` sorted by `(start, Reverse(end))`. The root is always split
@@ -467,7 +472,10 @@ mod tests {
         let lines: Vec<_> = w.iter().map(|c| (c.start_line, c.end_line)).collect();
         assert_eq!(lines, [(1, 50), (41, 90), (81, 100)]);
         assert!(w.iter().all(|c| c.kind == "window" && c.def.is_none()));
-        let want = (1..=50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let want = (1..=50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(
             src.get(w[0].start_byte as usize..w[0].end_byte as usize),
             Some(want.as_str())
@@ -475,7 +483,10 @@ mod tests {
         assert!(chunk_windows(SRC, &Text::new(b"  \n\n\t\n")).is_empty());
         assert!(chunk_windows(SRC, &Text::new(b"")).is_empty());
         let one = chunk_windows(SRC, &Text::new(b"x"));
-        assert_eq!((one[0].start_line, one[0].end_line, one[0].end_byte), (1, 1, 1));
+        assert_eq!(
+            (one[0].start_line, one[0].end_line, one[0].end_byte),
+            (1, 1, 1)
+        );
     }
 
     #[test]
@@ -506,9 +517,17 @@ mod tests {
     #[test]
     fn definitions_are_units_glue_merges_and_comments_attach() {
         let src = "use a;\nuse b;\n\n// doc for f\nfn f() {}\n\nconst X: u8 = 1;\nconst Y: u8 = 2;\nfn g() {}\n";
-        let kids = ["use a;", "use b;", "// doc for f", "fn f() {}", "const X: u8 = 1;", "const Y: u8 = 2;", "fn g() {}"]
-            .map(|n| leaf(src, n))
-            .to_vec();
+        let kids = [
+            "use a;",
+            "use b;",
+            "// doc for f",
+            "fn f() {}",
+            "const X: u8 = 1;",
+            "const Y: u8 = 2;",
+            "fn g() {}",
+        ]
+        .map(|n| leaf(src, n))
+        .to_vec();
         let root = Toy {
             range: (0, src.len()),
             comment: false,
@@ -544,7 +563,12 @@ mod tests {
         let kinds: Vec<_> = chunks.iter().map(|c| (c.kind.as_str(), c.def)).collect();
         assert_eq!(
             kinds,
-            [("block", None), ("function", Some(0)), ("block", None), ("function", Some(1))]
+            [
+                ("block", None),
+                ("function", Some(0)),
+                ("block", None),
+                ("function", Some(1))
+            ]
         );
         assert!(chunks[1].header.ends_with("in: f  sig: fn f() {}\n"));
         assert_eq!((chunks[1].start_line, chunks[1].end_line), (4, 5));

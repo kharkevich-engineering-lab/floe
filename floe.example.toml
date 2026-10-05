@@ -85,6 +85,9 @@ anonymous_read = true             # must be false in oidc mode
 # oauth_client_secret = ""                 #       (set both or neither; use FLOE__SERVER__AUTH__OAUTH_CLIENT_SECRET)
 # session_secret = ""                      # oidc: HMAC key (>= 32 bytes) for the session cookie and issued tokens; shared by
 #                                          #       every host; rotating it signs everyone out and revokes every issued token
+# mcp_handle_secret = ""                   # MCP snapshot handles and cursors (D57): HMAC key (>= 32 bytes, the same on every
+#                                          #       host); prefer FLOE__SERVER__AUTH__MCP_HANDLE_SECRET. Unset = derived from
+#                                          #       session_secret; mcp.enabled (config document) needs one of the two
 # session_ttl = "30d"                      # sliding: re-issued on use once older than ttl/4
 # access_token_ttl = "90d"                 # lifetime of tokens minted at /_auth/tokens
 # audiences = []                           # oidc: `aud` values accepted on bearer ID tokens clients mint themselves;

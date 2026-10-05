@@ -29,7 +29,8 @@ Read `AGENTS.md` first (design §1–§2, decisions §3; the original layout/pha
   placeholder modules `coord.rs`, `gcs.rs`, `s3.rs`.
 - `floe-config`: `Config` for floe.toml (+ `FLOE__` env overrides, `PORT`); `Config::with_settings` accepts
   only `[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`, and `[integrations]` in repo-scoped settings;
-  plus `[codeintel]` (only `CODEINTEL_REPO_KEYS`) and `[access]` (D54). `[codeintel]`/`[mcp]`/`[access]` parse in
+  plus `[codeintel]` (only `CODEINTEL_REPO_KEYS`) and `[access]` (D54). `[codeintel]`/`[mcp]` are
+  `RuntimeConfig` sections (D60); `server.auth.mcp_handle_secret` is bootstrap. They parse in
   every build; `Config::validate_build(BuildFeatures)` refuses keys the binary's features cannot run
   (`floe_server::BUILD_FEATURES`, `floe_server::check_build`).
   `TlsConfig { mode: TlsMode::{Off,Files,Acme}, cert, key, acme: AcmeConfig }` + `TlsConfig::validate` (D59).

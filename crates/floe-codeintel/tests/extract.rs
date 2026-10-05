@@ -33,12 +33,18 @@ const FIXTURES: [(&str, &str, Lang); 8] = [
     ("api.ts", "web/src/api.ts", Lang::TypeScript),
     ("App.tsx", "web/src/App.tsx", Lang::Tsx),
     ("util.js", "lib/util.js", Lang::JavaScript),
-    ("Store.java", "src/main/java/com/acme/Store.java", Lang::Java),
+    (
+        "Store.java",
+        "src/main/java/com/acme/Store.java",
+        Lang::Java,
+    ),
     ("notes.md", "docs/notes.md", Lang::Text),
 ];
 
 fn fixture(name: &str) -> String {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
@@ -80,7 +86,10 @@ fn at(src: &str, line_needle: &str, name: &str) -> (u32, u32) {
                 && !word(line.as_bytes().get(c + name.len()).copied())
         })
         .unwrap_or_else(|| panic!("{name:?} not a word on {line:?}"));
-    (u32::try_from(i + 1).unwrap(), u32::try_from(col + 1).unwrap())
+    (
+        u32::try_from(i + 1).unwrap(),
+        u32::try_from(col + 1).unwrap(),
+    )
 }
 
 fn assert_def_at(src: &str, d: &Def, line_needle: &str) {
@@ -92,7 +101,10 @@ fn assert_def_at(src: &str, d: &Def, line_needle: &str) {
         d.name
     );
     assert_eq!(d.name_range.end_line, line);
-    assert_eq!(d.name_range.end_col, col + u32::try_from(d.name.len()).unwrap());
+    assert_eq!(
+        d.name_range.end_col,
+        col + u32::try_from(d.name.len()).unwrap()
+    );
 }
 
 fn parent_name(f: &FileFacts, d: &Def) -> Option<String> {
@@ -122,7 +134,10 @@ fn check_invariants(src: &str, f: &FileFacts) {
         }
         assert!(d.body_start_byte <= d.body_end_byte && d.body_end_byte as usize <= src.len());
         // The signature is the line holding the name.
-        let line = src.lines().nth(d.name_range.start_line as usize - 1).unwrap();
+        let line = src
+            .lines()
+            .nth(d.name_range.start_line as usize - 1)
+            .unwrap();
         let want: String = line.trim().chars().take(240).collect();
         assert_eq!(want, d.signature);
     }
@@ -144,8 +159,14 @@ fn check_invariants(src: &str, f: &FileFacts) {
     for c in &f.chunks {
         assert!(c.start_byte < c.end_byte && c.end_byte as usize <= src.len());
         let nws = text.nws(c.start_byte as usize, c.end_byte as usize);
-        assert!(nws <= CHUNK_BUDGET_NWS || c.start_line == c.end_line, "{c:?}");
-        assert!(c.header.starts_with(&format!("// path: {}  lang: {}", f.path, f.lang.name())));
+        assert!(
+            nws <= CHUNK_BUDGET_NWS || c.start_line == c.end_line,
+            "{c:?}"
+        );
+        assert!(
+            c.header
+                .starts_with(&format!("// path: {}  lang: {}", f.path, f.lang.name()))
+        );
         if let Some(d) = c.def {
             assert_eq!(c.symbol, f.defs[d as usize].qualified(f.lang));
         }
@@ -223,14 +244,23 @@ fn rust_definitions_references_and_outline() {
     def(&f, "route", DefKind::Macro);
     let util = def(&f, "util", DefKind::Module);
     let normalize = def(&f, "normalize", DefKind::Function);
-    assert_eq!((normalize.container.as_str(), normalize.parent), ("util", Some(util.ordinal)));
+    assert_eq!(
+        (normalize.container.as_str(), normalize.parent),
+        ("util", Some(util.ordinal))
+    );
     let test = def(&f, "routes_nothing", DefKind::Function);
     assert_eq!(test.flags, def_flags::TEST, "#[test], not pub");
 
     assert!(has_ref(&f, "handle", RefKind::Call, Some("route")));
     assert!(has_ref(&f, "get", RefKind::Call, Some("route")));
-    assert!(has_ref(&f, "new", RefKind::Call, Some("new")), "HashMap::new()");
-    assert!(has_ref(&f, "new", RefKind::Call, Some("routes_nothing")), "Router::new()");
+    assert!(
+        has_ref(&f, "new", RefKind::Call, Some("new")),
+        "HashMap::new()"
+    );
+    assert!(
+        has_ref(&f, "new", RefKind::Call, Some("routes_nothing")),
+        "Router::new()"
+    );
     assert!(has_ref(&f, "assert", RefKind::Call, Some("routes_nothing")));
     assert!(has_ref(&f, "Router", RefKind::Implementation, None));
     let r = f.refs.iter().find(|r| r.name == "handle").unwrap();
@@ -238,17 +268,37 @@ fn rust_definitions_references_and_outline() {
     assert_eq!((r.line, r.col, r.end_col), (line, col, col + 6));
 
     // The doc comment above the struct joins its chunk; the impl block is one chunk.
-    let c = f.chunks.iter().find(|c| c.def == Some(router.ordinal)).unwrap();
-    assert!(src.get(c.start_byte as usize..).unwrap().starts_with("/// A route table."));
+    let c = f
+        .chunks
+        .iter()
+        .find(|c| c.def == Some(router.ordinal))
+        .unwrap();
+    assert!(
+        src.get(c.start_byte as usize..)
+            .unwrap()
+            .starts_with("/// A route table.")
+    );
     assert!(c.header.contains("in: Router  sig: pub struct Router {"));
     // A small impl block is one chunk, labelled with its type.
     let c = f.chunks.iter().find(|c| c.kind == "impl").unwrap();
     assert_eq!((c.symbol.as_str(), c.def), ("Router", None));
-    assert!(src.get(c.start_byte as usize..).unwrap().starts_with("impl Router {"));
+    assert!(
+        src.get(c.start_byte as usize..)
+            .unwrap()
+            .starts_with("impl Router {")
+    );
     assert!(c.header.ends_with("in: Router\n"));
     // `#[test]` is part of the test function's chunk.
-    let c = f.chunks.iter().find(|c| c.def == Some(test.ordinal)).unwrap();
-    assert!(src.get(c.start_byte as usize..).unwrap().starts_with("#[test]"));
+    let c = f
+        .chunks
+        .iter()
+        .find(|c| c.def == Some(test.ordinal))
+        .unwrap();
+    assert!(
+        src.get(c.start_byte as usize..)
+            .unwrap()
+            .starts_with("#[test]")
+    );
 }
 
 #[test]
@@ -281,7 +331,10 @@ fn python_classes_methods_and_nesting() {
     assert_def_at(&src, version, "VERSION =");
     let user = def(&f, "User", DefKind::Class);
     let init = def(&f, "__init__", DefKind::Method);
-    assert_eq!((init.container.as_str(), init.parent), ("User", Some(user.ordinal)));
+    assert_eq!(
+        (init.container.as_str(), init.parent),
+        ("User", Some(user.ordinal))
+    );
     assert_eq!(init.flags & def_flags::EXPORTED, 0, "underscore");
     let to_json = def(&f, "to_json", DefKind::Method);
     assert_def_at(&src, to_json, "def to_json");
@@ -349,11 +402,19 @@ fn javascript_docs_classes_and_require() {
     assert_eq!(join.doc, "Joins two segments.");
     let cache = def(&f, "Cache", DefKind::Class);
     let get = def(&f, "get", DefKind::Method);
-    assert_eq!((get.container.as_str(), get.parent), ("Cache", Some(cache.ordinal)));
+    assert_eq!(
+        (get.container.as_str(), get.parent),
+        ("Cache", Some(cache.ordinal))
+    );
     def(&f, "double", DefKind::Function);
-    assert!(!f.refs.iter().any(|r| r.name == "require"), "upstream #not-match?");
+    assert!(
+        !f.refs.iter().any(|r| r.name == "require"),
+        "upstream #not-match?"
+    );
     assert!(has_ref(&f, "join", RefKind::Call, Some("joinAll")));
-    assert!(has_ref(&f, "Map", RefKind::Type, None) || has_ref(&f, "Map", RefKind::Type, Some("Cache")));
+    assert!(
+        has_ref(&f, "Map", RefKind::Type, None) || has_ref(&f, "Map", RefKind::Type, Some("Cache"))
+    );
 }
 
 fn closes_sig(f: &FileFacts) -> &str {
@@ -369,7 +430,10 @@ fn java_classes_methods_and_interfaces() {
     let ctor = def(&f, "Store", DefKind::Method);
     assert_eq!(ctor.parent, Some(store.ordinal));
     let get = def(&f, "get", DefKind::Method);
-    assert_eq!((get.container.as_str(), get.flags), ("Store", def_flags::EXPORTED));
+    assert_eq!(
+        (get.container.as_str(), get.flags),
+        ("Store", def_flags::EXPORTED)
+    );
     // The signature is the name's line, not the `@Override` above it.
     assert_eq!(closes_sig(&f), "public void close() {");
     let put = def(&f, "put", DefKind::Method);
@@ -380,7 +444,12 @@ fn java_classes_methods_and_interfaces() {
     let closes: Vec<&Def> = f.defs.iter().filter(|d| d.name == "close").collect();
     assert_eq!(closes.len(), 2);
     assert_eq!(closes[1].parent, Some(closeable.ordinal));
-    assert!(has_ref(&f, "Closeable", RefKind::Implementation, Some("Store")));
+    assert!(has_ref(
+        &f,
+        "Closeable",
+        RefKind::Implementation,
+        Some("Store")
+    ));
     assert!(has_ref(&f, "get", RefKind::Call, Some("get")));
     assert!(has_ref(&f, "clear", RefKind::Call, Some("close")));
 }
@@ -392,14 +461,24 @@ fn text_files_are_windowed_without_definitions() {
     assert_eq!(f.extractor, "ts-tags/1;cast/1;text");
     assert!(f.defs.is_empty() && f.refs.is_empty());
     assert_eq!(f.chunks.len(), 1);
-    assert_eq!((f.chunks[0].kind.as_str(), f.chunks[0].start_line, f.chunks[0].end_line), ("window", 1, 3));
+    assert_eq!(
+        (
+            f.chunks[0].kind.as_str(),
+            f.chunks[0].start_line,
+            f.chunks[0].end_line
+        ),
+        ("window", 1, 3)
+    );
     // Code without definitions is windowed too.
     let script = (0..120).fold(String::new(), |s, i| s + &format!("print({i})\n"));
     let f = extractor().extract("scripts/run.py", script.as_bytes(), &Attributes::default());
     assert_eq!(f.lang, Lang::Python);
     assert!(f.defs.is_empty());
     assert_eq!(
-        f.chunks.iter().map(|c| (c.start_line, c.end_line)).collect::<Vec<_>>(),
+        f.chunks
+            .iter()
+            .map(|c| (c.start_line, c.end_line))
+            .collect::<Vec<_>>(),
         [(1, 50), (41, 90), (81, 120)]
     );
     assert!(has_ref(&f, "print", RefKind::Call, None));
@@ -433,7 +512,11 @@ fn minified_vendored_generated_and_large_files_are_not_parsed() {
     let f = ex.extract("web/app.js", min.as_bytes(), &Attributes::default());
     assert!(f.flags.contains(FileFlags::MINIFIED));
     assert!(f.defs.is_empty() && f.chunks.is_empty());
-    let f = ex.extract("vendor/x/lib.go", b"package x\nfunc A() {}\n", &Attributes::default());
+    let f = ex.extract(
+        "vendor/x/lib.go",
+        b"package x\nfunc A() {}\n",
+        &Attributes::default(),
+    );
     assert!(f.flags.contains(FileFlags::VENDORED) && f.defs.is_empty());
     let attrs = Attributes::parse("gen/** linguist-generated\n");
     let f = ex.extract("gen/api.rs", b"pub fn a() {}\n", &attrs);
@@ -471,7 +554,11 @@ fn extraction_is_deterministic() {
     second.reverse();
     let third: Vec<String> = inputs
         .iter()
-        .map(|(p, s)| extractor().extract(p, s.as_bytes(), &Attributes::default()).render())
+        .map(|(p, s)| {
+            extractor()
+                .extract(p, s.as_bytes(), &Attributes::default())
+                .render()
+        })
         .collect();
     assert_eq!(first, second);
     assert_eq!(first, third);
@@ -483,8 +570,14 @@ fn extraction_is_deterministic() {
     assert_eq!(x.refs, y.refs);
     assert_ne!(x.chunks[0].hash, y.chunks[0].hash);
     assert_eq!(
-        x.chunks.iter().map(|c| (c.start_byte, c.end_byte)).collect::<Vec<_>>(),
-        y.chunks.iter().map(|c| (c.start_byte, c.end_byte)).collect::<Vec<_>>()
+        x.chunks
+            .iter()
+            .map(|c| (c.start_byte, c.end_byte))
+            .collect::<Vec<_>>(),
+        y.chunks
+            .iter()
+            .map(|c| (c.start_byte, c.end_byte))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -492,7 +585,10 @@ fn extraction_is_deterministic() {
 fn shard_meta_extractors_cover_every_language_of_the_build() {
     let all = version::extractors();
     for (_, _, lang) in FIXTURES {
-        assert_eq!(all.get(lang.effective().name()), Some(&version::extractor(lang)));
+        assert_eq!(
+            all.get(lang.effective().name()),
+            Some(&version::extractor(lang))
+        );
     }
     assert_eq!(all.len(), 8, "seven grammars and text: {all:?}");
 }

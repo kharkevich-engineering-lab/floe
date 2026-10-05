@@ -91,7 +91,9 @@ fn app() -> Router {
     let scoped = Router::new()
         .route_service("/{owner}/{repo}/mcp", svc.clone())
         .route_layer(from_fn(path_repo));
-    Router::new().route_service("/api/v1/mcp", svc).merge(scoped)
+    Router::new()
+        .route_service("/api/v1/mcp", svc)
+        .merge(scoped)
 }
 
 fn call(uri: &str, tool: &str) -> Request {
@@ -125,7 +127,11 @@ async fn send(req: Request) -> (StatusCode, http::HeaderMap, String) {
     let status = res.status();
     let headers = res.headers().clone();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    (status, headers, String::from_utf8_lossy(&bytes).into_owned())
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
 }
 
 async fn tool_text(uri: &str) -> String {

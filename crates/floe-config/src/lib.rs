@@ -54,10 +54,11 @@ pub struct Config {
     pub catalog: CatalogConfig,
     /// D60: where the runtime config document lives.
     pub config_store: ConfigStoreConfig,
-    /// Code intelligence (D52, `docs/design/code-intelligence.md`): host switch and indexer
-    /// knobs; a subset is per-repository (D24 extension).
+    /// Code intelligence (D52, `docs/design/code-intelligence.md`): a runtime section of the
+    /// config document (D60), the effective value here; a subset is per-repository (D24).
     pub codeintel: CodeIntelConfig,
-    /// The MCP endpoints `/api/v1/mcp` and `/{owner}/{repo}/mcp` (D55).
+    /// The MCP endpoints `/api/v1/mcp` and `/{owner}/{repo}/mcp` (D55): a runtime section
+    /// (D60); its HMAC key is the bootstrap `server.auth.mcp_handle_secret`.
     pub mcp: McpConfig,
     /// Per-repository read authorization (D54); host default, overridable per repository.
     pub access: AccessConfig,
@@ -225,6 +226,11 @@ pub struct AuthConfig {
     /// (`oidc` mode). Unset = cookie sessions and issued tokens off. When set, must be ≥ 32
     /// bytes; shared by every host that answers a browser.
     pub session_secret: Option<String>,
+    /// HMAC key (≥ 32 bytes, the same on every serving host) for MCP snapshot handles and
+    /// cursors (D57). A bootstrap key, so it never sits in the config document: prefer
+    /// `FLOE__SERVER__AUTH__MCP_HANDLE_SECRET`. Unset or empty = derived from `session_secret`;
+    /// `mcp.enabled` needs one of the two.
+    pub mcp_handle_secret: Option<String>,
     /// Session cookie lifetime (default 30 d). Sliding: a response to a request whose
     /// session is older than a quarter of this re-issues the cookie.
     #[serde(with = "humantime_serde")]
@@ -1701,6 +1707,7 @@ impl Default for AuthConfig {
             admin_emails: vec![],
             admin_domains: vec![],
             session_secret: None,
+            mcp_handle_secret: None,
             session_ttl: Duration::from_hours(30 * 24),
             access_token_ttl: Duration::from_hours(90 * 24),
             oauth_client_id: None,

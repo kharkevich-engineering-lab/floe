@@ -133,9 +133,8 @@ fn is_exported(lang: Lang, node: Node<'_>, name: &str, src: &[u8]) -> bool {
         Lang::Rust => child_kind_text("visibility_modifier").is_some_and(|v| v.starts_with("pub")),
         Lang::Go => name.chars().next().is_some_and(char::is_uppercase),
         Lang::Python => !name.starts_with('_'),
-        Lang::Java => {
-            child_kind_text("modifiers").is_some_and(|m| m.split_whitespace().any(|w| w == "public"))
-        }
+        Lang::Java => child_kind_text("modifiers")
+            .is_some_and(|m| m.split_whitespace().any(|w| w == "public")),
         Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
             let mut cur = node.parent();
             for _ in 0..3 {
@@ -322,7 +321,11 @@ fn run_query(
             let mut adjacent = None;
             let info = spec.patterns.get(m.pattern_index);
             for cap in m.captures() {
-                let role = spec.roles.get(cap.index as usize).copied().unwrap_or(Role::Other);
+                let role = spec
+                    .roles
+                    .get(cap.index as usize)
+                    .copied()
+                    .unwrap_or(Role::Other);
                 if info.and_then(|i| i.doc_adjacent) == Some(cap.index) {
                     adjacent = Some(cap.node);
                 }
@@ -363,7 +366,10 @@ fn run_query(
                 continue;
             }
             let key = (name.start_byte(), name.end_byte());
-            if by_name.get(&key).is_some_and(|c| c.pattern <= m.pattern_index) {
+            if by_name
+                .get(&key)
+                .is_some_and(|c| c.pattern <= m.pattern_index)
+            {
                 continue;
             }
             // Doc comments: those adjacent to the definition (no blank line), stripped.
@@ -374,7 +380,9 @@ fn run_query(
                 first_doc = docs.len();
                 let mut row = adj.start_position().row;
                 while first_doc > 0 {
-                    let Some(d) = docs.get(first_doc - 1) else { break };
+                    let Some(d) = docs.get(first_doc - 1) else {
+                        break;
+                    };
                     if d.end_position().row + 1 >= row {
                         first_doc -= 1;
                         row = d.start_position().row;
@@ -412,7 +420,11 @@ fn run_query(
                 node_end_row: node.end_position().row,
                 exported: is_def && is_exported(lang, node, &name_text, src),
                 test: is_def && is_test(lang, path, node, &name_text, src),
-                signature: if is_def { signature_of(name, src) } else { String::new() },
+                signature: if is_def {
+                    signature_of(name, src)
+                } else {
+                    String::new()
+                },
                 doc: truncate_bytes(clean_doc(&doc), DOC_MAX_BYTES),
                 receiver: receiver.map(|r| text_of(r, src)),
                 name: name_text,
@@ -472,7 +484,10 @@ fn build_records(lang: Lang, cands: Vec<Candidate>, scopes: &[Scope]) -> (Vec<De
     let mut chain: Vec<Vec<Item>> = vec![Vec::new(); defs.len()];
     let mut stack: Vec<(usize, usize, Item)> = Vec::new();
     for &(s, e, it) in &items {
-        while stack.last().is_some_and(|&(ps, pe, _)| !(ps <= s && e <= pe)) {
+        while stack
+            .last()
+            .is_some_and(|&(ps, pe, _)| !(ps <= s && e <= pe))
+        {
             stack.pop();
         }
         if let Item::Def(i) = it {
