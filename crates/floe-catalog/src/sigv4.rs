@@ -331,7 +331,10 @@ struct ProxyState {
     signer: Signer,
     /// `scheme://host[:port]` of the real endpoint.
     origin: String,
-    /// The `Host` the catalog's requests carry, and the one signed.
+    /// The `Host` the catalog's requests carry to the proxy (an `http` URL, so
+    /// without `:80`).
+    local_host: String,
+    /// The `Host` sent upstream and signed (without the real scheme's default port).
     host: String,
     upstream: reqwest::Client,
 }
@@ -372,19 +375,15 @@ impl SigningProxy {
             && parsed.password().is_none()
             && parsed.query().is_none()
             && parsed.fragment().is_none();
-        let Some(host) = parsed.host_str().filter(|_| ok) else {
+        if !ok || parsed.host_str().is_none() {
             return Err(SigV4Error::Config(format!(
                 "catalog uri {uri:?} must be http(s)://host[:port]/path"
             )));
-        };
-        // `port()` is None for the scheme's default port, as on the wire.
-        let host = match parsed.port() {
-            Some(p) => format!("{host}:{p}"),
-            None => host.to_string(),
-        };
+        }
+        let (host, local_host) = proxy_hosts(&parsed);
         let origin = format!("{scheme}://{host}");
         let path = parsed.path().trim_end_matches('/');
-        let catalog_uri = format!("http://{host}{path}");
+        let catalog_uri = format!("http://{local_host}{path}");
 
         let dir = private_dir()?;
         let socket: PathBuf = dir.path().join("signer.sock");
@@ -397,6 +396,7 @@ impl SigningProxy {
         let state = Arc::new(ProxyState {
             signer,
             origin,
+            local_host,
             host,
             upstream,
         });
@@ -429,6 +429,22 @@ impl SigningProxy {
     }
 }
 
+/// `(upstream Host, local Host)` for a parsed `http(s)` catalog URI. `Url`
+/// already drops the real scheme's default port (`https://h:443` is `h`), which
+/// is what reqwest sends upstream. The local URL is `http`, so reqwest drops
+/// `:80` there too: `https://h:80` is `h:80` upstream but arrives as `h`.
+fn proxy_hosts(url: &reqwest::Url) -> (String, String) {
+    let host = url.host_str().unwrap_or_default();
+    let with_port = |port: Option<u16>| match port {
+        Some(p) => format!("{host}:{p}"),
+        None => host.to_string(),
+    };
+    (
+        with_port(url.port()),
+        with_port(url.port().filter(|p| *p != 80)),
+    )
+}
+
 /// A fresh 0700 directory for the socket: only this user can connect.
 fn private_dir() -> std::io::Result<tempfile::TempDir> {
     use std::os::unix::fs::PermissionsExt;
@@ -458,7 +474,7 @@ async fn forward_inner(
         .headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok());
-    if host != Some(st.host.as_str()) {
+    if host != Some(st.local_host.as_str()) {
         // A catalog `/v1/config` that overrides `uri` to another host lands
         // here: refuse instead of signing for a host nobody configured.
         return Err((
@@ -466,7 +482,7 @@ async fn forward_inner(
             format!(
                 "request for host {:?}, but the configured catalog is {:?}",
                 host.unwrap_or_default(),
-                st.host
+                st.local_host
             ),
         ));
     }
@@ -710,6 +726,22 @@ mod tests {
             auth(&h).rsplit("Signature=").next().unwrap().to_string()
         };
         assert_ne!(sig("s3"), sig("s3tables"));
+    }
+
+    #[test]
+    fn proxy_hosts_drop_each_schemes_default_port() {
+        let hosts = |u: &str| {
+            let (up, local) = proxy_hosts(&reqwest::Url::parse(u).unwrap());
+            (up, local)
+        };
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(hosts("https://h:80/iceberg"), s("h:80", "h"));
+        assert_eq!(hosts("http://h:80/iceberg"), s("h", "h"));
+        assert_eq!(hosts("https://h:443/iceberg"), s("h", "h"));
+        assert_eq!(hosts("https://h/iceberg"), s("h", "h"));
+        assert_eq!(hosts("http://h/iceberg"), s("h", "h"));
+        assert_eq!(hosts("https://h:8443/iceberg"), s("h:8443", "h:8443"));
+        assert_eq!(hosts("http://h:9000/iceberg"), s("h:9000", "h:9000"));
     }
 
     #[test]

@@ -550,6 +550,34 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
         let body = resp.text().await.unwrap();
         assert!(body.contains("elsewhere.example.com"), "{body}");
+        // Default and explicit ports: what the catalog sends passes the Host
+        // check for every shape of URI (502 = the unresolvable upstream, never
+        // 421), including https on :80, whose local URL loses the port.
+        for uri in [
+            "https://catalog.invalid:80/iceberg",
+            "http://catalog.invalid:80/iceberg",
+            "https://catalog.invalid:443/iceberg",
+            "https://catalog.invalid:8443/iceberg",
+            "http://catalog.invalid:9000/iceberg",
+        ] {
+            let signer = Signer::new(
+                Arc::new(CredentialSource::fixed(Credentials::new(
+                    "a", "b", None, None, "t",
+                ))),
+                "s3",
+                "us-east-1",
+            );
+            let proxy = SigningProxy::start(uri, signer).unwrap();
+            let resp = proxy
+                .client()
+                .get(format!("{}/v1/config", proxy.catalog_uri()))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "{uri}");
+            let body = resp.text().await.unwrap();
+            assert!(!body.contains("configured catalog"), "{uri}: {body}");
+        }
         assert!(
             SigningProxy::start(
                 "http://u:p@h/iceberg",
