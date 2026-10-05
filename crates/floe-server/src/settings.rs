@@ -145,13 +145,29 @@ pub async fn http_put(
     }
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| ApiError::BadRequest("settings must be UTF-8 TOML".into()))?;
-    let message = query
-        .split('&')
-        .filter_map(|kv| kv.split_once('='))
-        .find(|(k, _)| *k == "message")
-        .map(|(_, v)| percent_decode(v))
-        .unwrap_or_default();
-    publish(&h, text, &principal.name, &message).await
+    let param = |name: &str| {
+        query
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| percent_decode(v))
+    };
+    let message = param("message").unwrap_or_default();
+    // `?base_revision=N`: the revision the editor started from; another one is
+    // a 409 (a CAS on the settings revision, `publish_settings_if`), never a
+    // silent overwrite. Without it, D24's unconditional publish.
+    let base = match param("base_revision") {
+        None => None,
+        Some(b) => Some(
+            b.parse::<u64>()
+                .map_err(|_| ApiError::BadRequest("base_revision must be a number".into()))?,
+        ),
+    };
+    let result = match base {
+        None => h.publish_settings(text, &principal.name, &message).await,
+        Some(b) => h.publish_settings_if(text, &principal.name, &message, b).await,
+    };
+    published(result)
 }
 
 pub async fn http_delete(
@@ -170,11 +186,18 @@ async fn publish(
     author: &str,
     message: &str,
 ) -> Result<Response, ApiError> {
-    match h.publish_settings(text, author, message).await {
+    published(h.publish_settings(text, author, message).await)
+}
+
+fn published(result: Result<u64, floe_wal::WalError>) -> Result<Response, ApiError> {
+    match result {
         Ok(revision) => {
             Ok((StatusCode::OK, axum::Json(json!({"revision": revision}))).into_response())
         }
         Err(floe_wal::WalError::Invalid(why)) => Err(ApiError::BadRequest(why)),
+        Err(floe_wal::WalError::SettingsConflict { expected, actual }) => Err(ApiError::Conflict(
+            format!("the settings changed: you edited revision {expected}, the current one is {actual}"),
+        )),
         Err(e) => Err(ApiError::Internal(e.to_string())),
     }
 }

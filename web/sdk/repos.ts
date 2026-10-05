@@ -781,10 +781,18 @@ export class RepoClient {
   readonly policy = {
     /** The push policy document (docs/POLICY.md); missing = `{}`-equivalent allow-all. */
     get: (opts?: CallOptions) => this.client.json<Policy>(`${this.p}/policy`, opts),
-    put: async (policy: Policy, opts?: CallOptions): Promise<void> => {
+    /** The document with the version it was read at (its `ETag`), for a conditional `put`. */
+    getVersioned: async (opts?: CallOptions): Promise<{ policy: Policy; version: string }> => {
+      const url = this.client.url(`${this.p}/policy`);
+      const r = await this.client.fetch(url, { headers: { Accept: "application/json", ...opts?.headers }, signal: opts?.signal });
+      if (!r.ok) throw new ReposError(r.status, (await r.text()).trim() || r.statusText, url);
+      return { policy: (await r.json()) as Policy, version: r.headers.get("etag") ?? "" };
+    },
+    /** Save; with `version` (from `getVersioned`) a policy changed meanwhile is a 409, never overwritten. */
+    put: async (policy: Policy, opts?: CallOptions, version?: string): Promise<void> => {
       await this.client.json<unknown>(`${this.p}/policy`, opts, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(version ? { "If-Match": version } : {}) },
         body: JSON.stringify(policy),
       });
     },
@@ -811,9 +819,9 @@ export class RepoClient {
   readonly settings = {
     /** The settings document (`revision: 0` = none). */
     get: (opts?: CallOptions) => this.client.json<RepoSettings>(`${this.p}/settings`, opts),
-    /** Publish a new document (validated server-side; 400 with the reason on failure). */
-    put: (toml: string, message = "", opts?: CallOptions) =>
-      this.client.json<{ revision: number }>(`${this.p}/settings${message ? `?message=${enc(message)}` : ""}`, opts, {
+    /** Publish a new document (validated server-side; 400 with the reason on failure). With `base_revision`, a document changed meanwhile is a 409. */
+    put: (toml: string, message = "", opts?: CallOptions, base_revision?: number) =>
+      this.client.json<{ revision: number }>(`${this.p}/settings${qs({ message, base_revision })}`, opts, {
         method: "PUT",
         headers: { "Content-Type": "application/toml" },
         body: toml,

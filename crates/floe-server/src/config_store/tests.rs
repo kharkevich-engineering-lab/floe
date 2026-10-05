@@ -390,3 +390,35 @@ async fn a_token_entered_later_reaches_the_startup_config() {
     assert_eq!(live.current().cfg.github_mirror.token_env, alias);
     assert!(live.status().restart_required.is_empty());
 }
+
+/// A heartbeat that cannot be read right now (a transient error, an object not
+/// yet visible) is skipped, never deleted: only a successfully read, expired
+/// one is.
+#[tokio::test]
+async fn unreadable_heartbeats_are_kept() {
+    let (m, inner) = store(false);
+    let fault = floe_store::fault::FaultStore::new(inner, "cfg", 7);
+    let s: DynStore = fault.clone();
+    let c = cs(&s, HistoryMode::Records, false);
+    let status = |id: &str| InstanceStatus {
+        instance: id.into(),
+        version: "v".into(),
+        roles: vec!["all".into()],
+        started_at: Utc::now(),
+        seen_at: Utc::now(),
+        applied_revision: 0,
+        restart_required: vec![],
+        apply_error: None,
+    };
+    c.heartbeat(&status("live")).await.unwrap();
+    c.heartbeat(&status("other")).await.unwrap();
+    fault.set(floe_store::fault::FaultPlan {
+        deny_keys: vec!["instances/live".into()],
+        ..floe_store::fault::FaultPlan::default()
+    });
+    let seen = c.instances().await.unwrap();
+    assert_eq!(seen.iter().map(|i| i.instance.as_str()).collect::<Vec<_>>(), vec!["other"]);
+    fault.heal();
+    assert!(m.get_bytes("instances/live.json").await.unwrap().is_some(), "not deleted");
+    assert_eq!(c.instances().await.unwrap().len(), 2);
+}

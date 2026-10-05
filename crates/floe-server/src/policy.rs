@@ -642,17 +642,38 @@ pub fn store_key(id: &RepoId) -> String {
 }
 
 pub async fn load(store: &DynStore, id: &RepoId) -> Result<RepoPolicy, StoreError> {
+    Ok(load_versioned(store, id).await?.1)
+}
+
+/// The policy with the object version it was read at (`None` = no file).
+pub async fn load_versioned(
+    store: &DynStore,
+    id: &RepoId,
+) -> Result<(Option<floe_store::Version>, RepoPolicy), StoreError> {
     let key = store_key(id);
     match store.get(&key, GetOptions::default()).await {
         Ok(got) => {
-            let Some((_, bytes)) = got.bytes().await? else {
-                return Ok(RepoPolicy::empty());
+            let Some((meta, bytes)) = got.bytes().await? else {
+                return Ok((None, RepoPolicy::empty()));
             };
-            parse_bytes(&bytes)
+            Ok((Some(meta.version), parse_bytes(&bytes)?))
         }
-        Err(StoreError::NotFound { .. }) => Ok(RepoPolicy::empty()),
+        Err(StoreError::NotFound { .. }) => Ok((None, RepoPolicy::empty())),
         Err(e) => Err(e),
     }
+}
+
+/// The `ETag` of a policy read: the object version, or `"none"` when there is no file.
+fn policy_etag(version: Option<&floe_store::Version>) -> String {
+    format!("\"{}\"", version.map_or("none", floe_store::Version::as_str))
+}
+
+/// `If-Match` of a policy write: `None` = unconditional; `Some(None)` = the
+/// file must not exist; `Some(Some(v))` = it must be at version `v`.
+fn if_match(headers: &HeaderMap) -> Option<Option<floe_store::Version>> {
+    let v = headers.get(axum::http::header::IF_MATCH)?.to_str().ok()?.trim();
+    let v = v.trim_start_matches("W/").trim_matches('"');
+    Some((v != "none").then(|| floe_store::Version::new(v)))
 }
 
 /// Parse + validate a policy document (Settings tab validate / dry-run).
@@ -670,13 +691,27 @@ fn parse_bytes(bytes: &[u8]) -> Result<RepoPolicy, StoreError> {
 }
 
 pub async fn save(store: &DynStore, id: &RepoId, policy: &RepoPolicy) -> Result<(), StoreError> {
+    save_if(store, id, policy, None).await
+}
+
+/// [`save`] with a precondition (see [`if_match`]): a policy changed since the
+/// editor read it is `PreconditionFailed`, never overwritten.
+pub async fn save_if(
+    store: &DynStore,
+    id: &RepoId,
+    policy: &RepoPolicy,
+    expected: Option<Option<floe_store::Version>>,
+) -> Result<(), StoreError> {
     policy.validate().map_err(StoreError::InvalidArgument)?;
     let key = store_key(id);
     let body = serde_json::to_vec_pretty(policy)
         .map_err(|e| StoreError::InvalidArgument(format!("encode policy: {e}")))?;
-    store
-        .put(&key, PutBody::from(body), PutMode::Overwrite.into())
-        .await?;
+    let mode = match expected {
+        None => PutMode::Overwrite,
+        Some(None) => PutMode::Create,
+        Some(Some(v)) => PutMode::Update(v),
+    };
+    store.put(&key, PutBody::from(body), mode.into()).await?;
     Ok(())
 }
 
@@ -702,15 +737,22 @@ pub async fn http_get(
 ) -> Result<Response, ApiError> {
     let _ = st.auth.require_read(headers).await.map_err(|e| auth_err(&e))?;
     ensure_repo(st, route).await?;
-    let policy = load(&st.store, &route.id).await.map_err(store_err)?;
+    let (version, policy) = load_versioned(&st.store, &route.id)
+        .await
+        .map_err(store_err)?;
     let body = serde_json::to_vec_pretty(&policy)
         .map_err(|e| ApiError::Internal(format!("encode policy: {e}")))?;
+    let etag = policy_etag(version.as_ref());
     Ok((
         StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/json; charset=utf-8",
-        )],
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8".to_string(),
+            ),
+            (axum::http::header::ETAG, etag),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
         body,
     )
         .into_response())
@@ -726,10 +768,14 @@ pub async fn http_put(
     ensure_repo(st, route).await?;
     let bytes = crate::collect_body(body).await?;
     let policy = parse_bytes(&bytes).map_err(store_err)?;
-    save(&st.store, &route.id, &policy)
-        .await
-        .map_err(store_err)?;
-    Ok((StatusCode::NO_CONTENT, "").into_response())
+    // `If-Match` (the editor's ETag): a policy changed meanwhile is a 409.
+    match save_if(&st.store, &route.id, &policy, if_match(headers)).await {
+        Ok(()) => Ok((StatusCode::NO_CONTENT, "").into_response()),
+        Err(StoreError::PreconditionFailed { .. }) => Err(ApiError::Conflict(
+            "the policy changed since it was read; reload and apply your edit again".into(),
+        )),
+        Err(e) => Err(store_err(e)),
+    }
 }
 
 pub async fn http_delete(

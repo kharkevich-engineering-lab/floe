@@ -1,7 +1,7 @@
 // Runs under `node --experimental-strip-types --test` (part of `pnpm run build`); no test framework.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { docsDiffer, errorsFor, listText, parseList, testToken, fieldsOf, fromInput, globMatch, groupFields, secretInput, secretState, setIn, toInput, unclaimedErrors } from "./schema-form.ts";
+import { docsDiffer, errorsFor, listText, nextDraft, parseList, testToken, fieldsOf, fromInput, globMatch, groupFields, secretInput, secretState, setIn, toInput, unclaimedErrors } from "./schema-form.ts";
 
 const schema = {
   properties: {
@@ -84,6 +84,17 @@ test("list text keeps what is being typed", () => {
   assert.equal(listText("a/*\nb", ["a/*"]), "a/*", "an outside change (reset) wins");
   assert.equal(listText("", ["x", "y"]), "x\ny");
   assert.deepEqual(parseList(" a , b\n\n c "), ["a", "b", "c"]);
+});
+
+test("editors take a newer saved document only without edits", () => {
+  const base = { version: 1, text: "a" };
+  assert.equal(nextDraft(base, { version: 1, text: "a" }, "a"), null, "nothing new");
+  assert.deepEqual(nextDraft(base, { version: 2, text: "b" }, "a"), { version: 2, text: "b" }, "clean: take it");
+  assert.equal(nextDraft(base, { version: 2, text: "b" }, "a2"), null, "edited: keep, the save will 409");
+  // Right after our save: the cached old version is ignored, the new (normalised) one taken.
+  const afterSave = { version: 3, text: "x = 1", replaced: 2 };
+  assert.equal(nextDraft(afterSave, { version: 2, text: "old" }, "x = 1"), null, "the poll has not caught up yet");
+  assert.deepEqual(nextDraft(afterSave, { version: 3, text: "x = 1\n" }, "x = 1"), { version: 3, text: "x = 1\n" });
 });
 
 test("tests send only a typed token", () => {

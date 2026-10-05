@@ -723,20 +723,24 @@ impl ConfigStore {
                 break;
             }
         }
-        let reads = keys.iter().map(|k| async move {
-            let got = self.store.get_bytes(k).await.ok().flatten();
-            (k.clone(), got.and_then(|(_, b)| serde_json::from_slice::<InstanceStatus>(&b).ok()))
-        });
+        let reads = keys.iter().map(|k| async move { (k.clone(), self.store.get_bytes(k).await) });
         let now = Utc::now();
         let mut out = Vec::new();
-        for (key, status) in futures::future::join_all(reads).await {
-            match status {
-                Some(s) if now.signed_duration_since(s.seen_at) <= INSTANCE_EXPIRY => out.push(s),
-                _ => {
-                    if let Err(e) = self.store.delete(&key, None).await {
-                        tracing::debug!(key, error = %e, "expired instance heartbeat not deleted");
+        for (key, got) in futures::future::join_all(reads).await {
+            match got {
+                Ok(Some((_, body))) => match serde_json::from_slice::<InstanceStatus>(&body) {
+                    Ok(s) if now.signed_duration_since(s.seen_at) <= INSTANCE_EXPIRY => out.push(s),
+                    // Read successfully and expired: the only thing ever deleted.
+                    Ok(_) => {
+                        if let Err(e) = self.store.delete(&key, None).await {
+                            tracing::debug!(key, error = %e, "expired instance heartbeat not deleted");
+                        }
                     }
-                }
+                    Err(e) => tracing::debug!(key, error = %e, "unreadable instance heartbeat skipped"),
+                },
+                // Gone meanwhile, or a transient read error: skip, never delete.
+                Ok(None) => {}
+                Err(e) => tracing::debug!(key, error = %e, "instance heartbeat read failed; skipped"),
             }
         }
         out.sort_by_key(|s| std::cmp::Reverse(s.seen_at));

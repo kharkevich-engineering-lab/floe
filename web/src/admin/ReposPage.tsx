@@ -7,6 +7,7 @@ import { useUnsavedGuard } from "./useUnsavedGuard";
 import { ListTextarea } from "./ListTextarea";
 import { errorMessage } from "./SectionEditor";
 import { tomlGet, tomlSet, type TomlValue } from "./toml-lines";
+import { nextDraft, type DraftBase } from "./schema-form";
 
 /** Page 4: per-repository settings (D24) and push policy (D16), each as a form plus the raw document. */
 export function ReposPage() {
@@ -94,13 +95,22 @@ const SETTINGS_FIELDS: { section: string; key: string; label: string; kind: "str
 
 function SettingsForm({ repo }: { repo: string }) {
   const saved: RepoSettings = useData(`settings-doc:${repo}`, () => api.settings(repo).get(), 10_000);
+  const [base, setBase] = useState<DraftBase<number>>({ version: saved.revision, text: saved.toml });
   const [text, setText] = useState(saved.toml);
   const [raw, setRaw] = useState(false);
   const [message, setMessage] = useState("");
   const [validation, setValidation] = useState<SettingsValidation | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
-  const dirty = text !== saved.toml;
+  // A newer saved revision (another admin, our own normalised save) replaces
+  // an unedited draft; an edited one keeps its edit and its save is a 409.
+  const next = nextDraft(base, { version: saved.revision, text: saved.toml }, text);
+  if (next) {
+    setBase(next);
+    setText(next.text);
+  }
+  const dirty = text !== base.text;
+  const stale = dirty && saved.revision !== base.version;
   useUnsavedGuard(dirty);
   useEffect(() => {
     if (!dirty) return;
@@ -129,9 +139,12 @@ function SettingsForm({ repo }: { repo: string }) {
     setBusy(true);
     setNote(null);
     try {
-      const r = await api.settings(repo).put(text, message);
+      const r = await api.settings(repo).put(text, message, undefined, base.version);
       setNote({ ok: true, text: `Published settings revision ${r.revision}.` });
       setMessage("");
+      // The poll's saved document (perhaps normalised) becomes the draft;
+      // the cached older revision is ignored meanwhile.
+      setBase({ version: r.revision, text, replaced: base.version });
       invalidate(`settings-doc:${repo}`);
       invalidate(`settings:${repo}`);
     } catch (e) {
@@ -176,11 +189,20 @@ function SettingsForm({ repo }: { repo: string }) {
         <button type="button" className="btn primary" disabled={!dirty || busy || !(validation?.ok ?? false)} onClick={save}>
           {busy ? "Publishing…" : "Publish settings"}
         </button>
-        <button type="button" className="btn" disabled={!dirty || busy} onClick={() => setText(saved.toml)}>
+        <button
+          type="button"
+          className="btn"
+          disabled={!dirty || busy}
+          onClick={() => {
+            setBase({ version: saved.revision, text: saved.toml });
+            setText(saved.toml);
+          }}
+        >
           Discard
         </button>
         <span className="state" role="status" aria-live="polite">
           {!dirty ? "No unsaved changes." : validation === null ? "Checking…" : validation.ok ? "Valid." : `${validation.errors.length} problem(s).`}
+          {stale && ` Revision ${saved.revision} was published meanwhile: publishing will be refused; discard to load it.`}
         </span>
       </div>
       {note && (
@@ -249,14 +271,21 @@ interface Rule {
 }
 
 function PolicyForm({ repo }: { repo: string }) {
-  const saved = useData<Policy>(`policy:${repo}`, () => api.policy(repo).get(), 10_000);
-  const savedText = JSON.stringify(saved, null, 2);
+  const saved = useData(`policy-v:${repo}`, () => api.policy(repo).getVersioned(), 10_000);
+  const savedText = JSON.stringify(saved.policy, null, 2);
+  const [base, setBase] = useState<DraftBase<string>>({ version: saved.version, text: savedText });
   const [text, setText] = useState(savedText);
   const [raw, setRaw] = useState(false);
   const [validation, setValidation] = useState<PolicyValidation | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
-  const dirty = text !== savedText;
+  const next = nextDraft(base, { version: saved.version, text: savedText }, text);
+  if (next) {
+    setBase(next);
+    setText(next.text);
+  }
+  const dirty = text !== base.text;
+  const stale = dirty && saved.version !== base.version;
   useUnsavedGuard(dirty);
   let doc: Record<string, unknown> | null = null;
   try {
@@ -294,8 +323,10 @@ function PolicyForm({ repo }: { repo: string }) {
     setBusy(true);
     setNote(null);
     try {
-      await api.policy(repo).put(JSON.parse(text) as Policy);
+      await api.policy(repo).put(JSON.parse(text) as Policy, undefined, base.version);
       setNote({ ok: true, text: "Policy saved." });
+      setBase({ version: "", text, replaced: base.version });
+      invalidate(`policy-v:${repo}`);
       invalidate(`policy:${repo}`);
     } catch (e) {
       setNote({ ok: false, text: errorMessage(e) });
@@ -394,11 +425,20 @@ function PolicyForm({ repo }: { repo: string }) {
         <button type="button" className="btn primary" disabled={!dirty || busy || !(validation?.ok ?? false)} onClick={save}>
           {busy ? "Saving…" : "Save policy"}
         </button>
-        <button type="button" className="btn" disabled={!dirty || busy} onClick={() => setText(savedText)}>
+        <button
+          type="button"
+          className="btn"
+          disabled={!dirty || busy}
+          onClick={() => {
+            setBase({ version: saved.version, text: savedText });
+            setText(savedText);
+          }}
+        >
           Discard
         </button>
         <span className="state" role="status" aria-live="polite">
           {!dirty ? "No unsaved changes." : validation === null ? "Checking…" : validation.ok ? "Valid." : "Invalid."}
+          {stale && " The policy changed meanwhile: saving will be refused; discard to load it."}
         </span>
       </div>
       {note && (

@@ -166,6 +166,26 @@ export function testToken(value: unknown): SecretValue | undefined {
   return s.kind === "value" ? (value as SecretValue) : undefined;
 }
 
+/** What an editor started from: the saved document's version and text. */
+export interface DraftBase<V> {
+  version: V;
+  text: string;
+  /** Right after our own save: the version it replaced, which a poll may still return (never taken). */
+  replaced?: V;
+}
+
+/**
+ * Whether an editor takes a newer saved document: only when it has no edits
+ * of its own (its text is still the one it started from). With edits it keeps
+ * them, and its conditional save is refused with a 409 instead of silently
+ * reverting the other change. `null` = keep the current draft.
+ */
+export function nextDraft<V>(base: DraftBase<V>, saved: DraftBase<V>, text: string): DraftBase<V> | null {
+  if (saved.version === base.version && saved.text === base.text) return null;
+  if (base.replaced !== undefined && saved.version === base.replaced) return null;
+  return text === base.text ? { version: saved.version, text: saved.text } : null;
+}
+
 /** `doc` with `section.key = value` (immutably). */
 export function setIn(doc: ConfigDocument, section: string, key: string, value: unknown): ConfigDocument {
   return { ...doc, [section]: { ...doc[section], [key]: value } };

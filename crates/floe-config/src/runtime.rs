@@ -98,8 +98,16 @@ impl RuntimeConfig {
                 out.push((path, n.to_string()));
             }
         }
-        out.push(("catalog.s3_access_key_env", c.s3_access_key_env.clone()));
-        out.push(("catalog.s3_secret_key_env", c.s3_secret_key_env.clone()));
+        // Unset/empty names are not references (only `auth = "sigv4"` needs
+        // them, and `CatalogConfig::validate` says so).
+        for (path, v) in [
+            ("catalog.s3_access_key_env", &c.s3_access_key_env),
+            ("catalog.s3_secret_key_env", &c.s3_secret_key_env),
+        ] {
+            if !v.trim().is_empty() {
+                out.push((path, v.clone()));
+            }
+        }
         out
     }
 
@@ -253,6 +261,13 @@ mod tests {
         assert!(host.with_runtime(&rt).is_err());
         rt.catalog.s3_secret_key_env = "AWS_SECRET_ACCESS_KEY".into();
         host.with_runtime(&rt).unwrap();
+        // Empty names are no references: fine unless the catalog signs (validate's rule).
+        rt.catalog.s3_access_key_env = String::new();
+        rt.catalog.s3_secret_key_env = "  ".into();
+        assert!(rt.env_refs().iter().all(|(p, _)| !p.starts_with("catalog.s3_")));
+        host.with_runtime(&rt).unwrap();
+        rt.catalog.s3_access_key_env = "AWS_ACCESS_KEY_ID".into();
+        rt.catalog.s3_secret_key_env = "AWS_SECRET_ACCESS_KEY".into();
         // Only an exact host entry opens a host-only name.
         let mut open = Config::default();
         open.config_store.allowed_env = vec!["AWS_*".into(), "MY_TOKEN".into(), "FLOE_SECRET_*".into()];
