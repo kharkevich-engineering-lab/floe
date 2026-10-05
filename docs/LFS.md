@@ -21,13 +21,22 @@ fails in git-lfs's pre-push with `(missing) <path>`: our batch says 404 for obje
 **Config** (per repository, D24 settings `[upstream]`; host-level in `floe.toml` works too; `upstream.git` next
 to it feeds the maintainer's `repair` unit, `docs/INTEGRITY.md`):
 ```toml
+# per repository (`floe repo settings set acme/monorepo`, or the Settings tab)
 [upstream]
 lfs = "https://github.com/acme/monorepo.git/info/lfs"
-token_env = "FLOE_UPSTREAM_TOKEN"   # env var on the maintaining host that holds the token (never the token itself)
 ```
-`floe repo settings set acme/monorepo` (or the Settings tab). Settings are published to the bucket, so they name
-an environment variable; the host reads it and sends HTTP Basic `x-access-token:<token>` (what GitHub's LFS endpoint
-takes). Unset = unauthenticated upstream.
+```toml
+# floe.toml of the maintaining host: the credential is host-only
+[upstream]
+token_env = "FLOE_UPSTREAM_TOKEN"   # env var holding the token (never the token itself)
+[upstream.token_env_by_host]        # per upstream host; beats token_env (D48)
+"github.com" = "FLOE_GITHUB_TOKEN"
+```
+`token_env` and `token_env_by_host` are host-only: settings are published to the bucket, and a credential's
+name is the host's business (`Config::upstream_token_env` resolves `token_env_by_host[<upstream host>]`, then
+`token_env`). The host reads the variable and sends HTTP Basic `x-access-token:<token>` (what GitHub's LFS endpoint
+takes). Unset = unauthenticated upstream. The GitHub mirror (D49) maps its `git_url` host to its `token_env` by
+default, so mirrored repositories need nothing else.
 
 **Behaviour** (`lfs.rs`, `lfs_upstream.rs`):
 | Request | Object in our store | Not ours, upstream has it | Nowhere |

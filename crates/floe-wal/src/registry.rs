@@ -182,19 +182,20 @@ impl Registry {
         Ok(())
     }
 
-    /// CAS-create `manifest.pb` (`PutMode::Create`). Err(AlreadyExists) on 412.
+    /// CAS-create `manifest.pb` (`PutMode::Create`). Err(AlreadyExists) on 412, and
+    /// for a repository this instance already has a handle for (it exists).
     pub async fn create(
         &self,
         id: &RepoId,
         format: ObjectFormat,
     ) -> Result<Arc<RepoHandle>, WalError> {
-        if let Some(h) = self.repos.get(id) {
-            return Ok(h.clone());
+        if self.repos.contains_key(id) {
+            return Err(WalError::AlreadyExists);
         }
         let gate = self.opening.entry(id.clone()).or_default().clone();
         let _g = gate.lock().await;
-        if let Some(h) = self.repos.get(id) {
-            return Ok(h.clone());
+        if self.repos.contains_key(id) {
+            return Err(WalError::AlreadyExists);
         }
 
         let prefix = id.store_prefix();
@@ -263,7 +264,11 @@ impl Registry {
     ) -> Result<Arc<RepoHandle>, WalError> {
         match self.open(id).await {
             Ok(h) => Ok(h),
-            Err(WalError::NotFound) => self.create(id, format).await,
+            Err(WalError::NotFound) => match self.create(id, format).await {
+                // Created by someone else between the two calls.
+                Err(WalError::AlreadyExists) => self.open(id).await,
+                other => other,
+            },
             Err(e) => Err(e),
         }
     }

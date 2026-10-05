@@ -100,6 +100,23 @@ enabled = true                    # that already supports GHES develops against 
                                   # trust the self-signed certificate above, so set [server.tls] mode = "off" (and use
                                   # http:// URLs) before pointing octokit here.
 
+# The GitHub mirror (D49, README "Mirroring GitHub"): needs roles ∋ "maintain" (the default single box
+# has every role) and FLOE_GITHUB_TOKEN in the environment. Every floe reader can read mirrored private
+# repositories (no per-repository read ACL), hence the explicit acknowledgement.
+# [github_mirror]
+# enabled = true
+# users = ["@me"]
+# private_visible_to_all_readers = true   # or include_private = false
+
+# Iceberg audit tables (D50): a floe built with --features catalog, and
+# `podman compose --profile catalog up -d` (compose.yaml: the Iceberg REST fixture on rustfs).
+# [catalog]
+# enabled = true
+# uri = "http://127.0.0.1:8181"
+# warehouse = "s3://floe-test/warehouse"
+# s3_endpoint = "http://127.0.0.1:9000"
+# flush_interval = "5s"
+
 [cache]
 dir = "/tmp/floe"               # materialized repositories + tls/; wiped = warmth lost, nothing else
 max_bytes = "20GiB"

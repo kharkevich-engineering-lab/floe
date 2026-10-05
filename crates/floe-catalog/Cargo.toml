@@ -1,0 +1,49 @@
+[package]
+name = "floe-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# No rust-version here: every floe binary depends on this crate's core, which
+# keeps the workspace floor (1.90); iceberg 0.10's own manifest enforces its
+# MSRV 1.94 when the `iceberg` feature is on.
+
+[features]
+default = []
+# The Iceberg writer (arrow + parquet + opendal). Off by default: the core
+# (rows, Recorder, buffer, cursor) compiles without it, so call sites have no cfg.
+iceberg = [
+    "dep:iceberg",
+    "dep:iceberg-catalog-rest",
+    "dep:iceberg-storage-opendal",
+    "dep:arrow-array",
+    "dep:reqwest",
+]
+
+[dependencies]
+floe-proto.workspace = true
+floe-store.workspace = true
+floe-config.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+metrics.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+iceberg = { workspace = true, optional = true }
+iceberg-catalog-rest = { workspace = true, optional = true }
+iceberg-storage-opendal = { workspace = true, optional = true }
+arrow-array = { workspace = true, optional = true }
+# Not used directly: unifies rustls into the reqwest iceberg-catalog-rest builds
+# without a TLS backend, so an https catalog URI works.
+reqwest = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+futures.workspace = true
+
+[lints]
+workspace = true

@@ -1287,6 +1287,7 @@ pub(crate) async fn publish_settings_impl(
     toml_text: &str,
     author: &str,
     message: &str,
+    expected_revision: Option<u64>,
 ) -> Result<u64, WalError> {
     let writer = crate::handle::instance_id();
     let max_retries = handle.cfg.wal.cas_max_retries;
@@ -1295,7 +1296,16 @@ pub(crate) async fn publish_settings_impl(
         handle.sync_impl_level(crate::sync::SyncLevel::Refs).await?;
         let manifest = handle.manifest.read().clone();
         let known_version = handle.manifest_version.lock().clone();
-        let revision = manifest.settings.as_ref().map_or(0, |s| s.revision) + 1;
+        let current = manifest.settings.as_ref().map_or(0, |s| s.revision);
+        if let Some(expected) = expected_revision
+            && expected != current
+        {
+            return Err(WalError::SettingsConflict {
+                expected,
+                actual: current,
+            });
+        }
+        let revision = current + 1;
         let settings = floe_proto::v1::RepoSettings {
             toml: toml_text.to_string(),
             revision,

@@ -106,7 +106,7 @@ pub async fn batch(
     let upstream_has = match (&cfg.upstream.lfs, missing.is_empty()) {
         (Some(upstream), false) => {
             st.lfs_upstream
-                .batch(upstream, cfg.upstream.token_env.as_deref(), &missing)
+                .batch(upstream, cfg.upstream_token_env(upstream), &missing)
                 .await
         }
         _ => std::collections::HashMap::default(),
@@ -282,7 +282,7 @@ async fn read_through(
         .lfs_upstream
         .batch(
             upstream,
-            cfg.upstream.token_env.as_deref(),
+            cfg.upstream_token_env(upstream),
             &[(oid.to_string(), size)],
         )
         .await;

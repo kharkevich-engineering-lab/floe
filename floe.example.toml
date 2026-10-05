@@ -257,8 +257,17 @@ max_object_bytes = "16GiB"
 # git = "https://github.com/acme/monorepo.git"           # source for the maintainer's `repair` unit (objects fsck found missing; wants by SHA)
 # lfs = "https://github.com/acme/monorepo.git/info/lfs"  # read-through for LFS objects we lack (batch upload → "present", download/GET → stream + persist)
 # token_env = "FLOE_UPSTREAM_TOKEN"                     # env var on the maintaining host holding the token; Basic x-access-token:<token>
-# follow = ["refs/heads/main"]                            # refs kept equal to upstream's by the maintaining host: fetched every
-                                                          # maintenance.follow_interval, published through the WAL as a push; fast-forward only
+# follow = ["refs/heads/*", "refs/tags/*"]  # ref patterns kept equal to upstream's by the maintaining host (D48: git refspec
+#                                           # globs: one `*`, crosses `/`; `^` excludes); probed every
+#                                           # maintenance.follow_interval, published through the WAL as a push;
+#                                           # refs/archive/* and refs/follow/* are never followed
+# on_rewrite = "archive"                    # upstream force-push/tag move/delete: keep the old tip at
+#                                           # refs/archive/<unix-ts>/<ref> then apply | "refuse" (leave as is, log)
+# head = "refs/heads/main"                  # retarget HEAD to this when it exists (the GitHub mirror sets it)
+# follow_interval = "10m"                   # per-repo minimum pause between follow rounds (unset = every tick)
+# source = "github:123"                     # provenance label written by the mirror; informational
+# [upstream.token_env_by_host]              # host-only: env var per upstream host (beats token_env)
+# "github.com" = "FLOE_GITHUB_TOKEN"
 
 [git]
 binary = "git"                    # path to upstream git binary (>= 2.47 recommended: pack.writeReverseIndex, bundle-uri)
@@ -300,3 +309,54 @@ enabled = false
 # webhook_poll_interval = "1s"    # a dev bucket has no notifications, so the bridge polls this often; a push to
                                   # this instance wakes it directly, so this only covers other writers. 0 = only
                                   # [events].sweep_interval
+
+[github_mirror]                   # D49, docs/design/github-mirror.md §B — discover GitHub repositories, create
+                                  # <prefix>-<owner>/<name> with an [upstream] table; follow (D48) moves the bytes.
+                                  # Needs the maintain role; one reconciler fleet-wide (leases/mirror-github.pb).
+enabled = false
+api_url = "https://api.github.com"   # GHES: https://ghe.example.com/api/v3
+git_url = "https://github.com"       # base of clone/LFS URLs; also maps upstream.token_env_by_host[host] = token_env
+token_env = "FLOE_GITHUB_TOKEN"   # PAT: classic `repo`, or fine-grained Contents:read + Metadata:read; never stored
+prefix = "gh"                     # floe repo = <prefix>-<owner>/<name>, lowercased ([a-z0-9]{1,16})
+interval = "5m"                   # reconcile cadence; 0 = one pass at startup (and `floe github sync --once`)
+users = []                        # "@me" = the token's user (private included)
+orgs = []
+starred = []                      # users whose stars are mirrored ("@me" allowed)
+repos = []                        # explicit "owner/name": bypass include and the archived/fork skips
+include = ["*/*"]                 # globs over owner/name; `*` stops at `/`
+exclude = []                      # wins over everything, explicit repos included
+skip_archived = true              # do not start mirroring archived repositories
+skip_forks = true
+include_private = true
+private_visible_to_all_readers = false   # must be true when include_private (no per-repo read ACL; any auth mode)
+lfs = true                        # write upstream.lfs (read-through, not prefetched)
+follow = ["refs/heads/*", "refs/tags/*"]
+on_rewrite = "archive"
+follow_interval = "10m"           # backstop; a push seen at GitHub nudges follow on the maintaining host
+read_only = true                  # deny-all policy.json at creation: only follow moves refs
+max_repo_size = "2GiB"            # larger = too-large: `floe import` it, then set [upstream] source = "github:<id>"
+max_new_per_pass = 20
+min_rate_remaining = 200          # stop a pass (incomplete) below this x-ratelimit-remaining
+gone_after = "24h"                # missing (404/403) this long before gone/forbidden (frozen, never deleted)
+lease_ttl = "2m"
+
+[catalog]                         # docs/design/github-mirror.md §C — Iceberg audit tables (ref_events, force_push_log,
+                                  # sync_runs, repo_inventory). Derived, never a source of truth; an outage only adds
+                                  # catalog lag. enabled = true needs a binary built with --features catalog.
+enabled = false
+# uri = "http://localhost:9000/iceberg"        # Iceberg REST endpoint (RustFS S3 Tables)
+# warehouse = "floe-catalog"
+namespace = "floe"
+# token_env = "FLOE_CATALOG_TOKEN"             # env var with a bearer token
+# credential_env = "FLOE_CATALOG_CREDENTIAL"   # env var with "client_id:client_secret" (OAuth2 client credentials)
+# s3_endpoint = "http://localhost:9000"        # data files, when the catalog does not vend credentials
+s3_region = "us-east-1"
+s3_access_key_env = "AWS_ACCESS_KEY_ID"
+s3_secret_key_env = "AWS_SECRET_ACCESS_KEY"
+s3_path_style = true
+flush_interval = "30s"            # max age of buffered rows before a commit
+flush_rows = 5000                 # commit a table at this many buffered rows
+max_buffer_rows = 100000          # beyond it durable appends fail fast (lag stays in the WAL), telemetry drops
+commit_timeout = "60s"
+backfill = false                  # a repository older than the catalog: false = start at head, true = full history
+create_tables = true

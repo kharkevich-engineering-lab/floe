@@ -351,15 +351,7 @@ impl Bridge {
 
     /// `prefix/repos/<o>/<r>/manifest.pb` → `o/r`.
     fn manifest_repo(&self, object: &str) -> Option<RepoId> {
-        let rel = object
-            .strip_prefix(self.store_prefix.as_str())?
-            .strip_prefix("repos/")?
-            .strip_suffix("/manifest.pb")?;
-        let (owner, name) = rel.split_once('/')?;
-        if name.contains('/') {
-            return None;
-        }
-        RepoId::new(owner, name).ok()
+        manifest_repo(&self.store_prefix, object)
     }
 
     async fn publish(&self, batch: &[RefEvent]) -> anyhow::Result<()> {
@@ -383,6 +375,19 @@ impl Bridge {
         }
         Ok(())
     }
+}
+
+/// `prefix/repos/<o>/<r>/manifest.pb` → `o/r`; anything else `None`.
+fn manifest_repo(store_prefix: &str, object: &str) -> Option<RepoId> {
+    let rel = object
+        .strip_prefix(store_prefix)?
+        .strip_prefix("repos/")?
+        .strip_suffix("/manifest.pb")?;
+    let (owner, name) = rel.split_once('/')?;
+    if name.contains('/') {
+        return None;
+    }
+    RepoId::new(owner, name).ok()
 }
 
 /// The object keys (or repository ids) a notification body names. Store-agnostic.
@@ -439,6 +444,8 @@ fn notified_keys(v: &serde_json::Value) -> Vec<String> {
 
 /// `POST /_events/notify`: a bucket notification naming a finalized `manifest.pb`.
 /// `200` (ack) when handled or ignored, `503` (redeliver) when a sink failed.
+/// The catalog tail (D50) is only woken (`try_send`), never awaited: its
+/// outage can neither slow this answer nor turn it into a 503.
 pub async fn http_notify(
     st: &crate::AppState,
     headers: &axum::http::HeaderMap,
@@ -447,16 +454,28 @@ pub async fn http_notify(
     use crate::error::ApiError;
     use axum::response::IntoResponse;
     let _ = st.auth.require_read(headers).await.map_err(auth_err)?;
-    let Some(bridge) = &st.bridge else {
+    if st.bridge.is_none() && st.catalog_tail.is_none() {
         return Err(ApiError::NotFound(
             "events bridge is not enabled here".into(),
         ));
-    };
+    }
     let bytes = crate::collect_body(body).await?;
     let v: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| ApiError::BadRequest(format!("notify body: {e}")))?;
+    let keys = notified_keys(&v);
+    if let Some(tail) = &st.catalog_tail {
+        let prefix = st.cfg.store_prefix();
+        for key in &keys {
+            if let Some(id) = manifest_repo(&prefix, key) {
+                tail.wake(&id);
+            }
+        }
+    }
+    let Some(bridge) = &st.bridge else {
+        return Ok(axum::Json(Vec::<CatchUp>::new()).into_response());
+    };
     let mut reports = Vec::new();
-    for key in notified_keys(&v) {
+    for key in keys {
         match bridge.object_finalized(&key).await {
             Ok(Some(report)) => reports.push(report),
             Ok(None) => {}

@@ -225,12 +225,15 @@ pub async fn update_ref(
         return Err(GhError::not_found(ref_name));
     };
     require_object(&local, oid)?;
+    // `merge-base` exits 128 when either side is not a commit (a tree or blob sha
+    // exists, `require_object` passed): not a fast-forward either, as GitHub says.
     if !force
         && current != oid
-        && !local
-            .is_ancestor(&current, oid)
-            .await
-            .map_err(|e| GhError::Internal(format!("merge-base: {e}")))?
+        && !match local.is_ancestor(&current, oid).await {
+            Ok(a) => a,
+            Err(floe_git::GitError::Subprocess { .. }) => false,
+            Err(e) => return Err(GhError::Internal(format!("merge-base: {e}"))),
+        }
     {
         return Err(GhError::validation(
             "Update is not a fast forward",

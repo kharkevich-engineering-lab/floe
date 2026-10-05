@@ -2761,3 +2761,40 @@ async fn retained_log_starts_at_unindexed_checkpoint_boundary() {
     assert_eq!(log[0].seq, 2);
     assert!(handle.read_log_retained(1, None).await.is_err());
 }
+
+#[tokio::test]
+async fn create_on_a_cached_handle_is_already_exists() {
+    let cache = tempfile::tempdir().unwrap();
+    let registry = Registry::new(MemoryStore::shared(), Arc::new(make_config(cache.path(), 0)));
+    let id = repo_id("mirror", "cached");
+    registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+    // The handle is cached on this instance: still AlreadyExists, not Ok.
+    assert!(matches!(
+        registry.create(&id, ObjectFormat::Sha1).await,
+        Err(floe_wal::WalError::AlreadyExists)
+    ));
+    // open_or_create keeps working on an existing repository.
+    registry.open_or_create(&id, ObjectFormat::Sha1).await.unwrap();
+}
+
+#[tokio::test]
+async fn publish_settings_if_is_a_cas_on_the_revision() {
+    let cache = tempfile::tempdir().unwrap();
+    let registry = Registry::new(MemoryStore::shared(), Arc::new(make_config(cache.path(), 0)));
+    let id = repo_id("mirror", "settings");
+    let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+    let doc = "[upstream]\nsource = \"github:1\"\n";
+    assert_eq!(handle.publish_settings_if(doc, "github-mirror", "m", 0).await.unwrap(), 1);
+    // A stale expectation is a conflict, and nothing is published.
+    match handle.publish_settings_if(doc, "github-mirror", "m", 0).await {
+        Err(floe_wal::WalError::SettingsConflict { expected: 0, actual: 1 }) => {}
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(handle.settings().unwrap().revision, 1);
+    assert_eq!(handle.publish_settings_if(doc, "github-mirror", "m", 1).await.unwrap(), 2);
+    // Invalid settings are refused before any CAS.
+    assert!(matches!(
+        handle.publish_settings_if("[server]\nx = 1\n", "a", "m", 2).await,
+        Err(floe_wal::WalError::Invalid(_))
+    ));
+}

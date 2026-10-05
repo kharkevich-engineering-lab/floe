@@ -2,7 +2,9 @@
 //! `FLOE__SECTION__KEY=value` (double underscore = nesting), applied after
 //! the file is parsed. `PORT` (a serverless host) overrides `server.listen` port.
 
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, time::Duration};
+
+pub mod refpattern;
 
 use anyhow::{Context, Result};
 pub use bytesize::ByteSize;
@@ -28,6 +30,9 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     pub events: EventsConfig,
     pub github: GithubConfig,
+    pub github_mirror: GithubMirrorConfig,
+    /// Iceberg audit tables (`docs/design/github-mirror.md` §C, D50).
+    pub catalog: CatalogConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -675,14 +680,46 @@ pub struct UpstreamConfig {
     pub lfs: Option<String>,
     /// Name of an environment variable on the maintaining host that holds the token
     /// (settings live in the bucket, so never the token itself); sent as HTTP Basic
-    /// `x-access-token:<token>` (GitHub). Unset = unauthenticated.
+    /// `x-access-token:<token>` (GitHub). Unset = unauthenticated. Host-only; see
+    /// [`Config::upstream_token_env`] for the resolution order.
     pub token_env: Option<String>,
-    /// Refs kept equal to the upstream's (`["refs/heads/main"]`): the host that
-    /// maintains the repository (D28: its writer) fetches the delta from `git`
-    /// every `maintenance.follow_interval` and publishes it through the WAL as
-    /// an ordinary push (fast-forward only; a rewound upstream is refused and
-    /// logged until a human decides). Empty = off.
+    /// Ref patterns kept equal to the upstream's (D48, [`refpattern`]: git refspec
+    /// sources, `refs/heads/*`, `^refs/heads/x/*`): the host that maintains the
+    /// repository (D28: its writer) fetches the delta from `git` and publishes it
+    /// through the WAL as an ordinary push. Empty = follow off; checked before, and
+    /// instead of, `RefPatterns::parse`, so `follow = []` is always valid.
     pub follow: Vec<String>,
+    /// What follow does when upstream rewrites (non-fast-forward, or any tag move)
+    /// or deletes a followed ref.
+    pub on_rewrite: OnRewrite,
+    /// Desired symbolic target of HEAD (`refs/heads/main`): follow retargets HEAD
+    /// when the WAL's differs and the target exists. Unset = follow never touches HEAD.
+    pub head: Option<String>,
+    /// Per-repository minimum pause between follow rounds (the loop still ticks
+    /// every `maintenance.follow_interval`; a repository whose last round is younger
+    /// than this is skipped). Unset = every tick.
+    #[serde(default, with = "humantime_serde::option")]
+    pub follow_interval: Option<Duration>,
+    /// Opaque provenance label (`github:123456789`): who manages this `[upstream]`.
+    /// Follow only logs it.
+    pub source: Option<String>,
+    /// Host-only: env var name per upstream host (`"github.com" = "FLOE_GITHUB_TOKEN"`);
+    /// beats `token_env` for URLs on that host. Refused in settings and stripped from
+    /// the public effective config, exactly like `token_env`.
+    pub token_env_by_host: BTreeMap<String, String>,
+}
+
+/// D48: what follow does when upstream rewrites or deletes a followed ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OnRewrite {
+    /// Keep the old tip under `refs/archive/<unix-ts>/<ref>`, then apply upstream's
+    /// state, in one WAL entry. Nothing is lost.
+    #[default]
+    Archive,
+    /// D33 behaviour: refuse non-fast-forwards and leave refs deleted upstream as
+    /// they are; logged every round.
+    Refuse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -804,6 +841,293 @@ impl Default for GithubConfig {
     }
 }
 
+/// D49 — the GitHub mirror (`floe-mirror`, `docs/design/github-mirror.md` §B):
+/// discovers repositories on GitHub, creates `<prefix>-<owner>/<name>` with an
+/// `[upstream]` table, and lets follow (D48) move the bytes. Host-level only (not
+/// a settings section); runs on a `maintain` host under `leases/mirror-github.pb`.
+/// `[github]` is the facade (D42), hence the name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GithubMirrorConfig {
+    /// Run the mirror on this host (needs the `maintain` role).
+    pub enabled: bool,
+    /// REST base (`https://ghe.example.com/api/v3` for GHES).
+    pub api_url: String,
+    /// Base of clone/LFS URLs, and the `upstream.token_env_by_host` key.
+    pub git_url: String,
+    /// Env var holding a PAT (classic `repo`, or fine-grained Contents:read +
+    /// Metadata:read). Read at every pass; never written to the bucket.
+    pub token_env: String,
+    /// floe owner = `<prefix>-<github owner>`, lowercased. `[a-z0-9]{1,16}`.
+    pub prefix: String,
+    /// Discovery/reconcile cadence. `0` = only at startup (and `floe github sync --once`).
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+    /// Owners whose repositories are mirrored; `"@me"` = the token's user, private included.
+    pub users: Vec<String>,
+    /// Organisations (all repository types the token can see).
+    pub orgs: Vec<String>,
+    /// Users whose stars are mirrored (`"@me"` allowed).
+    pub starred: Vec<String>,
+    /// Explicit `"owner/name"`: bypass `include` and the archived/fork skips.
+    pub repos: Vec<String>,
+    /// Globs over `owner/name` (case-insensitive; `*` stops at `/`, so each has one `/`).
+    pub include: Vec<String>,
+    /// Same syntax; wins over everything, explicit `repos` included.
+    pub exclude: Vec<String>,
+    /// Do not start mirroring archived repositories (mirrored ones are kept).
+    pub skip_archived: bool,
+    /// Do not start mirroring forks.
+    pub skip_forks: bool,
+    /// `false` = public repositories only.
+    pub include_private: bool,
+    /// The operator's acknowledgement that floe has no per-repository read ACL:
+    /// every reader of this floe reads every mirrored private repository.
+    /// Required with `include_private` in every auth mode: the bucket is the
+    /// fleet's, so this host's auth mode does not bound who reads it.
+    pub private_visible_to_all_readers: bool,
+    /// Write `upstream.lfs` so LFS objects read through (`docs/LFS.md`).
+    pub lfs: bool,
+    /// Patterns written into each repository's `upstream.follow`.
+    pub follow: Vec<String>,
+    /// Written into `upstream.on_rewrite`.
+    pub on_rewrite: OnRewrite,
+    /// Written into `upstream.follow_interval` (a backstop; pushes are nudged).
+    #[serde(with = "humantime_serde")]
+    pub follow_interval: Duration,
+    /// Publish a deny-all `policy.json` at creation, so only follow moves refs.
+    pub read_only: bool,
+    /// Larger repositories (GitHub `size`) are `too-large`: never auto-created,
+    /// logged with the `floe import` handoff recipe. `0` = no limit.
+    pub max_repo_size: ByteSize,
+    /// Bound on creations per pass.
+    pub max_new_per_pass: usize,
+    /// Stop a pass (incomplete) when `x-ratelimit-remaining` drops below this.
+    pub min_rate_remaining: u32,
+    /// How long a repository must be missing (404/403) before it is `gone`/`forbidden`.
+    #[serde(with = "humantime_serde")]
+    pub gone_after: Duration,
+    /// TTL of `leases/mirror-github.pb`; heartbeat every `lease_ttl / 3`.
+    #[serde(with = "humantime_serde")]
+    pub lease_ttl: Duration,
+    /// Set at load by [`Config::derive_mirror_token_env`], never from TOML: the
+    /// mirror runs here or `token_env` is set in this process, so follow and LFS
+    /// read-through on mirror-managed repositories (`upstream.source =
+    /// "github:…"` on `git_url`'s host) authenticate with `token_env`.
+    #[serde(skip)]
+    pub use_token: bool,
+}
+
+impl Default for GithubMirrorConfig {
+    fn default() -> Self {
+        GithubMirrorConfig {
+            enabled: false,
+            api_url: "https://api.github.com".into(),
+            git_url: "https://github.com".into(),
+            token_env: "FLOE_GITHUB_TOKEN".into(),
+            prefix: "gh".into(),
+            interval: Duration::from_secs(300),
+            users: Vec::new(),
+            orgs: Vec::new(),
+            starred: Vec::new(),
+            repos: Vec::new(),
+            include: vec!["*/*".into()],
+            exclude: Vec::new(),
+            skip_archived: true,
+            skip_forks: true,
+            include_private: true,
+            private_visible_to_all_readers: false,
+            lfs: true,
+            follow: vec!["refs/heads/*".into(), "refs/tags/*".into()],
+            on_rewrite: OnRewrite::Archive,
+            follow_interval: Duration::from_secs(600),
+            read_only: true,
+            max_repo_size: ByteSize::gib(2),
+            max_new_per_pass: 20,
+            min_rate_remaining: 200,
+            gone_after: Duration::from_secs(24 * 3600),
+            lease_ttl: Duration::from_secs(120),
+            use_token: false,
+        }
+    }
+}
+
+/// `[catalog]` (`docs/design/github-mirror.md` §C, D50): Iceberg audit tables
+/// (`ref_events`, `force_push_log`, `sync_runs`, `repo_inventory`) behind an
+/// Iceberg REST catalog. Derived copies, never a source of truth: the WAL keeps
+/// every ref event, and a catalog outage only adds catalog lag. The section
+/// parses in every build; `enabled = true` needs a binary built with
+/// `--features catalog` (the server refuses to start otherwise).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[allow(clippy::struct_excessive_bools)] // independent config switches
+pub struct CatalogConfig {
+    pub enabled: bool,
+    /// Iceberg REST catalog base URL (`RustFS` S3 Tables: its Iceberg REST endpoint).
+    pub uri: Option<String>,
+    /// Warehouse identifier (S3 Tables: the table bucket the endpoint expects).
+    pub warehouse: Option<String>,
+    /// Iceberg namespace; created when absent (`create_tables`).
+    pub namespace: String,
+    /// Env var holding a bearer token for the catalog. Never the value itself.
+    pub token_env: Option<String>,
+    /// Env var holding `client_id:client_secret` (REST `OAuth2` client credentials).
+    pub credential_env: Option<String>,
+    /// `FileIO` endpoint for data files when the catalog does not vend credentials.
+    pub s3_endpoint: Option<String>,
+    pub s3_region: String,
+    /// Env var *names* for the data-file credentials (D43 style).
+    pub s3_access_key_env: String,
+    pub s3_secret_key_env: String,
+    /// Path-style addressing (`RustFS`/`MinIO`).
+    pub s3_path_style: bool,
+    /// Max age of buffered rows before a commit.
+    #[serde(with = "humantime_serde")]
+    pub flush_interval: Duration,
+    /// Commit a table once this many rows are buffered for it.
+    pub flush_rows: usize,
+    /// Bound on buffered rows (all tables, in flight included). Beyond it durable
+    /// appends fail fast (the lag stays in the WAL) and telemetry is dropped.
+    pub max_buffer_rows: usize,
+    /// Bound on one commit and one connect attempt: a durable append not
+    /// committed within `flush_interval` + this fails; its cursor stays.
+    #[serde(with = "humantime_serde")]
+    pub commit_timeout: Duration,
+    /// Cold cursor of a repository that predates the catalog: `false` = start at
+    /// its head, `true` = its retained log start (full history).
+    pub backfill: bool,
+    /// Create the namespace and tables when missing; `false` = fail instead.
+    pub create_tables: bool,
+}
+
+impl Default for CatalogConfig {
+    fn default() -> Self {
+        CatalogConfig {
+            enabled: false,
+            uri: None,
+            warehouse: None,
+            namespace: "floe".into(),
+            token_env: None,
+            credential_env: None,
+            s3_endpoint: None,
+            s3_region: "us-east-1".into(),
+            s3_access_key_env: "AWS_ACCESS_KEY_ID".into(),
+            s3_secret_key_env: "AWS_SECRET_ACCESS_KEY".into(),
+            s3_path_style: true,
+            flush_interval: Duration::from_secs(30),
+            flush_rows: 5000,
+            max_buffer_rows: 100_000,
+            commit_timeout: Duration::from_mins(1),
+            backfill: false,
+            create_tables: true,
+        }
+    }
+}
+
+impl GithubMirrorConfig {
+    /// `validate`'s checks for this section (only when `enabled`).
+    fn validate(&self, cfg: &Config) -> Result<()> {
+        anyhow::ensure!(
+            cfg.has_role(Role::Maintain),
+            "github_mirror.enabled needs the maintain role on this host"
+        );
+        self.check(cfg)
+    }
+
+    /// The section's own checks, without the role rule: `floe github sync`
+    /// runs them on a CLI host, where `enabled` is normally off.
+    pub fn check(&self, cfg: &Config) -> Result<()> {
+        anyhow::ensure!(
+            !self.prefix.is_empty()
+                && self.prefix.len() <= 16
+                && self
+                    .prefix
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
+            "github_mirror.prefix must be [a-z0-9]{{1,16}}, got {:?}",
+            self.prefix
+        );
+        for (key, list) in [("include", &self.include), ("exclude", &self.exclude)] {
+            for g in list {
+                anyhow::ensure!(
+                    g.matches('/').count() == 1 && !g.starts_with('/') && !g.ends_with('/'),
+                    "github_mirror.{key} entry {g:?} must be an owner/name glob with exactly one '/' (`*/*`, `acme/*`, `*/name`)"
+                );
+            }
+        }
+        for r in &self.repos {
+            anyhow::ensure!(
+                r.matches('/').count() == 1 && !r.contains('*') && !r.starts_with('/') && !r.ends_with('/'),
+                "github_mirror.repos entry {r:?} must be \"owner/name\""
+            );
+        }
+        // The token travels to both: https only, as for `upstream.git`
+        // (plain http only to the loopback, for tests).
+        for (key, u) in [("api_url", &self.api_url), ("git_url", &self.git_url)] {
+            anyhow::ensure!(
+                (u.starts_with("https://")
+                    || u.starts_with("http://localhost")
+                    || u.starts_with("http://127.0.0.1"))
+                    && !u.ends_with('/'),
+                "github_mirror.{key} must be an https:// URL without a trailing '/', got {u:?}"
+            );
+        }
+        anyhow::ensure!(
+            !self.token_env.is_empty(),
+            "github_mirror.token_env must name an environment variable"
+        );
+        anyhow::ensure!(
+            !self.follow.is_empty(),
+            "github_mirror.follow must list at least one ref pattern"
+        );
+        refpattern::RefPatterns::parse(&self.follow)?;
+        anyhow::ensure!(
+            !self.lease_ttl.is_zero(),
+            "github_mirror.lease_ttl must be > 0"
+        );
+        if self.include_private {
+            anyhow::ensure!(
+                self.private_visible_to_all_readers,
+                "github_mirror.include_private: floe has no per-repository read ACL, so every reader would read every mirrored private repository; set github_mirror.private_visible_to_all_readers = true to accept that, or include_private = false"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl CatalogConfig {
+    fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let set = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+        anyhow::ensure!(
+            set(&self.uri),
+            "catalog.uri must be set when catalog.enabled"
+        );
+        anyhow::ensure!(
+            set(&self.warehouse),
+            "catalog.warehouse must be set when catalog.enabled"
+        );
+        anyhow::ensure!(
+            !self.namespace.trim().is_empty(),
+            "catalog.namespace must not be empty"
+        );
+        anyhow::ensure!(self.flush_rows > 0, "catalog.flush_rows must be > 0");
+        anyhow::ensure!(
+            self.max_buffer_rows >= self.flush_rows,
+            "catalog.max_buffer_rows ({}) must be >= catalog.flush_rows ({})",
+            self.max_buffer_rows,
+            self.flush_rows
+        );
+        anyhow::ensure!(
+            !self.flush_interval.is_zero() && !self.commit_timeout.is_zero(),
+            "catalog.flush_interval and catalog.commit_timeout must be > 0"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct TelemetryConfig {
@@ -876,28 +1200,58 @@ impl Config {
             );
         }
         if let Some(toml::Value::Table(u)) = overrides.get("upstream") {
-            anyhow::ensure!(
-                !u.contains_key("token_env"),
-                "settings: upstream.token_env is host-only (it names an env var on the maintaining host)"
-            );
+            for key in ["token_env", "token_env_by_host"] {
+                anyhow::ensure!(
+                    !u.contains_key(key),
+                    "settings: upstream.{key} is host-only (it names env vars on the maintaining host)"
+                );
+            }
         }
         let mut doc: toml::Table = toml::Table::try_from(self).context("serializing config")?;
         merge(&mut doc, &overrides);
-        let cfg: Config = doc.try_into().context("settings: applying")?;
+        let mut cfg: Config = doc.try_into().context("settings: applying")?;
+        // Load-time state, not TOML: carried over the round trip.
+        cfg.github_mirror.use_token = self.github_mirror.use_token;
         cfg.validate()
             .context("settings: validating the effective config")?;
         Ok(cfg)
     }
 
     /// The effective config a reader may see: only [`SETTINGS_SECTIONS`], and
-    /// never `upstream.token_env` (that name is host-only).
+    /// never `upstream.token_env` / `token_env_by_host` (those names are host-only).
     pub fn public_settings_toml(&self) -> Result<String> {
         let mut doc: toml::Table = toml::Table::try_from(self).context("serializing config")?;
         doc.retain(|k, _| SETTINGS_SECTIONS.contains(&k));
         if let Some(toml::Value::Table(u)) = doc.get_mut("upstream") {
             u.remove("token_env");
+            u.remove("token_env_by_host");
         }
         toml::to_string_pretty(&doc).context("encoding settings")
+    }
+
+    /// The env var naming the token for an upstream URL: `upstream.token_env_by_host`
+    /// for the URL's host (`host:port` first, then the bare host), else the
+    /// mirror's token for a mirror-managed repository on the mirror's host
+    /// (D49), else `upstream.token_env`, else none (unauthenticated). The one place every
+    /// upstream caller (follow, LFS read-through, `repair`) resolves it.
+    ///
+    /// The authority ends at the first `/`, `?` or `#`, as git's and curl's URL
+    /// parsers end it. A URL with userinfo gets no token at all: `validate` refuses
+    /// one, and git and curl disagree on which `@` ends it, so no host-scoped token
+    /// could be sent to the host it is scoped to with certainty.
+    pub fn upstream_token_env(&self, url: &str) -> Option<&str> {
+        let authority = upstream_authority(url);
+        if authority.contains('@') {
+            return None;
+        }
+        let host = authority.split(':').next().unwrap_or_default();
+        let by_host = &self.upstream.token_env_by_host;
+        by_host
+            .get(authority)
+            .or_else(|| by_host.get(host))
+            .or_else(|| self.mirror_token_env(authority, host))
+            .or(self.upstream.token_env.as_ref())
+            .map(String::as_str)
     }
 
     /// D25: the effective on-disk budget — `cache.max_bytes` in budget mode,
@@ -1282,7 +1636,39 @@ impl Config {
     pub fn load(path: &std::path::Path) -> Result<Config> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        Self::parse(&text)
+        let mut cfg = Self::parse(&text)?;
+        cfg.derive_mirror_token_env(|k| std::env::var_os(k).is_some());
+        Ok(cfg)
+    }
+
+    /// D49: follow and LFS read-through on the mirror's repositories authenticate
+    /// with the mirror's token ([`GithubMirrorConfig::use_token`]) when the mirror
+    /// is enabled here **or** the variable is set in this process (a serving-only
+    /// host sharing the fleet's floe.toml). Only repositories the mirror manages
+    /// (`upstream.source = "github:…"`) get it: every other upstream on that host,
+    /// own repositories included, resolves exactly as before.
+    pub fn derive_mirror_token_env(&mut self, is_set: impl Fn(&str) -> bool) {
+        let m = &self.github_mirror;
+        let on = !m.token_env.is_empty() && (m.enabled || is_set(&m.token_env));
+        self.github_mirror.use_token = on;
+    }
+
+    /// The mirror's token env var for an upstream on `authority` (`host` without
+    /// the port), when this effective config is a mirror-managed repository's.
+    fn mirror_token_env(&self, authority: &str, host: &str) -> Option<&String> {
+        let m = &self.github_mirror;
+        let managed = self
+            .upstream
+            .source
+            .as_deref()
+            .is_some_and(|s| s.starts_with("github:"));
+        let mirror_host = upstream_authority(&m.git_url);
+        (m.use_token
+            && managed
+            && !m.token_env.is_empty()
+            && !mirror_host.is_empty()
+            && (mirror_host == authority || mirror_host == host))
+            .then_some(&m.token_env)
     }
 
     /// Apply `FLOE__a__b=v` overrides (values parsed as TOML values, falling back to string)
@@ -1401,6 +1787,7 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.store.bucket.is_empty(), "store.bucket must be set");
+        self.catalog.validate()?;
         let t = &self.server.tls;
         match t.mode {
             TlsMode::Files => anyhow::ensure!(
@@ -1459,6 +1846,17 @@ impl Config {
                     "{key} must be an https:// URL (got {u})"
                 );
                 anyhow::ensure!(!u.ends_with('/'), "{key} must not end with '/' (got {u})");
+                // Credentials in the URL would land in logs, task output, the
+                // Settings tab and the WAL entry's meta; tokens go through
+                // `token_env` / `token_env_by_host`. `?`/`#` would let the host
+                // a token is scoped to differ from the one git connects to.
+                anyhow::ensure!(
+                    !upstream_authority(u).contains('@')
+                        && !u.contains(['?', '#'])
+                        && !u.chars().any(char::is_whitespace),
+                    "{key} must not carry credentials, a query or a fragment (got {}); put the token in an env var named by upstream.token_env / token_env_by_host",
+                    redact_userinfo(u)
+                );
             }
         }
         if !self.upstream.follow.is_empty() {
@@ -1466,12 +1864,28 @@ impl Config {
                 self.upstream.git.is_some(),
                 "upstream.follow needs upstream.git (the host to follow)"
             );
-            for r in &self.upstream.follow {
-                anyhow::ensure!(
-                    r.starts_with("refs/") && !r.ends_with('/') && !r.contains('*'),
-                    "upstream.follow entries are full ref names (refs/heads/main), got {r:?}"
-                );
-            }
+            refpattern::RefPatterns::parse(&self.upstream.follow)?;
+        }
+        if let Some(h) = &self.upstream.head {
+            anyhow::ensure!(
+                h.starts_with("refs/heads/")
+                    && !h.contains('*')
+                    && refpattern::check_refspec_pattern(h).is_ok(),
+                "upstream.head must be a branch ref (refs/heads/main), got {h:?}"
+            );
+        }
+        for (host, var) in &self.upstream.token_env_by_host {
+            anyhow::ensure!(
+                !host.is_empty()
+                    && !host.contains('/')
+                    && !host.contains('@')
+                    && !host.chars().any(char::is_whitespace),
+                "upstream.token_env_by_host keys are bare hostnames (github.com), got {host:?}"
+            );
+            anyhow::ensure!(
+                !var.is_empty(),
+                "upstream.token_env_by_host.{host:?} names no environment variable"
+            );
         }
         for o in &self.server.cors_origins {
             let host = o
@@ -1609,6 +2023,9 @@ impl Config {
                 "events.webhook_url must be an http(s) URL"
             );
         }
+        if self.github_mirror.enabled {
+            self.github_mirror.validate(self)?;
+        }
         Ok(())
     }
 
@@ -1719,6 +2136,22 @@ fn rewrite_origin_port(origin: &str, port: u16) -> String {
         format!("{scheme}://{host}")
     } else {
         format!("{scheme}://{host}:{port}")
+    }
+}
+
+/// The authority of an upstream URL (`host[:port]`, with any `user@`): after
+/// `scheme://`, up to the first `/`, `?` or `#` (as git and curl end it).
+pub fn upstream_authority(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#']).next().unwrap_or_default()
+}
+
+/// `url` with any userinfo replaced by `***` (for error messages).
+fn redact_userinfo(url: &str) -> String {
+    let authority = upstream_authority(url);
+    match authority.rsplit_once('@') {
+        Some((_, host)) => url.replacen(authority, &format!("***@{host}"), 1),
+        None => url.to_string(),
     }
 }
 
@@ -1855,10 +2288,7 @@ mod tests {
         let ignored = c
             .apply_env_report(
                 vec![
-                    (
-                        "FLOE__CACHE__NOT_A_KEY_YET".to_string(),
-                        "0.9".to_string(),
-                    ),
+                    ("FLOE__CACHE__NOT_A_KEY_YET".to_string(), "0.9".to_string()),
                     (
                         "FLOE__WAL__MAX_BATCH".to_string(),
                         "not-a-number".to_string(),
@@ -1886,10 +2316,8 @@ mod tests {
         assert!(ignored[0].1.contains("unknown field"), "{:?}", ignored[0]);
         // Plain apply_env is the same, just warns.
         let mut c2 = Config::default();
-        c2.apply_env(
-            vec![("FLOE__CACHE__NOT_A_KEY_YET".to_string(), "1".to_string())].into_iter(),
-        )
-        .unwrap();
+        c2.apply_env(vec![("FLOE__CACHE__NOT_A_KEY_YET".to_string(), "1".to_string())].into_iter())
+            .unwrap();
     }
 
     #[test]
@@ -1949,6 +2377,197 @@ listen = \"0.0.0.0:1\"\n",
     }
 
     #[test]
+    fn github_mirror_validates_and_derives_the_token_host() {
+        let mut c = Config::default();
+        c.github_mirror.enabled = true;
+        c.github_mirror.users = vec!["@me".into()];
+        c.github_mirror.private_visible_to_all_readers = true;
+        c.validate().unwrap();
+        // Not a maintainer: `validate` refuses, the CLI's `check` does not.
+        let mut bad = c.clone();
+        bad.server.roles = vec![Role::Serve];
+        assert!(bad.validate().is_err());
+        bad.github_mirror.check(&bad).unwrap();
+        let edits: [fn(&mut GithubMirrorConfig); 10] = [
+            |m: &mut GithubMirrorConfig| m.prefix = "GH".into(),
+            |m: &mut GithubMirrorConfig| m.prefix = String::new(),
+            |m: &mut GithubMirrorConfig| m.include = vec!["acme".into()],
+            |m: &mut GithubMirrorConfig| m.exclude = vec!["a/b/c".into()],
+            |m: &mut GithubMirrorConfig| m.repos = vec!["acme/*".into()],
+            |m: &mut GithubMirrorConfig| m.api_url = "ftp://x".into(),
+            |m: &mut GithubMirrorConfig| m.api_url = "http://ghe.corp/api/v3".into(),
+            |m: &mut GithubMirrorConfig| m.git_url = "http://ghe.corp".into(),
+            |m: &mut GithubMirrorConfig| m.follow = vec![],
+            |m: &mut GithubMirrorConfig| m.follow = vec!["refs/archive/*".into()],
+        ];
+        for edit in edits {
+            let mut bad = c.clone();
+            edit(&mut bad.github_mirror);
+            assert!(bad.validate().is_err(), "{:?}", bad.github_mirror);
+            assert!(bad.github_mirror.check(&bad).is_err(), "{:?}", bad.github_mirror);
+        }
+        let mut local = c.clone();
+        local.github_mirror.api_url = "http://127.0.0.1:8080".into();
+        local.validate().unwrap();
+        // Private repositories need the acknowledgement in every auth mode
+        // (the bucket is the fleet's).
+        let mut none = c.clone();
+        none.github_mirror.private_visible_to_all_readers = false;
+        assert!(none.validate().is_err());
+        none.github_mirror.include_private = false;
+        none.validate().unwrap();
+        let mut tok = c.clone();
+        tok.server.auth.mode = AuthMode::Token;
+        tok.server.auth.tokens = vec![StaticToken {
+            principal: "ci".into(),
+            token: "t".into(),
+            token_env: None,
+            write: true,
+            admin: false,
+        }];
+        tok.validate().unwrap();
+        tok.github_mirror.private_visible_to_all_readers = false;
+        assert!(tok.validate().is_err());
+        tok.github_mirror.include_private = false;
+        tok.validate().unwrap();
+
+        // The mirror's token: only for mirror-managed repositories on its host,
+        // when the mirror is enabled here or the variable is set here.
+        let managed = "[upstream]\ngit = \"https://github.com/a/b.git\"\nsource = \"github:1\"\n";
+        let own = "[upstream]\ngit = \"https://github.com/a/b.git\"\n";
+        let mut d = c.clone();
+        d.upstream.token_env = Some("OTHER_TOKEN".into());
+        d.derive_mirror_token_env(|_| false);
+        assert!(d.upstream.token_env_by_host.is_empty(), "nothing host-wide");
+        let m = d.with_settings(managed).unwrap();
+        assert_eq!(
+            m.upstream_token_env("https://github.com/a/b.git"),
+            Some("FLOE_GITHUB_TOKEN")
+        );
+        assert_eq!(
+            m.upstream_token_env("https://gitlab.com/a/b.git"),
+            Some("OTHER_TOKEN"),
+            "another host"
+        );
+        let o = d.with_settings(own).unwrap();
+        assert_eq!(
+            o.upstream_token_env("https://github.com/a/b.git"),
+            Some("OTHER_TOKEN"),
+            "an own repository is unchanged"
+        );
+        let mut off = Config::default();
+        off.derive_mirror_token_env(|_| false);
+        assert_eq!(
+            off.with_settings(managed)
+                .unwrap()
+                .upstream_token_env("https://github.com/a/b.git"),
+            None
+        );
+        off.derive_mirror_token_env(|k| k == "FLOE_GITHUB_TOKEN");
+        assert_eq!(
+            off.with_settings(managed)
+                .unwrap()
+                .upstream_token_env("https://github.com/a/b.git"),
+            Some("FLOE_GITHUB_TOKEN")
+        );
+        assert_eq!(
+            off.with_settings(own)
+                .unwrap()
+                .upstream_token_env("https://github.com/a/b.git"),
+            None
+        );
+        // An explicit host entry wins.
+        let mut ex = c;
+        ex.upstream
+            .token_env_by_host
+            .insert("github.com".into(), "MINE".into());
+        ex.derive_mirror_token_env(|_| true);
+        assert_eq!(
+            ex.with_settings(managed)
+                .unwrap()
+                .upstream_token_env("https://github.com/a/b.git"),
+            Some("MINE")
+        );
+    }
+
+    #[test]
+    fn upstream_follow_keys_validate_and_redact() {
+        let mut base = Config::default();
+        base.upstream.token_env = Some("FLOE_UPSTREAM_TOKEN".into());
+        base.upstream
+            .token_env_by_host
+            .insert("github.com".into(), "FLOE_GITHUB_TOKEN".into());
+        base.validate().unwrap();
+        // `follow = []` is follow off and always publishes (the mirror's freeze).
+        let c = base.with_settings("[upstream]\nfollow = []\n").unwrap();
+        assert!(c.upstream.follow.is_empty());
+        let c = base
+            .with_settings(
+                "[upstream]\ngit = \"https://github.com/a/b.git\"\nfollow = [\"refs/heads/*\", \"^refs/heads/wip/*\"]\non_rewrite = \"refuse\"\nhead = \"refs/heads/main\"\nfollow_interval = \"10m\"\nsource = \"github:1\"\n",
+            )
+            .unwrap();
+        assert_eq!(c.upstream.on_rewrite, OnRewrite::Refuse);
+        assert_eq!(c.upstream.follow_interval, Some(Duration::from_secs(600)));
+        assert_eq!(Config::default().upstream.on_rewrite, OnRewrite::Archive);
+        for bad in [
+            "[upstream]\ngit = \"https://h/a\"\nfollow = [\"refs/archive/*\"]\n",
+            "[upstream]\ngit = \"https://h/a\"\nfollow = [\"^refs/heads/x\"]\n",
+            "[upstream]\nfollow = [\"refs/heads/*\"]\n",
+            "[upstream]\nhead = \"main\"\n",
+            "[upstream]\non_rewrite = \"overwrite\"\n",
+            "[upstream.token_env_by_host]\n\"github.com\" = \"AWS_SECRET_ACCESS_KEY\"\n",
+        ] {
+            assert!(base.with_settings(bad).is_err(), "{bad}");
+        }
+        let pub_toml = base.public_settings_toml().unwrap();
+        assert!(!pub_toml.contains("token_env"), "{pub_toml}");
+        assert!(!pub_toml.contains("FLOE_GITHUB_TOKEN"), "{pub_toml}");
+
+        // Token resolution: host entry beats token_env; other hosts fall back.
+        assert_eq!(
+            base.upstream_token_env("https://github.com/a/b.git"),
+            Some("FLOE_GITHUB_TOKEN")
+        );
+        assert_eq!(
+            base.upstream_token_env("https://github.com:443/a/b.git"),
+            Some("FLOE_GITHUB_TOKEN")
+        );
+        // The authority ends where git's does: `?`/`#` cannot smuggle a scoped
+        // token to another host, and userinfo gets no token at all.
+        assert_eq!(
+            base.upstream_token_env("https://evil.example?@github.com/a/b"),
+            Some("FLOE_UPSTREAM_TOKEN")
+        );
+        assert_eq!(
+            base.upstream_token_env("https://evil.example#@github.com/a/b"),
+            Some("FLOE_UPSTREAM_TOKEN")
+        );
+        assert_eq!(
+            base.upstream_token_env("https://x@github.com/a/b.git"),
+            None
+        );
+        for bad in [
+            "[upstream]\ngit = \"https://user:ghp_secret@github.com/a/b\"\n",
+            "[upstream]\ngit = \"https://evil.example?@github.com/a/b\"\n",
+            "[upstream]\ngit = \"https://github.com/a/b#x\"\n",
+            "[upstream]\nlfs = \"https://u@github.com/a/b.git/info/lfs\"\n",
+        ] {
+            let err = base.with_settings(bad).err().map(|e| format!("{e:#}"));
+            assert!(err.is_some(), "{bad}");
+            assert!(!err.unwrap_or_default().contains("ghp_secret"), "{bad}");
+        }
+        assert_eq!(
+            base.upstream_token_env("https://gitlab.com/a/b.git"),
+            Some("FLOE_UPSTREAM_TOKEN")
+        );
+        let mut bad = base.clone();
+        bad.upstream
+            .token_env_by_host
+            .insert("https://github.com".into(), "X".into());
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
     fn auth_modes_validate_fail_closed() {
         let multiple = Config::parse(
             r#"
@@ -2001,6 +2620,44 @@ webhook_secret = "s"
         assert_eq!(c.events.webhook_secret.as_deref(), Some("s"));
         let err = Config::parse("[events]\nwebhook_url = \"ftp://x\"\n").unwrap_err();
         assert!(err.to_string().contains("webhook_url"), "{err}");
+    }
+
+    #[test]
+    fn catalog_section_parses_and_validates() {
+        let d = CatalogConfig::default();
+        assert!(!d.enabled);
+        assert_eq!(d.namespace, "floe");
+        assert_eq!(d.flush_rows, 5000);
+        assert_eq!(d.flush_interval, Duration::from_secs(30));
+        let mut c = Config::parse(
+            r#"
+[store]
+bucket = "b"
+[catalog]
+enabled = true
+uri = "http://localhost:9000/iceberg"
+warehouse = "floe-catalog"
+flush_interval = "5s"
+flush_rows = 10
+max_buffer_rows = 100
+"#,
+        )
+        .unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.catalog.flush_interval, Duration::from_secs(5));
+        assert_eq!(c.catalog.s3_access_key_env, "AWS_ACCESS_KEY_ID");
+        c.catalog.max_buffer_rows = 5;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("max_buffer_rows"), "{err}");
+        c.catalog.max_buffer_rows = 100;
+        c.catalog.uri = None;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("catalog.uri"), "{err}");
+        // Disabled: nothing is required.
+        c.catalog.enabled = false;
+        c.validate().unwrap();
+        let err = Config::parse("[catalog]\nbogus = 1\n").unwrap_err();
+        assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
     }
 
     #[test]

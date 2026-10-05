@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 default-run = "floe"
 
+[features]
+# `floe serve` with the Iceberg audit tables (`[catalog]`, D50).
+catalog = ["floe-server/catalog"]
+
 [lib]
 name = "floe_cli"
 path = "src/lib.rs"
@@ -24,6 +28,7 @@ floe-config.workspace = true
 floe-git.workspace = true
 floe-wal.workspace = true
 floe-server.workspace = true
+floe-mirror.workspace = true
 floe-bundle = { path = "../floe-bundle", features = ["wal"] }
 gix-hash.workspace = true
 anyhow.workspace = true
