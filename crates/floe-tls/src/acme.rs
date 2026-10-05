@@ -115,6 +115,9 @@ pub enum Tick {
     Issued,
     /// This instance tried and failed (recorded in `status.json`).
     Failed(String),
+    /// A certificate this instance issued is being served but not yet saved to the bucket;
+    /// only the write is retried, never the order.
+    PendingWrite,
 }
 
 /// When a certificate valid from `not_before` to `not_after` (unix seconds) is due for
@@ -209,10 +212,25 @@ impl std::fmt::Debug for AcmeManager {
     }
 }
 
+/// `cert.json` of an issued certificate not yet in the bucket. Holds only the sealed key.
+struct PendingCert {
+    body: Vec<u8>,
+    not_after: i64,
+    attempts: u32,
+    next_at: i64,
+    error: String,
+}
+
 #[derive(Default)]
 struct Local {
     cert_version: Option<Version>,
     status_version: Option<Version>,
+    /// An issued certificate whose `cert.json` write failed (bucket outage): served from
+    /// memory, its write retried with backoff. Re-ordering instead would issue a duplicate
+    /// each time and can hit Let's Encrypt's 5-duplicates-a-week limit within an hour.
+    pending: Option<PendingCert>,
+    /// Orders this instance started (tests and diagnostics).
+    orders: u32,
     status: StoredStatus,
     load_error: Option<String>,
 }
@@ -248,6 +266,14 @@ impl AcmeManager {
         dns: Arc<dyn DnsProvider>,
         http: reqwest::Client,
     ) -> Result<Arc<Self>> {
+        // `Config::parse` normalises; a config built in code gets the same treatment, so
+        // `mailto:` and the order identifiers never carry stray whitespace.
+        let mut tls = floe_config::TlsConfig {
+            acme: cfg.clone(),
+            ..floe_config::TlsConfig::default()
+        };
+        tls.normalize();
+        let cfg = &tls.acme;
         let directory = cfg.directory_url().to_string();
         let mut sorted = cfg.domains.clone();
         sorted.sort();
@@ -420,6 +446,12 @@ impl AcmeManager {
 
     /// One pass: revalidate, then order if due and nobody else is.
     pub async fn tick(&self, narrator: &dyn Narrator) -> Result<Tick> {
+        // An issued certificate still waiting for its bucket write: retry the write only.
+        // Nothing else runs meanwhile — a refresh could swap the older bucket certificate
+        // back in and make it look due.
+        if !self.flush_pending().await {
+            return Ok(Tick::PendingWrite);
+        }
         if let Err(e) = self.refresh().await {
             tracing::debug!(error = %e, "tls refresh failed");
         }
@@ -454,7 +486,15 @@ impl AcmeManager {
     /// guard. For tests (Pebble renewal) and a future operator action; never called by the
     /// poll loop.
     pub async fn renew_now(&self, narrator: &dyn Narrator) -> Result<Tick> {
+        if !self.flush_pending().await {
+            return Ok(Tick::PendingWrite);
+        }
         self.with_lease(narrator, true).await
+    }
+
+    /// Orders this instance has started since it was created.
+    pub fn orders_started(&self) -> u32 {
+        self.local().orders
     }
 
     async fn with_lease(&self, narrator: &dyn Narrator, force: bool) -> Result<Tick> {
@@ -609,6 +649,10 @@ impl AcmeManager {
 
     /// Order, validate over DNS-01, finalize, store, install. Returns the new `not_after`.
     async fn order(&self, task: &dyn Narration) -> Result<i64> {
+        {
+            let mut l = self.local();
+            l.orders = l.orders.saturating_add(1);
+        }
         let account = self.account(task).await?;
         let ids: Vec<Identifier> = self
             .domains
@@ -656,7 +700,14 @@ impl AcmeManager {
             .poll_certificate(&RetryPolicy::new().timeout(Duration::from_mins(2)))
             .await
             .context("downloading the certificate")?;
-        let loaded = load_pem(&chain, &key_pem).context("the issued certificate")?;
+        self.store_issued(chain, &key_pem).await
+    }
+
+    /// Serve a freshly issued certificate at once, then persist it. A failed bucket write
+    /// keeps it pending (served, write retried by [`AcmeManager::tick`]); the order itself is
+    /// a success either way.
+    async fn store_issued(&self, chain: String, key_pem: &str) -> Result<i64> {
+        let loaded = load_pem(&chain, key_pem).context("the issued certificate")?;
         let not_after = loaded.info.not_after;
         let stored = StoredCert {
             version: 1,
@@ -669,16 +720,68 @@ impl AcmeManager {
             issued_by: self.holder.clone(),
         };
         let body = serde_json::to_vec_pretty(&stored)?;
-        let meta = self
+        self.resolver.set(loaded);
+        {
+            let mut l = self.local();
+            l.load_error = None;
+            l.pending = Some(PendingCert {
+                body,
+                not_after,
+                attempts: 0,
+                next_at: 0,
+                error: String::new(),
+            });
+        }
+        self.flush_pending().await;
+        Ok(not_after)
+    }
+
+    /// Try the pending `cert.json` write if one is due. `true` = nothing pending afterwards.
+    async fn flush_pending(&self) -> bool {
+        let (body, attempt) = {
+            let mut l = self.local();
+            let Some(p) = l.pending.as_ref() else {
+                return true;
+            };
+            if p.not_after <= now() {
+                // Expired before it could be saved: nothing worth keeping.
+                l.pending = None;
+                return true;
+            }
+            if p.next_at > now() {
+                return false;
+            }
+            (p.body.clone(), p.attempts)
+        };
+        match self
             .store
             .put_bytes(&self.cert_key(), body, PutMode::Overwrite)
             .await
-            .context("writing cert.json")?;
-        self.resolver.set(loaded);
-        let mut l = self.local();
-        l.cert_version = Some(meta.version);
-        l.load_error = None;
-        Ok(not_after)
+        {
+            Ok(meta) => {
+                let mut l = self.local();
+                l.cert_version = Some(meta.version);
+                l.pending = None;
+                drop(l);
+                if attempt > 0 {
+                    tracing::info!(attempts = attempt + 1, "issued TLS certificate saved to the bucket");
+                }
+                true
+            }
+            Err(e) => {
+                let attempts = attempt.saturating_add(1);
+                let wait = backoff(attempts, false);
+                let error = format!("issued certificate not yet saved to the bucket (attempt {attempts}): {e}");
+                tracing::warn!(retry_in = ?wait, "{error}; serving it from memory, not re-ordering");
+                let mut l = self.local();
+                if let Some(p) = l.pending.as_mut() {
+                    p.attempts = attempts;
+                    p.next_at = now().saturating_add(i64::try_from(wait.as_secs()).unwrap_or(i64::MAX));
+                    p.error = error;
+                }
+                false
+            }
+        }
     }
 
     async fn publish(
@@ -763,7 +866,11 @@ impl AcmeManager {
         s.last_attempt_at.clone_from(&l.status.last_attempt_at);
         // A refused cert.json counts as a renewal failure here: it is this instance's most
         // current problem, so it leads.
-        s.last_error = l.load_error.clone().or_else(|| l.status.last_error.clone());
+        s.last_error = l
+            .load_error
+            .clone()
+            .or_else(|| l.pending.as_ref().map(|p| p.error.clone()).filter(|e| !e.is_empty()))
+            .or_else(|| l.status.last_error.clone());
         s.failures = l
             .status
             .failures
@@ -1012,6 +1119,49 @@ mod tests {
         publish(&mgr, &chain, &key).await;
         assert!(mgr.refresh().await.unwrap());
         assert_eq!(mgr.status().failures, 0);
+    }
+
+    /// A bucket outage right after issuance: the certificate is served from memory, only the
+    /// `cert.json` write is retried, and nothing is ordered again (each re-order would be a
+    /// duplicate certificate against the CA's weekly limit).
+    #[tokio::test]
+    async fn an_issued_certificate_survives_failed_bucket_writes_without_reordering() {
+        use floe_store::fault::{FaultPlan, FaultStore};
+        let truth: DynStore = MemoryStore::shared();
+        let link = FaultStore::new(truth.clone(), "orderer", 7);
+        let store: DynStore = link.clone();
+        let (mgr, resolver) = instance(&store, Duration::from_hours(30 * 24));
+        link.set(
+            FaultPlan {
+                p_err_before: 1.0,
+                ..FaultPlan::default()
+            }
+            .with_only(&["cert.json"]),
+        );
+        // The one order: issued, then the write fails.
+        let (chain, key) = pem(now() - 60, now() + 90 * DAY);
+        mgr.store_issued(chain, &key).await.unwrap();
+        let served = resolver.current().expect("served from memory").info.fingerprint.clone();
+        assert!(truth.get_bytes(&mgr.cert_key()).await.unwrap().is_none());
+        assert!(mgr.status().last_error.unwrap().contains("not yet saved"));
+        // N more failing retries (backoff skipped for the test), and a forced renewal: no order.
+        for _ in 0..3 {
+            mgr.local().pending.as_mut().unwrap().next_at = 0;
+            assert_eq!(mgr.tick(&crate::LogNarrator).await.unwrap(), Tick::PendingWrite);
+        }
+        assert_eq!(mgr.renew_now(&crate::LogNarrator).await.unwrap(), Tick::PendingWrite);
+        assert!(truth.get_bytes(&mgr.cert_key()).await.unwrap().is_none());
+        // The bucket comes back: the next due retry saves exactly the served certificate.
+        link.heal();
+        mgr.local().pending.as_mut().unwrap().next_at = 0;
+        assert_eq!(mgr.tick(&crate::LogNarrator).await.unwrap(), Tick::Fresh);
+        assert!(mgr.local().pending.is_none());
+        assert_eq!(mgr.orders_started(), 0, "never re-ordered");
+        assert_eq!(resolver.current().unwrap().info.fingerprint, served);
+        assert!(mgr.status().last_error.is_none());
+        let (other, other_resolver) = instance(&truth, Duration::from_hours(30 * 24));
+        assert!(other.refresh().await.unwrap());
+        assert_eq!(other_resolver.current().unwrap().info.fingerprint, served);
     }
 
     #[tokio::test]

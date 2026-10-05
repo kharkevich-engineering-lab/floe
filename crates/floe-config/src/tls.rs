@@ -197,6 +197,34 @@ pub fn api_url_allowed(url: &str) -> bool {
 }
 
 impl TlsConfig {
+    /// Trim the values an operator types or mounts: `email`, `domains`, the env var names,
+    /// `directory`, `zone_id`, `api_url` (a trailing newline in `mailto:` makes the CA reject
+    /// the account, and every order after it).
+    pub fn normalize(&mut self) {
+        let a = &mut self.acme;
+        let trim = |s: &mut String| {
+            let t = s.trim();
+            if t.len() != s.len() {
+                *s = t.to_string();
+            }
+        };
+        trim(&mut a.email);
+        trim(&mut a.directory);
+        trim(&mut a.storage_key_env);
+        trim(&mut a.challenge);
+        trim(&mut a.cloudflare.api_token_env);
+        trim(&mut a.cloudflare.api_url);
+        if let Some(z) = a.cloudflare.zone_id.as_mut() {
+            trim(z);
+        }
+        for d in &mut a.domains {
+            trim(d);
+        }
+        for r in &mut a.resolvers {
+            trim(r);
+        }
+    }
+
     /// Fail-closed validation of `[server.tls]` (part of `Config::validate`).
     pub fn validate(&self) -> Result<()> {
         let acme_set = self.acme != AcmeConfig::default();
@@ -248,7 +276,8 @@ impl AcmeConfig {
             );
             anyhow::ensure!(seen.insert(d.as_str()), "server.tls.acme.domains lists {d:?} twice");
         }
-        let email = self.email.trim();
+        // `Config::normalize` trimmed it; anything left is invalid, not silently fixed here.
+        let email = self.email.as_str();
         anyhow::ensure!(
             email.split_once('@').is_some_and(|(u, h)| !u.is_empty() && h.contains('.'))
                 && !email.contains(char::is_whitespace),
@@ -446,6 +475,40 @@ mod tests {
         let mut t = acme();
         t.acme.cloudflare.api_url = "http://127.0.0.1.evil.com/client/v4".into();
         assert!(t.validate().unwrap_err().to_string().contains("api_url"));
+    }
+
+    #[test]
+    fn whitespace_from_env_or_secret_files_is_normalised_once() {
+        let mut cfg = crate::Config::default();
+        cfg.store.bucket = "b".into();
+        cfg.server.tls = acme();
+        cfg.apply_env(
+            vec![
+                ("FLOE__SERVER__TLS__ACME__EMAIL".to_string(), "ops@example.com\n".to_string()),
+                (
+                    "FLOE__SERVER__TLS__ACME__CLOUDFLARE__API_TOKEN_ENV".to_string(),
+                    " CF_TOKEN\n".to_string(),
+                ),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        cfg.server.tls.acme.domains = vec![" git.example.com\n".into(), "*.git.example.com ".into()];
+        assert!(cfg.validate().is_err(), "un-normalised values are refused, never sent");
+        cfg.normalize();
+        cfg.validate().unwrap();
+        let a = &cfg.server.tls.acme;
+        assert_eq!(a.email, "ops@example.com");
+        assert_eq!(a.domains, vec!["git.example.com", "*.git.example.com"]);
+        assert_eq!(a.cloudflare.api_token_env, "CF_TOKEN");
+
+        // Config::parse does the same for values in the file.
+        let parsed = crate::Config::parse(
+            "[store]\nbucket = \"b\"\n[server.tls]\nmode = \"acme\"\n[server.tls.acme]\ndomains = [\" git.example.com \"]\nemail = \"ops@example.com\\n\"\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.server.tls.acme.email, "ops@example.com");
+        assert_eq!(parsed.server.tls.acme.domains, vec!["git.example.com"]);
     }
 
     #[test]

@@ -550,7 +550,9 @@ the new certificate into a rustls `ResolvesServerCert` — new handshakes get it
 theirs, no restart. A `cert.json` whose recorded domains or directory differ from the config, or whose leaf SANs do
 not cover every configured name (wildcard-aware), is refused: the current certificate stays, the refusal is logged
 and counted as a failure. The Cloudflare token goes only to `https://`, or plain `http://` to exactly
-`127.0.0.1`/`::1`/`localhost` (a mock). The first order is a `tls-acme` task (D13) and `/readyz` is 503 until a certificate is loaded.
+`127.0.0.1`/`::1`/`localhost` (a mock). An issued certificate whose `cert.json` write fails (bucket outage) is served from
+memory and only the write is retried with backoff — never a re-order, which would spend Let's Encrypt's
+5-duplicates-a-week budget. `email`, `domains` and the env var names are trimmed once at parse (`Config::normalize`). The first order is a `tls-acme` task (D13) and `/readyz` is 503 until a certificate is loaded.
 Propagation is checked against the zone's authoritative nameservers (or `resolvers`) with a timeout before the CA
 is asked; challenge records are always deleted. Renewal starts `renew_before` ahead of expiry but never before two thirds
 of the certificate's lifetime (a 60-day `renew_before` against a 6- or 45-day profile would otherwise make every

@@ -1731,8 +1731,15 @@ impl Config {
     pub fn parse(toml_text: &str) -> Result<Config> {
         let mut cfg: Config = toml::from_str(toml_text).context("parsing floe.toml")?;
         cfg.apply_env(std::env::vars())?;
+        cfg.normalize();
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Canonicalise values that arrive with stray whitespace (an env var or a mounted secret
+    /// file ends in a newline): done once here, so every consumer sees the same value.
+    pub fn normalize(&mut self) {
+        self.server.tls.normalize();
     }
 
     pub fn load(path: &std::path::Path) -> Result<Config> {
