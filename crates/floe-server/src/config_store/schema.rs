@@ -583,22 +583,24 @@ fn section_title(section: &str) -> &str {
 mod tests {
     use super::*;
 
+    /// Asserts every key of `doc` (recursively) has a schema node.
+    fn walk(schema: &Value, doc: &Value, path: &str) {
+        for (key, v) in doc.as_object().unwrap() {
+            let node = schema["properties"].get(key);
+            assert!(node.is_some(), "{path}.{key} missing from the schema");
+            let p = format!("{path}.{key}");
+            if v.is_object() && !SECRET_PATHS.contains(&p.as_str()) {
+                assert_eq!(node.unwrap()["type"], "object", "{p}");
+                walk(node.unwrap(), v, &p);
+            }
+        }
+    }
+
     /// Every key of the document is in the schema, and every annotation names a key.
     #[test]
     fn schema_covers_the_document() {
         let s = document_schema();
         let defaults = RuntimeConfig::default().to_json().unwrap();
-        fn walk(schema: &Value, doc: &Value, path: &str) {
-            for (key, v) in doc.as_object().unwrap() {
-                let node = schema["properties"].get(key);
-                assert!(node.is_some(), "{path}.{key} missing from the schema");
-                let p = format!("{path}.{key}");
-                if v.is_object() && !SECRET_PATHS.contains(&p.as_str()) {
-                    assert_eq!(node.unwrap()["type"], "object", "{p}");
-                    walk(node.unwrap(), v, &p);
-                }
-            }
-        }
         for (section, body) in defaults.as_object().unwrap() {
             walk(&s["properties"][section], body, section);
         }

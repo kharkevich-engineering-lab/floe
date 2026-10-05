@@ -564,7 +564,8 @@ fn run(config: &std::path::Path, command: Command) -> Result<()> {
         .enable_all()
         .build()?;
 
-    rt.block_on(async move { dispatch(command, cfg).await })
+    // Boxed: the future owns the whole Config (clippy::large_futures).
+    rt.block_on(Box::pin(dispatch(command, cfg)))
 }
 
 async fn dispatch(command: Command, cfg: Config) -> Result<()> {
