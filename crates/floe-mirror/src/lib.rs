@@ -585,8 +585,7 @@ async fn sleep_or_drain(d: Duration, lost: Option<&AtomicBool>, stop: &AtomicBoo
 
 /// ±10 %.
 fn jitter(d: Duration) -> Duration {
-    use rand::Rng;
-    let f: f64 = rand::rng().random_range(0.9..1.1);
+    let f: f64 = rand::random_range(0.9..1.1);
     d.mul_f64(f)
 }
 

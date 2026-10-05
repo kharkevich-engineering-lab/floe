@@ -133,10 +133,9 @@ pub fn backoff(
     base: std::time::Duration,
     max: std::time::Duration,
 ) -> std::time::Duration {
-    use rand::Rng;
     let exp = base.saturating_mul(1u32 << attempt.min(16));
     let cap = exp.min(max);
-    let jitter = rand::rng().random_range(0..=u64::try_from(cap.as_millis()).unwrap_or(u64::MAX));
+    let jitter = rand::random_range(0..=u64::try_from(cap.as_millis()).unwrap_or(u64::MAX));
     std::time::Duration::from_millis(jitter)
 }
 
