@@ -138,6 +138,23 @@ fn spacing_until(status: &StoredStatus, loaded: bool) -> Option<i64> {
     (until > now()).then_some(until)
 }
 
+/// Whether a certificate with `sans` is valid for the configured name `domain`: an exact SAN,
+/// or (for a non-wildcard name) a `*.parent` SAN covering exactly one leftmost label. A
+/// configured wildcard needs that exact wildcard SAN.
+pub fn sans_cover(sans: &[String], domain: &str) -> bool {
+    let domain = domain.to_ascii_lowercase();
+    sans.iter().any(|san| {
+        let san = san.to_ascii_lowercase();
+        san == domain
+            || (!domain.starts_with("*.")
+                && san.strip_prefix("*.").is_some_and(|parent| {
+                    domain
+                        .split_once('.')
+                        .is_some_and(|(label, rest)| !label.is_empty() && rest == parent)
+                }))
+    })
+}
+
 /// Retry delay after `failures` consecutive failures.
 pub fn backoff(failures: u32, rate_limited: bool) -> Duration {
     let exp = failures.saturating_sub(1).min(16);
@@ -301,7 +318,8 @@ impl AcmeManager {
                 let msg = format!("{e:#}");
                 l.load_error = Some(msg.clone());
                 drop(l);
-                tracing::error!(object = %key, error = %msg, "TLS certificate in the bucket cannot be loaded");
+                metrics::counter!("floe_tls_cert_refused_total").increment(1);
+                tracing::error!(object = %key, error = %msg, "TLS certificate in the bucket refused; still presenting the current one");
                 Err(e)
             }
         }
@@ -309,12 +327,36 @@ impl AcmeManager {
 
     fn install(&self, body: &[u8]) -> Result<()> {
         let c: StoredCert = serde_json::from_slice(body).context("cert.json")?;
+        // Refuse before opening anything: an object for other names or another CA is never
+        // presented, whatever put it there.
+        let mut want = self.domains.clone();
+        want.sort();
+        let mut have = c.domains.clone();
+        have.sort();
+        anyhow::ensure!(
+            have == want && c.directory == self.directory,
+            "cert.json is for {:?} from {} but this host is configured for {:?} from {}; refusing it",
+            c.domains,
+            c.directory,
+            self.domains,
+            self.directory
+        );
         let key_pem = self
             .seal
             .open(self.aad("key").as_bytes(), &c.key_sealed)
             .context("opening the certificate's private key")?;
         let key_pem = String::from_utf8(key_pem).context("private key is not PEM")?;
         let loaded = load_pem(&c.chain_pem, &key_pem)?;
+        let uncovered: Vec<&String> = self
+            .domains
+            .iter()
+            .filter(|d| !sans_cover(&loaded.info.sans, d))
+            .collect();
+        anyhow::ensure!(
+            uncovered.is_empty(),
+            "cert.json's certificate (SANs {:?}) does not cover {uncovered:?}; refusing it",
+            loaded.info.sans
+        );
         self.resolver.set(loaded);
         Ok(())
     }
@@ -719,8 +761,13 @@ impl AcmeManager {
         s.source = Some(format!("bucket:{}", self.cert_key()));
         s.last_renewal_at.clone_from(&l.status.last_success_at);
         s.last_attempt_at.clone_from(&l.status.last_attempt_at);
-        s.last_error = l.status.last_error.clone().or_else(|| l.load_error.clone());
-        s.failures = l.status.failures;
+        // A refused cert.json counts as a renewal failure here: it is this instance's most
+        // current problem, so it leads.
+        s.last_error = l.load_error.clone().or_else(|| l.status.last_error.clone());
+        s.failures = l
+            .status
+            .failures
+            .saturating_add(u32::from(l.load_error.is_some()));
         s.next_attempt_at = l.status.next_attempt_at.map(rfc3339);
         drop(l);
         s.renewal_due = self.due();
@@ -862,10 +909,16 @@ mod tests {
         (mgr, resolver)
     }
 
-    /// A certificate valid from `from` to `to` (unix seconds).
+    /// A `floe.test` certificate valid from `from` to `to` (unix seconds).
     fn pem(from: i64, to: i64) -> (String, String) {
+        pem_for(&["floe.test"], from, to)
+    }
+
+    fn pem_for(names: &[&str], from: i64, to: i64) -> (String, String) {
         let key = rcgen::KeyPair::generate().unwrap();
-        let mut params = rcgen::CertificateParams::new(vec!["floe.test".to_string()]).unwrap();
+        let mut params =
+            rcgen::CertificateParams::new(names.iter().map(ToString::to_string).collect::<Vec<_>>())
+                .unwrap();
         let epoch = rcgen::date_time_ymd(1970, 1, 1);
         params.not_before = epoch + Duration::from_secs(u64::try_from(from).unwrap());
         params.not_after = epoch + Duration::from_secs(u64::try_from(to).unwrap());
@@ -874,10 +927,15 @@ mod tests {
 
     /// Write `cert.json` the way the orderer does.
     async fn publish(mgr: &AcmeManager, chain: &str, key: &str) {
+        publish_as(mgr, chain, key, &mgr.domains, &mgr.directory).await;
+    }
+
+    /// Write `cert.json` recording `domains` / `directory` (which may not match the config).
+    async fn publish_as(mgr: &AcmeManager, chain: &str, key: &str, domains: &[String], directory: &str) {
         let stored = StoredCert {
             version: 1,
-            directory: mgr.directory.clone(),
-            domains: mgr.domains.clone(),
+            directory: directory.to_string(),
+            domains: domains.to_vec(),
             chain_pem: chain.to_string(),
             key_sealed: mgr.seal.seal(mgr.aad("key").as_bytes(), key.as_bytes()).unwrap(),
             not_after: 0,
@@ -906,6 +964,54 @@ mod tests {
         publish(&mgr, &chain, &key).await;
         assert!(mgr.refresh().await.unwrap());
         assert!(mgr.due());
+    }
+
+    #[test]
+    fn sans_cover_is_wildcard_aware() {
+        let sans = vec!["floe.test".to_string(), "*.floe.test".to_string()];
+        assert!(sans_cover(&sans, "floe.test"));
+        assert!(sans_cover(&sans, "git.floe.test"), "one label under the wildcard");
+        assert!(sans_cover(&sans, "*.floe.test"));
+        assert!(!sans_cover(&sans, "a.b.floe.test"), "a wildcard covers one label only");
+        assert!(!sans_cover(&sans, "other.test"));
+        let only_wild = vec!["*.floe.test".to_string()];
+        assert!(!sans_cover(&only_wild, "floe.test"), "the apex is not under its wildcard");
+        let only_host = vec!["git.floe.test".to_string()];
+        assert!(!sans_cover(&only_host, "*.floe.test"), "a configured wildcard needs that SAN");
+    }
+
+    #[tokio::test]
+    async fn a_cert_json_for_other_names_or_another_ca_is_refused() {
+        let store: DynStore = MemoryStore::shared();
+        let (mgr, resolver) = instance(&store, Duration::from_hours(30 * 24));
+        let (chain, key) = pem(now() - 60, now() + 90 * DAY);
+        publish(&mgr, &chain, &key).await;
+        assert!(mgr.refresh().await.unwrap());
+        let good = resolver.current().unwrap().info.fingerprint.clone();
+        let other_dir = format!("{}-other", mgr.directory);
+        let cases: Vec<(Vec<String>, String, (String, String))> = vec![
+            // Recorded domains differ from the config.
+            (vec!["evil.test".to_string()], mgr.directory.clone(), pem(now() - 60, now() + 90 * DAY)),
+            // Another directory.
+            (mgr.domains.clone(), other_dir, pem(now() - 60, now() + 90 * DAY)),
+            // Recorded domains match, but the leaf does not cover them.
+            (mgr.domains.clone(), mgr.directory.clone(), pem_for(&["evil.test"], now() - 60, now() + 90 * DAY)),
+        ];
+        for (domains, directory, (chain, key)) in cases {
+            publish_as(&mgr, &chain, &key, &domains, &directory).await;
+            let err = mgr.refresh().await.unwrap_err().to_string();
+            assert!(err.contains("refusing"), "{err}");
+            assert_eq!(resolver.current().unwrap().info.fingerprint, good, "current certificate kept");
+            let st = mgr.status();
+            assert_eq!(st.failures, 1, "counted as a renewal failure: {st:?}");
+            assert!(st.last_error.as_deref().is_some_and(|e| e.contains("refusing")));
+            assert!(!st.last_error.unwrap().contains("PRIVATE"), "no secrets in the error");
+        }
+        // A good object again clears it.
+        let (chain, key) = pem(now() - 60, now() + 90 * DAY);
+        publish(&mgr, &chain, &key).await;
+        assert!(mgr.refresh().await.unwrap());
+        assert_eq!(mgr.status().failures, 0);
     }
 
     #[tokio::test]

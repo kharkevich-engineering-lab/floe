@@ -547,7 +547,10 @@ random 96-bit nonces are safe at a few seals per renewal and need no nonce state
 `leases/tls-acme-<set>.pb` (the existing CAS lease, heartbeat while ordering) orders or renews; everyone
 revalidates `cert.json` by conditional GET every `poll_interval` (10 min; 10 s while nothing is loaded) and swaps
 the new certificate into a rustls `ResolvesServerCert` — new handshakes get it, established connections keep
-theirs, no restart. The first order is a `tls-acme` task (D13) and `/readyz` is 503 until a certificate is loaded.
+theirs, no restart. A `cert.json` whose recorded domains or directory differ from the config, or whose leaf SANs do
+not cover every configured name (wildcard-aware), is refused: the current certificate stays, the refusal is logged
+and counted as a failure. The Cloudflare token goes only to `https://`, or plain `http://` to exactly
+`127.0.0.1`/`::1`/`localhost` (a mock). The first order is a `tls-acme` task (D13) and `/readyz` is 503 until a certificate is loaded.
 Propagation is checked against the zone's authoritative nameservers (or `resolvers`) with a timeout before the CA
 is asked; challenge records are always deleted. Renewal starts `renew_before` ahead of expiry but never before two thirds
 of the certificate's lifetime (a 60-day `renew_before` against a 6- or 45-day profile would otherwise make every

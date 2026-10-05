@@ -62,7 +62,7 @@ poll_interval = "10m"             # how often each instance revalidates tls/…/
 api_token_env = "CLOUDFLARE_API_TOKEN"   # env var with an API token scoped to Zone:DNS:Edit (+ Zone:Read without zone_id).
                                   # Required in acme mode; never logged.
 # zone_id = "0123456789abcdef"    # optional: skip the zone lookup (then Zone:DNS:Edit alone is enough)
-api_url = "https://api.cloudflare.com/client/v4"
+api_url = "https://api.cloudflare.com/client/v4"   # https only (plain http just to 127.0.0.1/::1/localhost, for a mock)
 
 [server.auth]
 mode = "none"                     # "none" | "token" | "oidc"

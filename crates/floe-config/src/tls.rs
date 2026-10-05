@@ -166,6 +166,36 @@ pub fn valid_cert_name(name: &str) -> bool {
         })
 }
 
+/// The host of an `http(s)://host[:port][/path]` URL, without brackets; `None` if malformed
+/// (userinfo is refused: `http://127.0.0.1@evil.example` must not pass as loopback).
+fn url_host(rest: &str) -> Option<&str> {
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    if let Some(v6) = authority.strip_prefix('[') {
+        let (host, after) = v6.split_once(']')?;
+        return (after.is_empty() || after.strip_prefix(':').is_some_and(|p| p.parse::<u16>().is_ok()))
+            .then_some(host);
+    }
+    let (host, port) = authority.split_once(':').map_or((authority, None), |(h, p)| (h, Some(p)));
+    if port.is_some_and(|p| p.parse::<u16>().is_err()) || host.is_empty() {
+        return None;
+    }
+    Some(host)
+}
+
+/// Where the Cloudflare token may be sent: any `https://` host, or plain `http://` to exactly
+/// `127.0.0.1`, `::1` or `localhost` (a local mock). Never a host that merely starts with one.
+pub fn api_url_allowed(url: &str) -> bool {
+    if let Some(rest) = url.strip_prefix("https://") {
+        return url_host(rest).is_some();
+    }
+    url.strip_prefix("http://")
+        .and_then(url_host)
+        .is_some_and(|h| matches!(h, "127.0.0.1" | "::1" | "localhost"))
+}
+
 impl TlsConfig {
     /// Fail-closed validation of `[server.tls]` (part of `Config::validate`).
     pub fn validate(&self) -> Result<()> {
@@ -263,8 +293,8 @@ impl AcmeConfig {
                     "server.tls.acme.cloudflare.api_token_env must name the env var with the Cloudflare API token (Zone:DNS:Edit)"
                 );
                 anyhow::ensure!(
-                    cf.api_url.starts_with("https://") || cf.api_url.starts_with("http://127.0.0.1"),
-                    "server.tls.acme.cloudflare.api_url must be https:// (got {:?})",
+                    api_url_allowed(&cf.api_url),
+                    "server.tls.acme.cloudflare.api_url must be https:// (plain http only for 127.0.0.1, ::1 or localhost; got {:?})",
                     cf.api_url
                 );
                 if let Some(z) = &cf.zone_id {
@@ -385,6 +415,37 @@ mod tests {
         let mut t = acme();
         t.acme.cloudflare.zone_id = Some("abc/def".into());
         assert!(t.validate().is_err());
+    }
+
+    #[test]
+    fn cloudflare_api_url_allows_plain_http_only_to_loopback() {
+        for ok in [
+            "https://api.cloudflare.com/client/v4",
+            "https://api.cloudflare.com:443/client/v4",
+            "http://127.0.0.1:8080/client/v4",
+            "http://127.0.0.1/client/v4",
+            "http://[::1]:9000/v4",
+            "http://localhost:3000",
+        ] {
+            assert!(api_url_allowed(ok), "{ok}");
+        }
+        for bad in [
+            "http://127.0.0.1.evil.com/client/v4",
+            "http://127.0.0.1.evil.com:80",
+            "http://127.0.0.1@evil.com/v4",
+            "http://localhost.evil.com",
+            "http://[::1].evil.com",
+            "http://api.cloudflare.com/client/v4",
+            "http://127.0.0.1:notaport/",
+            "ftp://127.0.0.1/",
+            "https://",
+            "https://user@api.cloudflare.com",
+        ] {
+            assert!(!api_url_allowed(bad), "{bad}");
+        }
+        let mut t = acme();
+        t.acme.cloudflare.api_url = "http://127.0.0.1.evil.com/client/v4".into();
+        assert!(t.validate().unwrap_err().to_string().contains("api_url"));
     }
 
     #[test]

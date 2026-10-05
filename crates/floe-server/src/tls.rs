@@ -26,7 +26,9 @@ use crate::TcpAccept;
 
 pub use floe_tls::Tls;
 
-/// Pseudo-repository the instance-level TLS task is filed under (`tasks` log, metrics).
+/// Pseudo-repository the instance-level TLS task is filed under (`tasks` log, metrics). Not a
+/// repository id, so no `/{o}/{r}/api/tasks*` route can reach these records: their errors
+/// (CA / DNS text) stay out of reach of non-admins, as `last_error` does (D59).
 pub const TASK_SCOPE: &str = "_instance";
 
 /// ACME orders narrated as tasks (D13): `tls-acme` under [`TASK_SCOPE`], with a log line per
@@ -173,6 +175,16 @@ impl AsyncWrite for LazyTls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tls-acme` records carry the CA's / DNS provider's full error text, which D59 makes
+    /// admin-only. Every task reader in the API (`…/tasks`, `…/tasks/{id}`, overview `recent`)
+    /// is scoped to a parsed `owner/name`, so a scope that is not a repository id can never be
+    /// listed or attached to.
+    #[test]
+    fn the_instance_task_scope_is_unreachable_through_repository_task_routes() {
+        assert!(TASK_SCOPE.parse::<floe_git::RepoId>().is_err());
+        assert!(!TASK_SCOPE.contains('/'));
+    }
 
     #[test]
     fn off_builds_no_listener_state() {
