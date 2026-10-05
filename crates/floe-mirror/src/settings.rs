@@ -104,7 +104,11 @@ pub fn source_of(settings_toml: &str) -> Option<String> {
 /// `settings_toml` with `[upstream]` replaced by `upstream` and
 /// `repo.description` set to `description`; every other section and key is kept
 /// (re-serialized through `toml::Table`).
-pub fn merge(settings_toml: &str, upstream: &toml::Table, description: &str) -> anyhow::Result<String> {
+pub fn merge(
+    settings_toml: &str,
+    upstream: &toml::Table,
+    description: &str,
+) -> anyhow::Result<String> {
     let mut doc: toml::Table = if settings_toml.trim().is_empty() {
         toml::Table::new()
     } else {
@@ -173,7 +177,10 @@ mod tests {
         let mut archived = repo();
         archived.archived = true;
         let a = render(&src, &cfg, &archived, Status::Active);
-        assert_eq!(a.get("follow_interval").and_then(|v| v.as_str()), Some("24h"));
+        assert_eq!(
+            a.get("follow_interval").and_then(|v| v.as_str()),
+            Some("24h")
+        );
 
         assert_eq!(hash(&t), hash(&t.clone()));
         assert_ne!(hash(&t), hash(&frozen));
@@ -185,10 +192,18 @@ mod tests {
     #[test]
     fn merge_preserves_other_sections() {
         let src = FakeSource::new("https://github.com");
-        let t = render(&src, &GithubMirrorConfig::default(), &repo(), Status::Active);
+        let t = render(
+            &src,
+            &GithubMirrorConfig::default(),
+            &repo(),
+            Status::Active,
+        );
         let before = "[bundles]\nmain_only = true\n\n[repo]\ndescription = \"mine\"\n\n[upstream]\nfollow = []\ngit = \"https://x/y\"\n";
         let after = merge(before, &t, "Mirror of https://github.com/Acme/Widgets").unwrap();
-        assert_eq!(description_of(&after).as_deref(), Some("Mirror of https://github.com/Acme/Widgets"));
+        assert_eq!(
+            description_of(&after).as_deref(),
+            Some("Mirror of https://github.com/Acme/Widgets")
+        );
         let doc: toml::Table = after.parse().unwrap();
         assert_eq!(
             doc.get("bundles")

@@ -299,7 +299,10 @@ async fn callback(
     };
     let cookie = session_set_cookie(&st, &headers, &value);
     let Ok(cookie) = HeaderValue::from_str(&cookie) else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "session cookie is not a valid header value")
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session cookie is not a valid header value",
+        )
             .into_response();
     };
     tracing::info!(principal = %principal.name, "browser sign-in");
@@ -357,7 +360,10 @@ async fn claimed(
     }
     let cookie = session_set_cookie(&st, &headers, value);
     let Ok(cookie) = HeaderValue::from_str(&cookie) else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "session cookie is not a valid header value")
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session cookie is not a valid header value",
+        )
             .into_response();
     };
     let mut r = Redirect::to(&next).into_response();
@@ -374,7 +380,10 @@ async fn logout(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response
         cookie_site(&st, secure)
     );
     let Ok(cookie) = HeaderValue::from_str(&cookie) else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "session cookie is not a valid header value")
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session cookie is not a valid header value",
+        )
             .into_response();
     };
     let mut r = Redirect::to("/").into_response();

@@ -23,10 +23,10 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use futures::StreamExt;
-use serde::Serialize;
 use floe_wal::Progress;
 use floe_wal::progress::ProgressRx;
+use futures::StreamExt;
+use serde::Serialize;
 
 use crate::error::ApiError;
 
@@ -118,16 +118,22 @@ impl Rendered {
                 if let Ok(v) = HeaderValue::from_str(etag) {
                     r.headers_mut().insert(header::ETAG, v);
                 }
-                r.headers_mut()
-                    .insert(header::CACHE_CONTROL, HeaderValue::from_static(self.cache_control));
+                r.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static(self.cache_control),
+                );
                 return r;
             }
         }
         let mut r = (StatusCode::OK, Body::from(self.body)).into_response();
-        r.headers_mut()
-            .insert(header::CONTENT_TYPE, HeaderValue::from_static(self.content_type));
-        r.headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static(self.cache_control));
+        r.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(self.content_type),
+        );
+        r.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(self.cache_control),
+        );
         if let Some(e) = &self.etag
             && let Ok(v) = HeaderValue::from_str(e)
         {

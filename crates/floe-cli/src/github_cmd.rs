@@ -41,8 +41,11 @@ pub async fn run(action: GithubAction, cfg: &Arc<Config>) -> Result<()> {
             std::fs::create_dir_all(&cfg.cache.dir).ok();
             let registry = Registry::new(store.clone(), cfg.clone());
             let source = Arc::new(floe_mirror::github::GithubSource::new(gm)?);
-            let target =
-                floe_mirror::WalTarget::new(registry, store.clone(), Box::new(|_: &floe_git::RepoId| {}));
+            let target = floe_mirror::WalTarget::new(
+                registry,
+                store.clone(),
+                Box::new(|_: &floe_git::RepoId| {}),
+            );
             let mirror = Arc::new(Mirror {
                 cfg: cfg.clone(),
                 source,
@@ -98,7 +101,10 @@ fn print_report(r: &PassReport) {
         println_kv("error", e);
     }
     if let Some(until) = r.api.rate_limited_until {
-        println_kv("rate_limited_until", humantime::format_rfc3339_seconds(until));
+        println_kv(
+            "rate_limited_until",
+            humantime::format_rfc3339_seconds(until),
+        );
     }
     if let Some(rem) = r.api.rate_remaining {
         println_kv("rate_remaining", rem);
@@ -140,7 +146,9 @@ async fn status(store: &floe_store::DynStore, json: bool) -> Result<()> {
                 e.status.as_str(),
                 e.full_name,
                 e.floe.as_deref().unwrap_or("-"),
-                e.last_error.as_deref().map_or_else(|| format!("(id {id})"), str::to_string)
+                e.last_error
+                    .as_deref()
+                    .map_or_else(|| format!("(id {id})"), str::to_string)
             );
         }
     }

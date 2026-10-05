@@ -152,7 +152,8 @@ pub fn restart_required(started: &RuntimeConfig, now: &RuntimeConfig) -> Vec<Str
         return Vec::new();
     };
     let a = flatten(&a);
-    let b: std::collections::BTreeMap<String, serde_json::Value> = flatten(&b).into_iter().collect();
+    let b: std::collections::BTreeMap<String, serde_json::Value> =
+        flatten(&b).into_iter().collect();
     let mut out: Vec<String> = a
         .into_iter()
         .filter(|(p, v)| {
@@ -176,12 +177,19 @@ mod tests {
         let rt = RuntimeConfig::default();
         let v = rt.to_json().unwrap();
         assert_eq!(v["github_mirror"]["token"]["env"], "FLOE_GITHUB_TOKEN");
-        assert!(v["github_mirror"].get("token_env").is_none(), "token_env is derived, never stored");
+        assert!(
+            v["github_mirror"].get("token_env").is_none(),
+            "token_env is derived, never stored"
+        );
         let back = RuntimeConfig::from_json(&v).unwrap();
         assert_eq!(back.to_json().unwrap(), v);
-        let err = RuntimeConfig::from_json(&serde_json::json!({"server": {"listen": "0.0.0.0:1"}})).unwrap_err();
+        let err = RuntimeConfig::from_json(&serde_json::json!({"server": {"listen": "0.0.0.0:1"}}))
+            .unwrap_err();
         assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
-        let t = RuntimeConfig::from_toml("[events]\nwebhook_url = \"https://h.example/x\"\nwebhook_secret = { env = \"S\" }\n").unwrap();
+        let t = RuntimeConfig::from_toml(
+            "[events]\nwebhook_url = \"https://h.example/x\"\nwebhook_secret = { env = \"S\" }\n",
+        )
+        .unwrap();
         assert_eq!(t.events.webhook_secret, Some(Secret::Env("S".into())));
         t.validate().unwrap();
     }
@@ -202,7 +210,12 @@ mod tests {
         assert!(rt.validate().is_err());
         let mut rt = RuntimeConfig::default();
         rt.events.webhook_url = Some("ftp://x".into());
-        assert!(rt.validate().unwrap_err().to_string().contains("webhook_url"));
+        assert!(
+            rt.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("webhook_url")
+        );
     }
 
     #[test]

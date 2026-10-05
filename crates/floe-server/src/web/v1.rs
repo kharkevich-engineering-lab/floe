@@ -300,7 +300,9 @@ async fn tls_status(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Resp
     match st.auth.authenticate(&headers).await {
         Ok(p) if p.admin => {}
         Ok(p) if p.anonymous => return ApiError::Unauthorized.into_response(),
-        Ok(_) => return crate::web::api::auth_err(crate::auth::AuthError::Forbidden).into_response(),
+        Ok(_) => {
+            return crate::web::api::auth_err(crate::auth::AuthError::Forbidden).into_response();
+        }
         Err(e) => return crate::web::api::auth_err(e).into_response(),
     }
     let body = st.tls.as_ref().map_or_else(

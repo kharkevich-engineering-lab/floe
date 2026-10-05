@@ -31,10 +31,10 @@ use std::{
 
 use async_trait::async_trait;
 use axum::http::{HeaderMap, StatusCode};
+use floe_config::{ACCESS_TOKEN_PREFIX, AuthMode, StaticToken};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use tokio::sync::Mutex;
-use floe_config::{ACCESS_TOKEN_PREFIX, AuthMode, StaticToken};
 
 /// Client `Authorization` as copied by an edge before it replaces that header with its own
 /// hop credential. Read only when the edge announces `client-authorization`.
@@ -963,7 +963,10 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
         if bits >= 8 {
             bits -= 8;
             // `buf` holds at most bits+6 < 14 bits; after the shift only the low 8 remain.
-            #[allow(clippy::cast_possible_truncation, reason = "value is masked to 8 bits by construction")]
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "value is masked to 8 bits by construction"
+            )]
             out.push((buf >> bits) as u8);
             buf &= (1 << bits) - 1;
         }

@@ -384,7 +384,10 @@ async fn no_cors_without_config() -> TestResult {
 /// admin/settings surface at `/{o}/{r}/api[/policy|/settings…]`, and the
 /// same under the browser lane `/{o}/{r}/api-browser/…`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::many_single_char_names, reason = "short request/response bindings in a linear test")]
+#[allow(
+    clippy::many_single_char_names,
+    reason = "short request/response bindings in a linear test"
+)]
 async fn d26_prefix_form_matches_v1_alias() -> TestResult {
     let server = Server::start().await?;
     let c = reqwest::Client::new();
@@ -558,7 +561,8 @@ async fn repository_delete_requires_admin() -> TestResult {
 async fn tls_status_is_admin_only_and_describes_the_certificate() -> TestResult {
     let dir = tempfile::tempdir()?.keep();
     let key = rcgen::KeyPair::generate()?;
-    let cert = rcgen::CertificateParams::new(vec!["git.example.com".to_string()])?.self_signed(&key)?;
+    let cert =
+        rcgen::CertificateParams::new(vec!["git.example.com".to_string()])?.self_signed(&key)?;
     std::fs::write(dir.join("cert.pem"), cert.pem())?;
     std::fs::write(dir.join("key.pem"), key.serialize_pem())?;
     let (cert_path, key_path) = (dir.join("cert.pem"), dir.join("key.pem"));
@@ -609,7 +613,10 @@ async fn tls_status_is_admin_only_and_describes_the_certificate() -> TestResult 
     assert_eq!(v["mode"], "files");
     assert_eq!(v["loaded"], true);
     assert_eq!(v["domains"], serde_json::json!(["git.example.com"]));
-    assert!(v["not_after"].as_str().is_some_and(|s| s.ends_with('Z')), "{v}");
+    assert!(
+        v["not_after"].as_str().is_some_and(|s| s.ends_with('Z')),
+        "{v}"
+    );
     assert!(v["issuer"].as_str().is_some(), "{v}");
     assert!(v["source"].as_str().unwrap().starts_with("files:"), "{v}");
     assert!(v["last_error"].is_null());

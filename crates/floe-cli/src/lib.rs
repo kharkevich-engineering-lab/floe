@@ -40,12 +40,7 @@ use floe_server::telemetry::tracing_init;
 )]
 struct Cli {
     /// Path to the configuration file.
-    #[arg(
-        long,
-        global = true,
-        env = "FLOE_CONFIG",
-        default_value = "floe.toml"
-    )]
+    #[arg(long, global = true, env = "FLOE_CONFIG", default_value = "floe.toml")]
     config: PathBuf,
 
     /// No subcommand = `serve`.
@@ -58,12 +53,7 @@ struct Cli {
 #[command(name = "floe-server", version = floe_server::health::VERSION, about = "floe, standalone: git at any scale on an object-storage bucket")]
 struct ServerCli {
     /// Path to the configuration file.
-    #[arg(
-        long,
-        global = true,
-        env = "FLOE_CONFIG",
-        default_value = "floe.toml"
-    )]
+    #[arg(long, global = true, env = "FLOE_CONFIG", default_value = "floe.toml")]
     config: PathBuf,
 }
 
@@ -503,10 +493,7 @@ fn load_config(path: &std::path::Path) -> Config {
         match Config::load(path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!(
-                    "floe: error loading config from {}: {e:#}",
-                    path.display()
-                );
+                eprintln!("floe: error loading config from {}: {e:#}", path.display());
                 std::process::exit(1);
             }
         }

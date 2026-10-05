@@ -20,9 +20,9 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use serde::{Deserialize, Serialize};
 use floe_git::RepoId;
 use floe_store::{ObjectStoreExt, PutMode};
+use serde::{Deserialize, Serialize};
 
 use super::error::{GhError, GhResult};
 use super::models::{self, Urls};
@@ -279,12 +279,9 @@ pub async fn read_blob(view: &View, what: &str) -> GhResult<(String, Vec<u8>)> {
     if what.is_empty() || what.starts_with('-') {
         return Err(GhError::not_found(what));
     }
-    let kind = repo::git(
-        &view.local,
-        &["cat-file", "-t", "--end-of-options", what],
-    )
-    .await
-    .map_err(|_| GhError::not_found(what))?;
+    let kind = repo::git(&view.local, &["cat-file", "-t", "--end-of-options", what])
+        .await
+        .map_err(|_| GhError::not_found(what))?;
     if String::from_utf8_lossy(&kind).trim() != "blob" {
         return Err(GhError::not_found(what));
     }
@@ -321,10 +318,16 @@ fn readme_rank(name: &str) -> Option<usize> {
         return None;
     }
     Some(
-        ["readme.md", "readme.markdown", "readme.rst", "readme.txt", "readme"]
-            .iter()
-            .position(|c| *c == lower)
-            .unwrap_or(usize::MAX - 1),
+        [
+            "readme.md",
+            "readme.markdown",
+            "readme.rst",
+            "readme.txt",
+            "readme",
+        ]
+        .iter()
+        .position(|c| *c == lower)
+        .unwrap_or(usize::MAX - 1),
     )
 }
 
@@ -386,14 +389,7 @@ pub async fn archive(
     let mut cmd = tokio::process::Command::new("git");
     cmd.arg("--git-dir")
         .arg(view.local.path())
-        .args([
-            "archive",
-            "--format",
-            format,
-            "--prefix",
-            &prefix,
-            &commit,
-        ])
+        .args(["archive", "--format", format, "--prefix", &prefix, &commit])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .stdin(std::process::Stdio::null());

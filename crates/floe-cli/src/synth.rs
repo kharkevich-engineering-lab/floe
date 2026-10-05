@@ -239,7 +239,8 @@ fn generate_stream(
 
         // How many files to touch in this commit (1..=8, but capped by n_files).
         let touch = 1 + rng.below(8).min(n_files.max(1));
-        let mut file_changes: Vec<(String, Vec<u8>)> = Vec::with_capacity(usize::try_from(touch).unwrap_or(0));
+        let mut file_changes: Vec<(String, Vec<u8>)> =
+            Vec::with_capacity(usize::try_from(touch).unwrap_or(0));
 
         for _ in 0..touch {
             let file_idx = rng.below(n_files);
@@ -265,9 +266,7 @@ fn generate_stream(
 
         w.write_str(&format!("commit {main}\n"));
         w.write_str(&format!("mark :{commit_mark}\n"));
-        w.write_str(&format!(
-            "author floe-synth <synth@floe.local> {ts_str}\n"
-        ));
+        w.write_str(&format!("author floe-synth <synth@floe.local> {ts_str}\n"));
         w.write_str(&format!(
             "committer floe-synth <synth@floe.local> {ts_str}\n"
         ));
@@ -299,9 +298,7 @@ fn generate_stream(
                 let tag_msg = format!("synth tag at commit {commit_num}");
                 w.write_str(&format!("tag {name}\n"));
                 w.write_str(&format!("from :{commit_mark}\n"));
-                w.write_str(&format!(
-                    "tagger floe-synth <synth@floe.local> {ts_str}\n"
-                ));
+                w.write_str(&format!("tagger floe-synth <synth@floe.local> {ts_str}\n"));
                 w.write_str(&format!("data {}\n", tag_msg.len() + 1));
                 w.write_str(&format!("{tag_msg}\n\n"));
             }

@@ -66,7 +66,9 @@ pub async fn run(action: ConfigAction, cfg: &Arc<Config>) -> Result<()> {
                 None => cs.current().await?.map(|(_, r)| r),
             };
             let Some(record) = record else {
-                println!("# no config document yet (revision 0): the built-in runtime defaults apply");
+                println!(
+                    "# no config document yet (revision 0): the built-in runtime defaults apply"
+                );
                 print_document(&RuntimeConfig::default().to_json()?, json)?;
                 return Ok(());
             };
@@ -75,12 +77,23 @@ pub async fn run(action: ConfigAction, cfg: &Arc<Config>) -> Result<()> {
                 record.revision,
                 record.author,
                 record.updated_at.to_rfc3339(),
-                if record.message.is_empty() { String::new() } else { format!(" — {}", record.message) },
-                record.rolled_back_from.map(|n| format!(" (rollback to {n})")).unwrap_or_default()
+                if record.message.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", record.message)
+                },
+                record
+                    .rolled_back_from
+                    .map(|n| format!(" (rollback to {n})"))
+                    .unwrap_or_default()
             );
             print_document(&redact(&record.document), json)
         }
-        ConfigAction::Set { file, message, base } => {
+        ConfigAction::Set {
+            file,
+            message,
+            base,
+        } => {
             let cs = open(cfg).await?;
             let document = read_document(&file)?;
             let published = cs
@@ -116,7 +129,14 @@ pub async fn run(action: ConfigAction, cfg: &Arc<Config>) -> Result<()> {
                 }
                 Err(errors) => {
                     for e in &errors {
-                        eprintln!("{}{}", e.path.as_deref().map(|p| format!("{p}: ")).unwrap_or_default(), e.message);
+                        eprintln!(
+                            "{}{}",
+                            e.path
+                                .as_deref()
+                                .map(|p| format!("{p}: "))
+                                .unwrap_or_default(),
+                            e.message
+                        );
                     }
                     anyhow::bail!("invalid config document ({} error(s))", errors.len())
                 }
@@ -135,7 +155,9 @@ pub async fn run(action: ConfigAction, cfg: &Arc<Config>) -> Result<()> {
                     e.updated_at.to_rfc3339(),
                     e.author,
                     e.message,
-                    e.rolled_back_from.map(|n| format!(" (rollback to {n})")).unwrap_or_default(),
+                    e.rolled_back_from
+                        .map(|n| format!(" (rollback to {n})"))
+                        .unwrap_or_default(),
                     e.diff.len()
                 );
             }
@@ -189,16 +211,29 @@ async fn open(cfg: &Arc<Config>) -> Result<ConfigStore> {
 }
 
 fn author() -> String {
-    format!("cli:{}", std::env::var("USER").unwrap_or_else(|_| "unknown".into()))
+    format!(
+        "cli:{}",
+        std::env::var("USER").unwrap_or_else(|_| "unknown".into())
+    )
 }
 
 fn publish_err(e: PublishError) -> anyhow::Error {
     match e {
         PublishError::Invalid(errors) => {
             for e in &errors {
-                eprintln!("{}{}", e.path.as_deref().map(|p| format!("{p}: ")).unwrap_or_default(), e.message);
+                eprintln!(
+                    "{}{}",
+                    e.path
+                        .as_deref()
+                        .map(|p| format!("{p}: "))
+                        .unwrap_or_default(),
+                    e.message
+                );
             }
-            anyhow::anyhow!("invalid config document ({} error(s)); nothing was published", errors.len())
+            anyhow::anyhow!(
+                "invalid config document ({} error(s)); nothing was published",
+                errors.len()
+            )
         }
         other => anyhow::anyhow!("{other}"),
     }
@@ -375,9 +410,15 @@ webhook_secret = "s3cret"
 "#,
         )
         .unwrap();
-        assert_eq!(doc["github_mirror"]["token"], serde_json::json!({"env": "GH_PAT"}));
+        assert_eq!(
+            doc["github_mirror"]["token"],
+            serde_json::json!({"env": "GH_PAT"})
+        );
         assert_eq!(doc["github_mirror"]["orgs"][0], "acme");
-        assert_eq!(doc["events"]["webhook_secret"], serde_json::json!({"value": "s3cret"}));
+        assert_eq!(
+            doc["events"]["webhook_secret"],
+            serde_json::json!({"value": "s3cret"})
+        );
         assert!(doc.get("store").is_none());
         assert!(import_document("[store]\nbucket = \"b\"\n").is_err());
     }

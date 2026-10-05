@@ -25,9 +25,9 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use anyhow::Context;
 use chrono::Utc;
-use futures::StreamExt;
 use floe_git::RepoId;
 use floe_store::{ObjectStoreExt, PutMode, StoreError};
+use futures::StreamExt;
 
 use crate::events::{self, RefEvent, Sink};
 

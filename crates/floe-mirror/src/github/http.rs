@@ -89,7 +89,11 @@ impl GithubHttp {
                 }
                 Err(e) => return Err(SourceError::Http(format!("GET {url}: {e}"))),
             }
-            let d = floe_store::util::backoff(attempt, Duration::from_millis(500), Duration::from_secs(5));
+            let d = floe_store::util::backoff(
+                attempt,
+                Duration::from_millis(500),
+                Duration::from_secs(5),
+            );
             tokio::time::sleep(d).await;
             attempt += 1;
         };
@@ -101,7 +105,8 @@ impl GithubHttp {
             stats.rate_remaining = remaining;
             stats.rate_reset = reset;
             if let Some(r) = remaining {
-                metrics::gauge!("floe_mirror_rate_remaining", "source" => "github").set(f64::from(r));
+                metrics::gauge!("floe_mirror_rate_remaining", "source" => "github")
+                    .set(f64::from(r));
             }
         }
         let next_link = headers
@@ -111,15 +116,14 @@ impl GithubHttp {
         if status == StatusCode::NOT_MODIFIED {
             stats.not_modified += 1;
             let Some(c) = cached else {
-                return Err(SourceError::Http(format!("GET {url}: 304 without a cached body")));
+                return Err(SourceError::Http(format!(
+                    "GET {url}: 304 without a cached body"
+                )));
             };
             self.secondary_hits.store(0, Ordering::Relaxed);
             let next = next_link.or(c.next.clone());
             self.floor(remaining, reset, stats)?;
-            return Ok(Fetched::Ok {
-                body: c.body,
-                next,
-            });
+            return Ok(Fetched::Ok { body: c.body, next });
         }
         let body = resp
             .bytes()
@@ -127,7 +131,9 @@ impl GithubHttp {
             .map_err(|e| SourceError::Http(format!("GET {url}: reading the body: {e}")))?;
         if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
             let consecutive = self.secondary_hits.load(Ordering::Relaxed);
-            if let Some(until) = rate_limited(status, &headers, &body, SystemTime::now(), consecutive) {
+            if let Some(until) =
+                rate_limited(status, &headers, &body, SystemTime::now(), consecutive)
+            {
                 if is_secondary(&body) {
                     self.secondary_hits.fetch_add(1, Ordering::Relaxed);
                 }
@@ -164,7 +170,10 @@ impl GithubHttp {
                 Ok(Fetched::NotFound)
             }
             StatusCode::FORBIDDEN => Ok(Fetched::Forbidden(message(&body))),
-            s => Err(SourceError::Http(format!("GET {url}: {s}: {}", message(&body)))),
+            s => Err(SourceError::Http(format!(
+                "GET {url}: {s}: {}",
+                message(&body)
+            ))),
         }
     }
 
@@ -180,7 +189,9 @@ impl GithubHttp {
             Some(r) if r < self.min_rate_remaining => {
                 let until = reset
                     .and_then(|s| u64::try_from(s).ok())
-                    .map_or_else(SystemTime::now, |s| SystemTime::UNIX_EPOCH + Duration::from_secs(s));
+                    .map_or_else(SystemTime::now, |s| {
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(s)
+                    });
                 stats.rate_limited_until = Some(until);
                 Err(SourceError::RateLimited { until })
             }
@@ -215,7 +226,11 @@ fn status_label(s: StatusCode) -> &'static str {
 
 /// `x-ratelimit-remaining`, `x-ratelimit-reset`.
 pub fn rate_headers(h: &HeaderMap) -> (Option<u32>, Option<i64>) {
-    let num = |k: &str| h.get(k).and_then(|v: &HeaderValue| v.to_str().ok()).map(str::trim);
+    let num = |k: &str| {
+        h.get(k)
+            .and_then(|v: &HeaderValue| v.to_str().ok())
+            .map(str::trim)
+    };
     (
         num("x-ratelimit-remaining").and_then(|v| v.parse().ok()),
         num("x-ratelimit-reset").and_then(|v| v.parse().ok()),
@@ -231,15 +246,22 @@ pub fn next_link(link: &str) -> Option<String> {
             let p = p.trim();
             p == "rel=\"next\"" || p == "rel=next"
         });
-        (is_next && url.starts_with('<') && url.ends_with('>'))
-            .then(|| url.trim_start_matches('<').trim_end_matches('>').to_string())
+        (is_next && url.starts_with('<') && url.ends_with('>')).then(|| {
+            url.trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_string()
+        })
     })
 }
 
 fn message(body: &[u8]) -> String {
     serde_json::from_slice::<serde_json::Value>(body)
         .ok()
-        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_default()
 }
 
@@ -280,7 +302,9 @@ pub fn rate_limited(
     if remaining == Some(0) {
         let at = reset
             .and_then(|s| u64::try_from(s).ok())
-            .map_or(now + SECONDARY_MIN, |s| SystemTime::UNIX_EPOCH + Duration::from_secs(s));
+            .map_or(now + SECONDARY_MIN, |s| {
+                SystemTime::UNIX_EPOCH + Duration::from_secs(s)
+            });
         return Some(at.max(now));
     }
     if is_secondary(body) || status == StatusCode::TOO_MANY_REQUESTS {
@@ -323,9 +347,18 @@ mod tests {
         };
         let url = "https://api.github.com/user/repos?affiliation=owner&per_page=100&sort=full_name";
         assert!(may_have_grown(url, &entry(100, None)));
-        assert!(!may_have_grown(url, &entry(99, None)), "short: really the last page");
-        assert!(!may_have_grown(url, &entry(100, Some("https://api.github.com/x?page=2"))));
-        assert!(!may_have_grown("https://api.github.com/user", &entry(100, None)));
+        assert!(
+            !may_have_grown(url, &entry(99, None)),
+            "short: really the last page"
+        );
+        assert!(!may_have_grown(
+            url,
+            &entry(100, Some("https://api.github.com/x?page=2"))
+        ));
+        assert!(!may_have_grown(
+            "https://api.github.com/user",
+            &entry(100, None)
+        ));
         let one = CacheEntry {
             etag: "\"u\"".into(),
             next: None,
@@ -347,7 +380,10 @@ mod tests {
         assert_eq!(
             rate_limited(
                 f,
-                &headers(&[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "1000100")]),
+                &headers(&[
+                    ("x-ratelimit-remaining", "0"),
+                    ("x-ratelimit-reset", "1000100")
+                ]),
                 b"{}",
                 now,
                 0
@@ -357,9 +393,18 @@ mod tests {
         // secondary without headers and remaining > 0: at least 60 s, doubling, capped.
         let body = br#"{"message":"You have exceeded a secondary rate limit."}"#;
         let h = headers(&[("x-ratelimit-remaining", "4000")]);
-        assert_eq!(rate_limited(f, &h, body, now, 0), Some(now + Duration::from_mins(1)));
-        assert_eq!(rate_limited(f, &h, body, now, 1), Some(now + Duration::from_mins(2)));
-        assert_eq!(rate_limited(f, &h, body, now, 9), Some(now + Duration::from_mins(15)));
+        assert_eq!(
+            rate_limited(f, &h, body, now, 0),
+            Some(now + Duration::from_mins(1))
+        );
+        assert_eq!(
+            rate_limited(f, &h, body, now, 1),
+            Some(now + Duration::from_mins(2))
+        );
+        assert_eq!(
+            rate_limited(f, &h, body, now, 9),
+            Some(now + Duration::from_mins(15))
+        );
         let doc = br#"{"message":"x","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"}"#;
         assert!(rate_limited(f, &h, doc, now, 0).is_some());
         // An access-denied 403 is not a limit.

@@ -73,7 +73,12 @@ impl Cloudflare {
             .with_context(|| {
                 format!("{var} is not set: server.tls.acme.cloudflare.api_token_env names the env var with a Cloudflare API token scoped to Zone:DNS:Edit")
             })?;
-        Ok(Self::new(&cfg.api_url, token.trim(), cfg.zone_id.clone(), http))
+        Ok(Self::new(
+            &cfg.api_url,
+            token.trim(),
+            cfg.zone_id.clone(),
+            http,
+        ))
     }
 
     pub fn new(api: &str, token: &str, zone_id: Option<String>, http: reqwest::Client) -> Self {
@@ -124,7 +129,10 @@ impl Cloudflare {
         if let Some(z) = &self.zone_id {
             return Ok(z.clone());
         }
-        let parent = fqdn.strip_prefix("_acme-challenge.").unwrap_or(fqdn).to_string();
+        let parent = fqdn
+            .strip_prefix("_acme-challenge.")
+            .unwrap_or(fqdn)
+            .to_string();
         if let Some(z) = self.zones.lock().ok().and_then(|m| m.get(&parent).cloned()) {
             return Ok(z);
         }

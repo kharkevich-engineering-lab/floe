@@ -24,10 +24,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::StreamExt;
 use floe_store::{
     DynStore, GetOptions, GetResult, PutBody, PutMode, PutOptions, StoreError, memory::MemoryStore,
 };
+use futures::StreamExt;
 
 /// Run the full contract suite against `store` under `prefix`.
 ///
@@ -831,7 +831,9 @@ async fn gcs_control_plane_not_starved_by_bulk() {
         let big_key = big_key.clone();
         tokio::spawn(async move {
             let t = std::time::Instant::now();
-            let starts: Vec<u64> = (0..total).step_by(usize::try_from(CHUNK).unwrap()).collect();
+            let starts: Vec<u64> = (0..total)
+                .step_by(usize::try_from(CHUNK).unwrap())
+                .collect();
             let n = futures::stream::iter(starts)
                 .map(|start| {
                     let store = store.clone();

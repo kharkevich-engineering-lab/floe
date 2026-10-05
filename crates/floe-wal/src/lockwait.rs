@@ -19,12 +19,7 @@ static STATS: Mutex<Vec<(&'static str, u64, u64)>> = Mutex::new(Vec::new());
 static PER_REPO: Mutex<Vec<(&'static str, String, u64)>> = Mutex::new(Vec::new());
 
 /// Record a wait that was not satisfied immediately.
-pub fn record(
-    lock: &'static str,
-    repo: &floe_git::RepoId,
-    waited: Duration,
-    warn_after: Duration,
-) {
+pub fn record(lock: &'static str, repo: &floe_git::RepoId, waited: Duration, warn_after: Duration) {
     metrics::histogram!("floe_lock_wait_seconds", "lock" => lock).record(waited.as_secs_f64());
     let ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
     {

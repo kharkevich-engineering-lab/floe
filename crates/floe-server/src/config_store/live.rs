@@ -54,7 +54,9 @@ pub struct Live {
 
 impl std::fmt::Debug for Live {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Live").field("status", &*self.status.lock()).finish_non_exhaustive()
+        f.debug_struct("Live")
+            .field("status", &*self.status.lock())
+            .finish_non_exhaustive()
     }
 }
 
@@ -95,7 +97,10 @@ impl Live {
             // read through the alias so a later document reaches it live.
             let mut c = (*bootstrap).clone();
             c.github_mirror.token_env = GITHUB_MIRROR_TOKEN_ALIAS.to_string();
-            set_alias(GITHUB_MIRROR_TOKEN_ALIAS, Some(bootstrap.github_mirror.token.clone()));
+            set_alias(
+                GITHUB_MIRROR_TOKEN_ALIAS,
+                Some(bootstrap.github_mirror.token.clone()),
+            );
             (0, Arc::new(c), RuntimeConfig::from_config(&bootstrap))
         });
         status.applied_revision = revision;
@@ -183,7 +188,8 @@ impl Live {
             }
             Err(e) => {
                 tracing::error!(revision = record.revision, error = %e, "config revision not applied; keeping the previous one");
-                self.status.lock().apply_error = Some(format!("revision {}: {e:#}", record.revision));
+                self.status.lock().apply_error =
+                    Some(format!("revision {}: {e:#}", record.revision));
             }
         }
     }
@@ -254,14 +260,20 @@ fn open_and_merge(
 ) -> anyhow::Result<(Arc<Config>, RuntimeConfig)> {
     let rt = store.open_document(&record.document)?;
     let cfg = bootstrap.with_runtime(&rt)?;
-    set_alias(GITHUB_MIRROR_TOKEN_ALIAS, Some(rt.github_mirror.token.clone()));
+    set_alias(
+        GITHUB_MIRROR_TOKEN_ALIAS,
+        Some(rt.github_mirror.token.clone()),
+    );
     Ok((Arc::new(cfg), rt))
 }
 
 /// The effective config for a one-shot command (`floe github sync`): the
 /// current document applied over `bootstrap`, or `bootstrap` as is when there
 /// is none. Fails when the document cannot be opened (a CLI should say so).
-pub async fn effective_once(bootstrap: &Arc<Config>, store: &ConfigStore) -> anyhow::Result<Arc<Config>> {
+pub async fn effective_once(
+    bootstrap: &Arc<Config>,
+    store: &ConfigStore,
+) -> anyhow::Result<Arc<Config>> {
     match store.current().await? {
         Some((_, record)) => Ok(open_and_merge(bootstrap, store, &record)?.0),
         None => Ok(bootstrap.clone()),

@@ -67,7 +67,14 @@ fn respond(
 
 async fn serve(stub: Arc<Stub>) -> String {
     async fn user(State(st): State<Arc<Stub>>, h: HeaderMap) -> Response {
-        respond(&st, "/user", &h, "\"u1\"", serde_json::json!({"login": "me"}), None)
+        respond(
+            &st,
+            "/user",
+            &h,
+            "\"u1\"",
+            serde_json::json!({"login": "me"}),
+            None,
+        )
     }
     async fn repos(State(st): State<Arc<Stub>>, h: HeaderMap, uri: axum::http::Uri) -> Response {
         if st.limited.load(Ordering::SeqCst) {
@@ -79,16 +86,36 @@ async fn serve(stub: Arc<Stub>) -> String {
                 .into_response();
         }
         let page2 = uri.query().is_some_and(|q| q.contains("page=2"));
-        let base = format!("http://{}", h.get("host").and_then(|v| v.to_str().ok()).unwrap_or(""));
+        let base = format!(
+            "http://{}",
+            h.get("host").and_then(|v| v.to_str().ok()).unwrap_or("")
+        );
         if page2 {
-            respond(&st, "/user/repos?page=2", &h, "\"p2\"", serde_json::json!([repo_json(2, "me", "b")]), None)
+            respond(
+                &st,
+                "/user/repos?page=2",
+                &h,
+                "\"p2\"",
+                serde_json::json!([repo_json(2, "me", "b")]),
+                None,
+            )
         } else {
             let link = format!("<{base}/user/repos?page=2>; rel=\"next\"");
-            respond(&st, "/user/repos", &h, "\"p1\"", serde_json::json!([repo_json(1, "me", "a")]), Some(link))
+            respond(
+                &st,
+                "/user/repos",
+                &h,
+                "\"p1\"",
+                serde_json::json!([repo_json(1, "me", "a")]),
+                Some(link),
+            )
         }
     }
     async fn by_id(State(st): State<Arc<Stub>>, Path(id): Path<String>) -> Response {
-        *st.hits.lock().entry(format!("/repositories/{id}")).or_default() += 1;
+        *st.hits
+            .lock()
+            .entry(format!("/repositories/{id}"))
+            .or_default() += 1;
         match id.as_str() {
             "404" => (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"message": "Not Found"}))).into_response(),
             "403" => (
@@ -204,7 +231,10 @@ async fn lookups_distinguish_gone_forbidden_and_rate_limited() {
     let src = source(&api, 0);
     let mut cache = HttpCache::default();
     assert_eq!(src.lookup("404", &mut cache).await.unwrap(), Lookup::Gone);
-    assert_eq!(src.lookup("403", &mut cache).await.unwrap(), Lookup::Forbidden);
+    assert_eq!(
+        src.lookup("403", &mut cache).await.unwrap(),
+        Lookup::Forbidden
+    );
     // A secondary limit without headers is a limit (≥ 60 s), never Forbidden.
     let before = std::time::SystemTime::now();
     match src.lookup("1", &mut cache).await {

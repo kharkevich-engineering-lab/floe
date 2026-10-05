@@ -105,10 +105,12 @@ pub enum Tick {
 /// Retry delay after `failures` consecutive failures.
 pub fn backoff(failures: u32, rate_limited: bool) -> Duration {
     let exp = failures.saturating_sub(1).min(16);
-    let d = BACKOFF_BASE
-        .saturating_mul(1u32 << exp)
-        .min(BACKOFF_MAX);
-    if rate_limited { d.max(RATE_LIMITED_MIN) } else { d }
+    let d = BACKOFF_BASE.saturating_mul(1u32 << exp).min(BACKOFF_MAX);
+    if rate_limited {
+        d.max(RATE_LIMITED_MIN)
+    } else {
+        d
+    }
 }
 
 fn short_hash(parts: &[&str]) -> String {
@@ -354,7 +356,11 @@ impl AcmeManager {
             return Ok(Tick::LeaseHeld);
         };
         let guard = Arc::new(tokio::sync::Mutex::new(lease));
-        let hb = floe_store::coord::LeaseGuard::spawn_heartbeat(guard.clone(), LEASE_HEARTBEAT, LEASE_TTL);
+        let hb = floe_store::coord::LeaseGuard::spawn_heartbeat(
+            guard.clone(),
+            LEASE_HEARTBEAT,
+            LEASE_TTL,
+        );
         let out = self.under_lease(narrator).await;
         hb.abort();
         let _ = hb.await;
@@ -378,10 +384,18 @@ impl AcmeManager {
         {
             return Ok(Tick::BackingOff(at));
         }
-        let what = if self.resolver.is_loaded() { "renewal" } else { "first order" };
+        let what = if self.resolver.is_loaded() {
+            "renewal"
+        } else {
+            "first order"
+        };
         let task = narrator.begin(
             "tls-acme",
-            &format!("ACME {what} for {} ({})", self.domains.join(", "), self.directory),
+            &format!(
+                "ACME {what} for {} ({})",
+                self.domains.join(", "),
+                self.directory
+            ),
         );
         status.last_attempt_at = Some(rfc3339(now()));
         let result = self.order(task.as_ref()).await;
@@ -393,7 +407,10 @@ impl AcmeManager {
                 status.last_success_at = Some(rfc3339(now()));
                 self.write_status(&status).await;
                 metrics::counter!("floe_tls_acme_orders_total", "ok" => "true").increment(1);
-                task.finish(Ok(format!("certificate issued, valid until {}", rfc3339(not_after))));
+                task.finish(Ok(format!(
+                    "certificate issued, valid until {}",
+                    rfc3339(not_after)
+                )));
                 Ok(Tick::Issued)
             }
             Err(e) => {
@@ -444,12 +461,19 @@ impl AcmeManager {
                     ..stored
                 };
                 self.store
-                    .put_bytes(&key, serde_json::to_vec_pretty(&updated)?, PutMode::Overwrite)
+                    .put_bytes(
+                        &key,
+                        serde_json::to_vec_pretty(&updated)?,
+                        PutMode::Overwrite,
+                    )
                     .await?;
             }
             return Ok(account);
         }
-        task.notice(&format!("registering an ACME account with {}", self.directory));
+        task.notice(&format!(
+            "registering an ACME account with {}",
+            self.directory
+        ));
         let contact = format!("mailto:{}", self.cfg.email);
         let (account, creds) = self
             .account_builder()
@@ -540,7 +564,9 @@ impl AcmeManager {
             directory: self.directory.clone(),
             domains: self.domains.clone(),
             chain_pem: chain,
-            key_sealed: self.seal.seal(self.aad("key").as_bytes(), key_pem.as_bytes())?,
+            key_sealed: self
+                .seal
+                .seal(self.aad("key").as_bytes(), key_pem.as_bytes())?,
             not_after,
             issued_at: rfc3339(now()),
             issued_by: self.holder.clone(),
@@ -724,6 +750,9 @@ mod tests {
         let a = short_hash(&["https://d", "a.example.com", "b.example.com"]);
         assert_eq!(a.len(), 16);
         assert_ne!(a, short_hash(&["https://d", "a.example.com"]));
-        assert_ne!(a, short_hash(&["https://s", "a.example.com", "b.example.com"]));
+        assert_ne!(
+            a,
+            short_hash(&["https://s", "a.example.com", "b.example.com"])
+        );
     }
 }

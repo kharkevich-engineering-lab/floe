@@ -278,10 +278,7 @@ impl LocalRepo {
         }
 
         // ---- enumerate (sync, retried after faulting missing objects) ----
-        let filter = req
-            .filter
-            .as_deref()
-            .map_or(PackFilter::None, parse_filter);
+        let filter = req.filter.as_deref().map_or(PackFilter::None, parse_filter);
         let has_filter = req.filter.is_some();
         let mut rounds = 0usize;
         let (set, commits, diffed) = loop {
@@ -558,7 +555,9 @@ fn generate_pack_streaming(
     let thread_limit = if small {
         Some(1)
     } else {
-        std::thread::available_parallelism().map(std::num::NonZero::get).ok()
+        std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .ok()
     };
     let chunk_size = if small { 64 } else { 256 };
     let interrupt = std::sync::atomic::AtomicBool::new(false);

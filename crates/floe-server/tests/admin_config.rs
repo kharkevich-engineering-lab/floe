@@ -65,7 +65,10 @@ async fn call(
     let resp = r.send().await?;
     let status = resp.status().as_u16();
     let text = resp.text().await?;
-    Ok((status, serde_json::from_str(&text).unwrap_or(Value::String(text))))
+    Ok((
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::String(text)),
+    ))
 }
 
 const GETS: &[&str] = &[
@@ -99,18 +102,46 @@ async fn every_admin_route_needs_an_admin() -> TestResult {
         let (s, body) = call(&server, reqwest::Method::GET, path, Some(ADMIN), None).await?;
         assert_eq!(s, 200, "GET {path} as admin: {body}");
     }
-    let (s, _) = call(&server, reqwest::Method::PUT, "/api/v1/admin/config", Some(WRITER), Some(json!({"document": {}}))).await?;
+    let (s, _) = call(
+        &server,
+        reqwest::Method::PUT,
+        "/api/v1/admin/config",
+        Some(WRITER),
+        Some(json!({"document": {}})),
+    )
+    .await?;
     assert_eq!(s, 403);
     for path in POSTS {
         let (s, _) = call(&server, reqwest::Method::POST, path, None, Some(json!({}))).await?;
         assert_eq!(s, 401, "POST {path} without a credential");
-        let (s, _) = call(&server, reqwest::Method::POST, path, Some(WRITER), Some(json!({}))).await?;
+        let (s, _) = call(
+            &server,
+            reqwest::Method::POST,
+            path,
+            Some(WRITER),
+            Some(json!({})),
+        )
+        .await?;
         assert_eq!(s, 403, "POST {path} as a writer");
     }
     // The SPA's switch.
-    let (_, me) = call(&server, reqwest::Method::GET, "/api/v1/me", Some(ADMIN), None).await?;
+    let (_, me) = call(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/me",
+        Some(ADMIN),
+        None,
+    )
+    .await?;
     assert_eq!(me["admin"], true);
-    let (_, me) = call(&server, reqwest::Method::GET, "/api/v1/me", Some(WRITER), None).await?;
+    let (_, me) = call(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/me",
+        Some(WRITER),
+        None,
+    )
+    .await?;
     assert_eq!(me["admin"], false);
     Ok(())
 }
@@ -137,15 +168,33 @@ async fn publish_fails_closed_and_is_cas() -> TestResult {
     assert_eq!(body["errors"][0]["path"], "github_mirror.include", "{body}");
     let (s, body) = put(json!({"server": {"listen": "0.0.0.0:1"}}), Some(0)).await?;
     assert_eq!(s, 400, "{body}");
-    let (_, cur) = call(&server, reqwest::Method::GET, "/api/v1/admin/config", Some(ADMIN), None).await?;
+    let (_, cur) = call(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/admin/config",
+        Some(ADMIN),
+        None,
+    )
+    .await?;
     assert_eq!(cur["revision"], 0, "nothing was published");
-    assert_eq!(cur["document"]["github_mirror"]["token"]["env"], "FLOE_GITHUB_TOKEN");
+    assert_eq!(
+        cur["document"]["github_mirror"]["token"]["env"],
+        "FLOE_GITHUB_TOKEN"
+    );
     // A secret value without FLOE_CONFIG_KEY on the instance: refused.
-    let (s, body) = put(json!({"events": {"webhook_secret": {"value": "s"}}}), Some(0)).await?;
+    let (s, body) = put(
+        json!({"events": {"webhook_secret": {"value": "s"}}}),
+        Some(0),
+    )
+    .await?;
     assert_eq!(s, 400, "{body}");
     assert_eq!(body["errors"][0]["path"], "events.webhook_secret");
     // Valid.
-    let (s, body) = put(json!({"events": {"webhook_url": "https://hooks.example/x"}}), Some(0)).await?;
+    let (s, body) = put(
+        json!({"events": {"webhook_url": "https://hooks.example/x"}}),
+        Some(0),
+    )
+    .await?;
     assert_eq!(s, 200, "{body}");
     assert_eq!(body["revision"], 1);
     assert_eq!(body["restart_required"][0], "events.webhook_url");
@@ -154,26 +203,79 @@ async fn publish_fails_closed_and_is_cas() -> TestResult {
     assert_eq!(s, 409, "{body}");
     assert_eq!(body["revision"], 1);
     // Validate does not write.
-    let (s, body) = call(&server, reqwest::Method::POST, "/api/v1/admin/config/validate", Some(ADMIN), Some(json!({"document": {"events": {"webhook_url": "ftp://x"}}}))).await?;
+    let (s, body) = call(
+        &server,
+        reqwest::Method::POST,
+        "/api/v1/admin/config/validate",
+        Some(ADMIN),
+        Some(json!({"document": {"events": {"webhook_url": "ftp://x"}}})),
+    )
+    .await?;
     assert_eq!(s, 200);
     assert_eq!(body["ok"], false, "{body}");
     // History and rollback.
     let (s, _) = put(json!({"events": {"sweep_interval": "1m"}}), Some(1)).await?;
     assert_eq!(s, 200);
-    let (_, h) = call(&server, reqwest::Method::GET, "/api/v1/admin/config/history", Some(ADMIN), None).await?;
-    let revs: Vec<u64> = h["entries"].as_array().unwrap().iter().map(|e| e["revision"].as_u64().unwrap()).collect();
+    let (_, h) = call(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/admin/config/history",
+        Some(ADMIN),
+        None,
+    )
+    .await?;
+    let revs: Vec<u64> = h["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["revision"].as_u64().unwrap())
+        .collect();
     assert_eq!(revs, vec![2, 1]);
-    let (s, r1) = call(&server, reqwest::Method::GET, "/api/v1/admin/config/revisions/1", Some(ADMIN), None).await?;
+    let (s, r1) = call(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/admin/config/revisions/1",
+        Some(ADMIN),
+        None,
+    )
+    .await?;
     assert_eq!(s, 200);
-    assert_eq!(r1["document"]["events"]["webhook_url"], "https://hooks.example/x");
-    let (s, body) = call(&server, reqwest::Method::POST, "/api/v1/admin/config/rollback", Some(ADMIN), Some(json!({"revision": 1, "base_revision": 2}))).await?;
+    assert_eq!(
+        r1["document"]["events"]["webhook_url"],
+        "https://hooks.example/x"
+    );
+    let (s, body) = call(
+        &server,
+        reqwest::Method::POST,
+        "/api/v1/admin/config/rollback",
+        Some(ADMIN),
+        Some(json!({"revision": 1, "base_revision": 2})),
+    )
+    .await?;
     assert_eq!(s, 200, "{body}");
     assert_eq!(body["revision"], 3);
-    let (_, cur) = call(&server, reqwest::Method::GET, "/api/v1/admin/config", Some(ADMIN), None).await?;
+    let (_, cur) = call(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/admin/config",
+        Some(ADMIN),
+        None,
+    )
+    .await?;
     assert_eq!(cur["rolled_back_from"], 1);
     assert_eq!(cur["author"], "admin");
-    assert_eq!(cur["applied"]["revision"], 3, "the publishing instance applies at once");
-    let (s, _) = call(&server, reqwest::Method::GET, "/api/v1/admin/config/revisions/99", Some(ADMIN), None).await?;
+    assert_eq!(
+        cur["applied"]["revision"], 3,
+        "the publishing instance applies at once"
+    );
+    let (s, _) = call(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/admin/config/revisions/99",
+        Some(ADMIN),
+        None,
+    )
+    .await?;
     assert_eq!(s, 404);
     Ok(())
 }
@@ -181,42 +283,121 @@ async fn publish_fails_closed_and_is_cas() -> TestResult {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn schema_pause_resume_and_a_second_instance() -> TestResult {
     let server = start().await?;
-    let (_, schema) = call(&server, reqwest::Method::GET, "/api/v1/admin/config/schema", Some(ADMIN), None).await?;
+    let (_, schema) = call(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/admin/config/schema",
+        Some(ADMIN),
+        None,
+    )
+    .await?;
     let token = &schema["properties"]["github_mirror"]["properties"]["token"];
     assert_eq!(token["x-floe"]["format"], "secret", "{schema}");
     assert!(schema["properties"]["catalog"]["properties"]["uri"].is_object());
 
-    let (s, body) = call(&server, reqwest::Method::POST, "/api/v1/admin/mirror/pause", Some(ADMIN), Some(json!({"full_name": "Acme/Widgets"}))).await?;
+    let (s, body) = call(
+        &server,
+        reqwest::Method::POST,
+        "/api/v1/admin/mirror/pause",
+        Some(ADMIN),
+        Some(json!({"full_name": "Acme/Widgets"})),
+    )
+    .await?;
     assert_eq!(s, 200, "{body}");
     assert_eq!(body["revision"], 1);
-    let (_, cur) = call(&server, reqwest::Method::GET, "/api/v1/admin/config", Some(ADMIN), None).await?;
-    assert_eq!(cur["document"]["github_mirror"]["exclude"], json!(["Acme/Widgets"]));
+    let (_, cur) = call(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/admin/config",
+        Some(ADMIN),
+        None,
+    )
+    .await?;
+    assert_eq!(
+        cur["document"]["github_mirror"]["exclude"],
+        json!(["Acme/Widgets"])
+    );
     assert_eq!(cur["message"], "pause Acme/Widgets");
     // Pausing twice changes nothing.
-    let (_, body) = call(&server, reqwest::Method::POST, "/api/v1/admin/mirror/pause", Some(ADMIN), Some(json!({"full_name": "acme/widgets"}))).await?;
+    let (_, body) = call(
+        &server,
+        reqwest::Method::POST,
+        "/api/v1/admin/mirror/pause",
+        Some(ADMIN),
+        Some(json!({"full_name": "acme/widgets"})),
+    )
+    .await?;
     assert_eq!(body["unchanged"], true);
-    let (s, _) = call(&server, reqwest::Method::POST, "/api/v1/admin/mirror/pause", Some(ADMIN), Some(json!({"full_name": "acme/*"}))).await?;
+    let (s, _) = call(
+        &server,
+        reqwest::Method::POST,
+        "/api/v1/admin/mirror/pause",
+        Some(ADMIN),
+        Some(json!({"full_name": "acme/*"})),
+    )
+    .await?;
     assert_eq!(s, 400);
 
     // Another instance on the same bucket picks the revision up by revalidating.
     let sibling = server.start_sibling_with(|_| {}).await?;
-    assert_eq!(sibling.state.config.current().revision, 1, "started on the current revision");
-    let (s, _) = call(&server, reqwest::Method::POST, "/api/v1/admin/mirror/resume", Some(ADMIN), Some(json!({"full_name": "acme/widgets"}))).await?;
+    assert_eq!(
+        sibling.state.config.current().revision,
+        1,
+        "started on the current revision"
+    );
+    let (s, _) = call(
+        &server,
+        reqwest::Method::POST,
+        "/api/v1/admin/mirror/resume",
+        Some(ADMIN),
+        Some(json!({"full_name": "acme/widgets"})),
+    )
+    .await?;
     assert_eq!(s, 200);
     assert_eq!(sibling.state.config.revalidate().await, 2);
-    assert!(sibling.state.config.current().cfg.github_mirror.exclude.is_empty());
+    assert!(
+        sibling
+            .state
+            .config
+            .current()
+            .cfg
+            .github_mirror
+            .exclude
+            .is_empty()
+    );
 
     // The overview reports this instance and the config revision.
-    let (_, ov) = call(&server, reqwest::Method::GET, "/api/v1/admin/overview", Some(ADMIN), None).await?;
+    let (_, ov) = call(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/admin/overview",
+        Some(ADMIN),
+        None,
+    )
+    .await?;
     assert_eq!(ov["config"]["revision"], 2, "{ov}");
     assert_eq!(ov["instance"]["applied_revision"], 2, "{ov}");
     assert_eq!(ov["catalog"]["enabled"], false);
     // "Sync now" writes the request object the mirror supervisors poll.
-    let (s, _) = call(&server, reqwest::Method::POST, "/api/v1/admin/mirror/sync", Some(ADMIN), None).await?;
+    let (s, _) = call(
+        &server,
+        reqwest::Method::POST,
+        "/api/v1/admin/mirror/sync",
+        Some(ADMIN),
+        None,
+    )
+    .await?;
     assert_eq!(s, 200);
     assert!(!server.store.is_empty());
     // Preview with nothing known yet: an empty selection, no forge call.
-    let (s, pv) = call(&server, reqwest::Method::POST, "/api/v1/admin/mirror/preview", Some(ADMIN), Some(json!({"section": {"include": ["acme/*"]}}))).await?;
+    let (s, pv) = call(
+        &server,
+        reqwest::Method::POST,
+        "/api/v1/admin/mirror/preview",
+        Some(ADMIN),
+        Some(json!({"section": {"include": ["acme/*"]}})),
+    )
+    .await?;
     assert_eq!(s, 200, "{pv}");
     assert_eq!(pv["known"], 0);
     Ok(())

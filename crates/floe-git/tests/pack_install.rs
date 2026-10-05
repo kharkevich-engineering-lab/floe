@@ -10,11 +10,11 @@
 )]
 mod common;
 
+use floe_git::{LocalRepo, ObjectFormat, RepoId, gix_hash};
 use std::fmt::Write as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Instant;
-use floe_git::{LocalRepo, ObjectFormat, RepoId, gix_hash};
 
 /// Compare identical cold installs; excludes fixture creation and copying.
 /// Run with `FLOE_BENCH_PACKS=3801 cargo test -p floe-git --test pack_install -- --ignored --nocapture`.

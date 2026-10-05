@@ -31,8 +31,8 @@ use floe_proto::time;
 use floe_proto::v1::{BundleEntry, BundleList};
 use floe_store::Prefixed;
 
-pub use ops::LeaseGuard;
 pub use floe_git::{RefSnapshotData, RepoId};
+pub use ops::LeaseGuard;
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
@@ -304,7 +304,8 @@ impl Bundler {
                     reason = "metrics value; precision loss above 2^52 is irrelevant"
                 )]
                 let commits_f = commits as f64;
-                metrics::histogram!("floe_bundle_commits", "strategy" => strategy_name.to_string()).record(commits_f);
+                metrics::histogram!("floe_bundle_commits", "strategy" => strategy_name.to_string())
+                    .record(commits_f);
                 tracing::info!(
                     strategy = strategy_name,
                     slot = cut.slot,
@@ -737,7 +738,8 @@ impl Bundler {
             if missing.is_empty() {
                 continue;
             }
-            let Some(lease) = ops::try_acquire_lease(store, &strat.name, self.lease_ttl).await? else {
+            let Some(lease) = ops::try_acquire_lease(store, &strat.name, self.lease_ttl).await?
+            else {
                 debug!(strategy = %strat.name, "lease held, skipping");
                 continue;
             };
@@ -851,13 +853,10 @@ pub async fn bundle_engine(handle: &floe_wal::RepoHandle) -> BundleEngine {
             }
         }
     }
-    let linked = handle
-        .local()
-        .packs()
-        .is_ok_and(|ps| {
-            ps.iter()
-                .any(|p| handle.local().pack_path(&p.checksum).is_symlink())
-        });
+    let linked = handle.local().packs().is_ok_and(|ps| {
+        ps.iter()
+            .any(|p| handle.local().pack_path(&p.checksum).is_symlink())
+    });
     if linked {
         return BundleEngine::Gix { faulter: None };
     }

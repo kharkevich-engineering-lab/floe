@@ -156,8 +156,7 @@ fn parse_raw(out: &str) -> Vec<FileChange> {
             continue;
         };
         let cols: Vec<&str> = meta.split_whitespace().collect();
-        let (Some(old_sha), Some(new_sha), Some(code)) =
-            (cols.get(2), cols.get(3), cols.get(4))
+        let (Some(old_sha), Some(new_sha), Some(code)) = (cols.get(2), cols.get(3), cols.get(4))
         else {
             continue;
         };
@@ -169,7 +168,11 @@ fn parse_raw(out: &str) -> Vec<FileChange> {
         } else {
             (first.to_string(), None)
         };
-        let sha = if *new_sha == ZERO_OID { old_sha } else { new_sha };
+        let sha = if *new_sha == ZERO_OID {
+            old_sha
+        } else {
+            new_sha
+        };
         files.push(FileChange {
             status,
             filename,
@@ -353,7 +356,12 @@ mod tests {
         apply_patches(&mut files, out);
         assert!(files.first().expect("rename").patch.is_none());
         assert!(files.get(1).expect("bin").patch.is_none());
-        let p = files.get(2).expect("modified").patch.clone().expect("patch");
+        let p = files
+            .get(2)
+            .expect("modified")
+            .patch
+            .clone()
+            .expect("patch");
         assert!(p.starts_with("@@ -1,3 +1,4 @@"), "patch: {p}");
         assert!(p.contains("+B"), "patch: {p}");
     }

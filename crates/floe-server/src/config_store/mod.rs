@@ -404,7 +404,8 @@ impl ConfigStore {
                 message: format!("the document is {size} bytes; the limit is {MAX_DOCUMENT_BYTES}"),
             }]);
         }
-        let mut doc = RuntimeConfig::from_json(submitted).map_err(|e| vec![FieldError::from_error(&e)])?;
+        let mut doc =
+            RuntimeConfig::from_json(submitted).map_err(|e| vec![FieldError::from_error(&e)])?;
         let current_doc = current.and_then(|r| RuntimeConfig::from_json(&r.document).ok());
         let mut opened = doc.clone();
         let mut errors = Vec::new();
@@ -466,7 +467,9 @@ impl ConfigStore {
         if !errors.is_empty() {
             return Err(errors);
         }
-        let stored = doc.to_json().map_err(|e| vec![FieldError::from_error(&e)])?;
+        let stored = doc
+            .to_json()
+            .map_err(|e| vec![FieldError::from_error(&e)])?;
         // The first revision is diffed against the built-in defaults it replaces.
         let defaults = RuntimeConfig::default().to_json().unwrap_or_default();
         let diff = diff(Some(current.map_or(&defaults, |r| &r.document)), &stored);
@@ -625,8 +628,8 @@ impl ConfigStore {
         else {
             return Err(PublishError::Gone(n));
         };
-        let entry: HistoryEntry =
-            serde_json::from_slice(&body).with_context(|| format!("decoding {}", history_key(n)))?;
+        let entry: HistoryEntry = serde_json::from_slice(&body)
+            .with_context(|| format!("decoding {}", history_key(n)))?;
         if let Some(document) = entry.document.clone() {
             return Ok(Record {
                 revision: entry.revision,
@@ -643,7 +646,8 @@ impl ConfigStore {
         };
         match self.store.get_version(CURRENT, &Version::new(ov)).await {
             Ok(Some(body)) => {
-                let r: Record = serde_json::from_slice(&body).context("decoding a config object version")?;
+                let r: Record =
+                    serde_json::from_slice(&body).context("decoding a config object version")?;
                 Ok(r)
             }
             Ok(None) => Err(PublishError::Gone(n)),
@@ -701,7 +705,10 @@ impl ConfigStore {
         }
         let reads = keys.iter().map(|k| async move {
             let got = self.store.get_bytes(k).await.ok().flatten();
-            (k.clone(), got.and_then(|(_, b)| serde_json::from_slice::<InstanceStatus>(&b).ok()))
+            (
+                k.clone(),
+                got.and_then(|(_, b)| serde_json::from_slice::<InstanceStatus>(&b).ok()),
+            )
         });
         let now = Utc::now();
         let mut out = Vec::new();
@@ -733,7 +740,13 @@ fn normalize_prefix(p: &str) -> String {
 fn instance_key(instance: &str) -> String {
     let safe: String = instance
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("{INSTANCES}{safe}.json")
 }
@@ -743,13 +756,17 @@ async fn resolve_history(mode: HistoryMode, store: &DynStore) -> Result<HistoryM
         match tokio::time::timeout(VERSIONING_PROBE, store.object_versioning()).await {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(e)) => Err(anyhow::Error::from(e)),
-            Err(_) => Err(anyhow::anyhow!("the store did not answer within {VERSIONING_PROBE:?}")),
+            Err(_) => Err(anyhow::anyhow!(
+                "the store did not answer within {VERSIONING_PROBE:?}"
+            )),
         }
     };
     match mode {
         HistoryMode::Records => Ok(HistoryMode::Records),
         HistoryMode::Versions => {
-            let on = probe().await.context("config_store.history = \"versions\"")?;
+            let on = probe()
+                .await
+                .context("config_store.history = \"versions\"")?;
             anyhow::ensure!(
                 on,
                 "config_store.history = \"versions\", but the config bucket keeps no object versions (enable bucket versioning, or use \"auto\"/\"records\")"

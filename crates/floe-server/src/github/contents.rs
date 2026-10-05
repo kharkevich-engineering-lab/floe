@@ -52,7 +52,10 @@ pub fn entry_json(urls: &Urls, full_name: &str, git_ref: &str, e: &Entry) -> ser
     let kind = entry_type(&e.mode);
     let api = format!("{}/repos/{full_name}", urls.api);
     let download = if kind == "file" {
-        serde_json::json!(format!("{}/{full_name}/raw/{git_ref}/{}", urls.html, e.path))
+        serde_json::json!(format!(
+            "{}/{full_name}/raw/{git_ref}/{}",
+            urls.html, e.path
+        ))
     } else {
         serde_json::Value::Null
     };
@@ -167,7 +170,14 @@ async fn contents(
                 e
             })
             .collect();
-        return Ok(directory(&view, &urls, headers, display_ref, &path, &prefixed));
+        return Ok(directory(
+            &view,
+            &urls,
+            headers,
+            display_ref,
+            &path,
+            &prefixed,
+        ));
     }
     file_response(&view, &urls, headers, display_ref, &entry).await
 }

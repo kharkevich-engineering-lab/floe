@@ -112,7 +112,10 @@ async fn overview_reports_push_and_unknown_repo_is_text_404() -> Result<()> {
     assert!(body["packs"]["pushes"].as_u64().unwrap() >= 1);
     assert!(body["bundles"].is_array());
     assert!(body["compactions"].is_array());
-    assert!(body.get("description").is_none(), "absent until set: {body}");
+    assert!(
+        body.get("description").is_none(),
+        "absent until set: {body}"
+    );
 
     // `repo.description` in the settings document is metadata the overview shows.
     let put = client
@@ -121,7 +124,12 @@ async fn overview_reports_push_and_unknown_repo_is_text_404() -> Result<()> {
         .body("[repo]\ndescription = \"Mirror of https://github.com/acme/r\"\n")
         .send()
         .await?;
-    assert!(put.status().is_success(), "settings put: {} {}", put.status(), put.text().await?);
+    assert!(
+        put.status().is_success(),
+        "settings put: {} {}",
+        put.status(),
+        put.text().await?
+    );
     let body: serde_json::Value = client
         .get(format!("{}/o/r/api/overview", server.base_url))
         .send()

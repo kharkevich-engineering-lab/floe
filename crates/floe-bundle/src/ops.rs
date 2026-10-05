@@ -805,7 +805,8 @@ pub async fn build_and_upload(
                 reason = "metrics value; precision loss above 2^52 is irrelevant"
             )]
             let s_f = s as f64;
-            metrics::histogram!("floe_bundle_build_bytes", "strategy" => strategy_name.to_string()).record(s_f);
+            metrics::histogram!("floe_bundle_build_bytes", "strategy" => strategy_name.to_string())
+                .record(s_f);
             s
         }
         Err(BundleError::Git(GitError::Subprocess { stderr, .. }))

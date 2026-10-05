@@ -1,7 +1,7 @@
 //! Error types for the WAL crate.
 
-use thiserror::Error;
 use floe_store::StoreError;
+use thiserror::Error;
 
 /// Coordination-layer error. Re-exported from `floe_store::coord`.
 pub use floe_store::coord::CoordError;

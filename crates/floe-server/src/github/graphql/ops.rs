@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use serde_json::{Value, json};
 use floe_git::RepoId;
+use serde_json::{Value, json};
 
 use super::error::GqlError;
 use super::parse::Field;
@@ -46,9 +46,9 @@ impl Ctx {
     }
 
     pub async fn objects(&self, id: &RepoId) -> Result<View, GqlError> {
-        repo::objects_view(&self.st, id).await.map_err(|e| {
-            not_found_as_repository(e, id)
-        })
+        repo::objects_view(&self.st, id)
+            .await
+            .map_err(|e| not_found_as_repository(e, id))
     }
 
     pub async fn refs(&self, id: &RepoId) -> Result<View, GqlError> {
@@ -96,7 +96,11 @@ fn abbreviated(oid: &str) -> String {
 fn headline_and_body(message: &str) -> (String, String) {
     let mut lines = message.splitn(2, '\n');
     let headline = lines.next().unwrap_or("").trim_end().to_string();
-    let body = lines.next().unwrap_or("").trim_start_matches('\n').to_string();
+    let body = lines
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('\n')
+        .to_string();
     (headline, body)
 }
 
@@ -149,12 +153,7 @@ pub fn commit_node(urls: &Urls, full_name: &str, c: &CommitFacts) -> Value {
 }
 
 /// A GraphQL `Repository`, as much of it as the bucket knows.
-pub fn repository_node(
-    urls: &Urls,
-    id: &RepoId,
-    default_branch: &str,
-    pushed_at: &str,
-) -> Value {
+pub fn repository_node(urls: &Urls, id: &RepoId, default_branch: &str, pushed_at: &str) -> Value {
     let full = id.to_string();
     json!({
         "id": node_id("Repository", &full),
@@ -448,7 +447,13 @@ async fn object_field(ctx: &Ctx, view: &View, f: &Field) -> Result<Value, GqlErr
     };
     let Ok(out) = git(
         view,
-        &["rev-parse", "--verify", "--quiet", "--end-of-options", expression],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            expression,
+        ],
     )
     .await
     else {
@@ -555,7 +560,10 @@ fn refs_field(view: &View, f: &Field) -> Value {
 /// asked for. The bucket listing is `Registry::list`, the same one
 /// `installation/repositories` pages; a facade's bucket is a developer's, so
 /// resolving the whole owner before paging is cheap and keeps the order true.
-async fn repositories_of(ctx: &Ctx, owner: &str) -> Result<Vec<(RepoId, String, String)>, GqlError> {
+async fn repositories_of(
+    ctx: &Ctx,
+    owner: &str,
+) -> Result<Vec<(RepoId, String, String)>, GqlError> {
     let ids = ctx
         .st
         .registry
@@ -573,10 +581,7 @@ async fn repositories_of(ctx: &Ctx, owner: &str) -> Result<Vec<(RepoId, String, 
                     .to_string(),
                 pushed_at(&v),
             ),
-            Err(_) => (
-                "main".to_string(),
-                crate::github::models::EPOCH.to_string(),
-            ),
+            Err(_) => ("main".to_string(), crate::github::models::EPOCH.to_string()),
         };
         out.push((id, branch, pushed));
     }

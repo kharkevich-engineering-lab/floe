@@ -39,7 +39,12 @@ pub async fn run(action: WalAction, cfg: &Arc<Config>) -> Result<()> {
                 let pack = e
                     .pack
                     .as_ref()
-                    .map(|p| p.checksum.get(..12).unwrap_or(p.checksum.as_str()).to_string())
+                    .map(|p| {
+                        p.checksum
+                            .get(..12)
+                            .unwrap_or(p.checksum.as_str())
+                            .to_string()
+                    })
                     .unwrap_or_default();
                 let supersedes = e.supersedes.len();
                 let ref_count = e.txn.as_ref().map_or(0, |t| t.updates.len());

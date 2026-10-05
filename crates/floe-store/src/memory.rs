@@ -276,7 +276,8 @@ impl ObjectStore for MemoryStore {
             .take_while(|(k, _)| k.starts_with(prefix))
             .filter_map(|(k, _)| {
                 let rest = k.strip_prefix(prefix)?;
-                rest.split_once('/').map(|(head, _)| format!("{prefix}{head}/"))
+                rest.split_once('/')
+                    .map(|(head, _)| format!("{prefix}{head}/"))
             })
             .collect();
         out.dedup();
@@ -291,18 +292,44 @@ mod tests {
     async fn versioning_keeps_noncurrent_bodies() {
         let s = MemoryStore::new();
         assert!(!s.object_versioning().await.unwrap());
-        let v0 = s.put_bytes("k", Bytes::from_static(b"zero"), PutMode::Create).await.unwrap().version;
+        let v0 = s
+            .put_bytes("k", Bytes::from_static(b"zero"), PutMode::Create)
+            .await
+            .unwrap()
+            .version;
         assert!(s.get_version("k", &v0).await.is_err(), "off = unsupported");
         s.versioning.store(true, Ordering::Relaxed);
         assert!(s.object_versioning().await.unwrap());
-        let v1 = s.put_bytes("k", Bytes::from_static(b"one"), PutMode::Update(v0.clone())).await.unwrap().version;
-        let v2 = s.put_bytes("k", Bytes::from_static(b"two"), PutMode::Update(v1.clone())).await.unwrap().version;
-        assert_eq!(s.get_version("k", &v1).await.unwrap().as_deref(), Some(&b"one"[..]));
-        assert_eq!(s.get_version("k", &v2).await.unwrap().as_deref(), Some(&b"two"[..]));
-        assert_eq!(s.get_version("k", &v0).await.unwrap(), None, "written before versioning was on");
+        let v1 = s
+            .put_bytes("k", Bytes::from_static(b"one"), PutMode::Update(v0.clone()))
+            .await
+            .unwrap()
+            .version;
+        let v2 = s
+            .put_bytes("k", Bytes::from_static(b"two"), PutMode::Update(v1.clone()))
+            .await
+            .unwrap()
+            .version;
+        assert_eq!(
+            s.get_version("k", &v1).await.unwrap().as_deref(),
+            Some(&b"one"[..])
+        );
+        assert_eq!(
+            s.get_version("k", &v2).await.unwrap().as_deref(),
+            Some(&b"two"[..])
+        );
+        assert_eq!(
+            s.get_version("k", &v0).await.unwrap(),
+            None,
+            "written before versioning was on"
+        );
         let p = crate::Prefixed::new(std::sync::Arc::new(s), "pre/");
         assert!(p.object_versioning().await.unwrap());
-        assert_eq!(p.get_version("k", &v1).await.unwrap(), None, "prefixed key differs");
+        assert_eq!(
+            p.get_version("k", &v1).await.unwrap(),
+            None,
+            "prefixed key differs"
+        );
     }
 
     use super::*;

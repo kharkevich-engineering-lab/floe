@@ -642,11 +642,9 @@ impl ObjectStore for S3Store {
             .send()
             .await
             .map_err(|e| classify_error("s3 get object version", &e))?;
-        let body = out
-            .body
-            .collect()
-            .await
-            .map_err(|e| StoreError::retryable(anyhow::anyhow!("s3 read object version {key}: {e}")))?;
+        let body = out.body.collect().await.map_err(|e| {
+            StoreError::retryable(anyhow::anyhow!("s3 read object version {key}: {e}"))
+        })?;
         Ok(Some(body.into_bytes()))
     }
 
@@ -748,11 +746,7 @@ impl ObjectStore for S3Store {
                         .key(dest)
                         .upload_id(&upload_id)
                         .part_number(part_number)
-                        .copy_source(format!(
-                            "{}/{}",
-                            self.bucket,
-                            crate::util::encode_path(src)
-                        ))
+                        .copy_source(format!("{}/{}", self.bucket, crate::util::encode_path(src)))
                         .copy_source_range(format!("bytes={from}-{}", from + len - 1))
                         .send()
                         .await

@@ -41,7 +41,9 @@ fn authed(h: &HeaderMap) -> bool {
 fn denied() -> (StatusCode, Json<Value>) {
     (
         StatusCode::FORBIDDEN,
-        Json(json!({"success": false, "errors": [{"code": 10000, "message": "Authentication error"}], "result": null})),
+        Json(
+            json!({"success": false, "errors": [{"code": 10000, "message": "Authentication error"}], "result": null}),
+        ),
     )
 }
 
@@ -60,7 +62,10 @@ async fn zones(
     } else {
         json!([])
     };
-    (StatusCode::OK, Json(json!({"success": true, "errors": [], "result": result})))
+    (
+        StatusCode::OK,
+        Json(json!({"success": true, "errors": [], "result": result})),
+    )
 }
 
 async fn create(
@@ -75,7 +80,9 @@ async fn create(
     if body["type"] != "TXT" || body["ttl"] != 60 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"success": false, "errors": [{"code": 9000, "message": "bad record"}], "result": null})),
+            Json(
+                json!({"success": false, "errors": [{"code": 9000, "message": "bad record"}], "result": null}),
+            ),
         );
     }
     let mut m = st.lock().unwrap();
@@ -87,7 +94,10 @@ async fn create(
         body["name"].as_str().unwrap().to_string(),
         body["content"].as_str().unwrap().to_string(),
     ));
-    (StatusCode::OK, Json(json!({"success": true, "errors": [], "result": {"id": id}})))
+    (
+        StatusCode::OK,
+        Json(json!({"success": true, "errors": [], "result": {"id": id}})),
+    )
 }
 
 async fn remove(
@@ -104,10 +114,15 @@ async fn remove(
     if m.records.len() == before {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({"success": false, "errors": [{"code": 81044, "message": "Record does not exist."}], "result": null})),
+            Json(
+                json!({"success": false, "errors": [{"code": 81044, "message": "Record does not exist."}], "result": null}),
+            ),
         );
     }
-    (StatusCode::OK, Json(json!({"success": true, "errors": [], "result": {"id": id}})))
+    (
+        StatusCode::OK,
+        Json(json!({"success": true, "errors": [], "result": {"id": id}})),
+    )
 }
 
 async fn mock() -> (String, St) {
@@ -136,7 +151,10 @@ async fn zone_lookup_create_and_delete() {
         .await
         .unwrap();
     assert_eq!(r1.zone, "zone123");
-    assert_ne!(r1.id, r2.id, "two values at one name are two records (wildcard + base)");
+    assert_ne!(
+        r1.id, r2.id,
+        "two values at one name are two records (wildcard + base)"
+    );
     {
         let m = st.lock().unwrap();
         assert_eq!(
@@ -145,7 +163,11 @@ async fn zone_lookup_create_and_delete() {
             "walks from the record's parent to the zone apex, then caches"
         );
         assert_eq!(m.records.len(), 2);
-        assert!(m.records.iter().all(|r| r.2 == "_acme-challenge.git.example.com"));
+        assert!(
+            m.records
+                .iter()
+                .all(|r| r.2 == "_acme-challenge.git.example.com")
+        );
     }
     cf.delete_txt(&r1).await.unwrap();
     cf.delete_txt(&r1).await.unwrap(); // already gone = success
@@ -157,7 +179,10 @@ async fn zone_lookup_create_and_delete() {
 async fn explicit_zone_id_skips_the_lookup() {
     let (api, st) = mock().await;
     let cf = Cloudflare::new(&api, TOKEN, Some("zone123".into()), reqwest::Client::new());
-    let r = cf.create_txt("_acme-challenge.example.com", "x").await.unwrap();
+    let r = cf
+        .create_txt("_acme-challenge.example.com", "x")
+        .await
+        .unwrap();
     assert_eq!(r.zone, "zone123");
     assert!(st.lock().unwrap().zone_queries.is_empty());
 }
@@ -166,13 +191,26 @@ async fn explicit_zone_id_skips_the_lookup() {
 async fn errors_name_the_problem_never_the_token() {
     let (api, _) = mock().await;
     let bad = Cloudflare::new(&api, "wrong-token", None, reqwest::Client::new());
-    let e = format!("{:#}", bad.create_txt("_acme-challenge.example.com", "x").await.unwrap_err());
+    let e = format!(
+        "{:#}",
+        bad.create_txt("_acme-challenge.example.com", "x")
+            .await
+            .unwrap_err()
+    );
     assert!(e.contains("Authentication error"), "{e}");
     assert!(!e.contains("wrong-token"), "{e}");
 
     let cf = Cloudflare::new(&api, TOKEN, None, reqwest::Client::new());
-    let e = format!("{:#}", cf.create_txt("_acme-challenge.other.org", "x").await.unwrap_err());
+    let e = format!(
+        "{:#}",
+        cf.create_txt("_acme-challenge.other.org", "x")
+            .await
+            .unwrap_err()
+    );
     assert!(e.contains("no active Cloudflare zone"), "{e}");
     assert!(!e.contains(TOKEN));
-    assert!(!format!("{cf:?}").contains(TOKEN), "Debug redacts the token");
+    assert!(
+        !format!("{cf:?}").contains(TOKEN),
+        "Debug redacts the token"
+    );
 }

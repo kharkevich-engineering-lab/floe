@@ -1121,7 +1121,10 @@ impl GithubMirrorConfig {
         }
         for r in &self.repos {
             anyhow::ensure!(
-                r.matches('/').count() == 1 && !r.contains('*') && !r.starts_with('/') && !r.ends_with('/'),
+                r.matches('/').count() == 1
+                    && !r.contains('*')
+                    && !r.starts_with('/')
+                    && !r.ends_with('/'),
                 "github_mirror.repos entry {r:?} must be \"owner/name\""
             );
         }
@@ -1386,7 +1389,9 @@ impl Config {
         let mut cfg: Config = doc.try_into().context("settings: applying")?;
         // Load-time state, not TOML: carried over the round trip.
         cfg.github_mirror.use_token = self.github_mirror.use_token;
-        cfg.github_mirror.token_env.clone_from(&self.github_mirror.token_env);
+        cfg.github_mirror
+            .token_env
+            .clone_from(&self.github_mirror.token_env);
         cfg.validate()
             .context("settings: validating the effective config")?;
         Ok(cfg)
@@ -1900,7 +1905,8 @@ impl Config {
             {
                 ignored.push((
                     k,
-                    "runtime key: it lives in the config store (D60; `floe config set` or /_admin)".to_string(),
+                    "runtime key: it lives in the config store (D60; `floe config set` or /_admin)"
+                        .to_string(),
                 ));
                 continue;
             }
@@ -2530,17 +2536,29 @@ listen = \"0.0.0.0:1\"\n",
             Some("Mirror of https://github.com/acme/widgets")
         );
         assert_eq!(RepoMeta::from_settings("").unwrap(), RepoMeta::default());
-        assert_eq!(RepoMeta::from_settings("[bundles]\nmain_only = true\n").unwrap(), RepoMeta::default());
+        assert_eq!(
+            RepoMeta::from_settings("[bundles]\nmain_only = true\n").unwrap(),
+            RepoMeta::default()
+        );
         for bad in [
             "[repo]\ntopic = \"x\"\n".to_string(),
             "[repo]\ndescription = \"a\\nb\"\n".to_string(),
-            format!("[repo]\ndescription = \"{}\"\n", "x".repeat(DESCRIPTION_MAX_CHARS + 1)),
+            format!(
+                "[repo]\ndescription = \"{}\"\n",
+                "x".repeat(DESCRIPTION_MAX_CHARS + 1)
+            ),
         ] {
             assert!(c.with_settings(&bad).is_err(), "{bad}");
             assert!(RepoMeta::from_settings(&bad).is_err(), "{bad}");
         }
         // Never part of the effective config a reader sees.
-        assert!(!c.with_settings(doc).unwrap().public_settings_toml().unwrap().contains("Mirror of"));
+        assert!(
+            !c.with_settings(doc)
+                .unwrap()
+                .public_settings_toml()
+                .unwrap()
+                .contains("Mirror of")
+        );
     }
 
     #[test]
@@ -2568,7 +2586,11 @@ listen = \"0.0.0.0:1\"\n",
             let mut bad = c.clone();
             edit(&mut bad.github_mirror);
             assert!(bad.validate().is_err(), "{:?}", bad.github_mirror);
-            assert!(bad.github_mirror.check().is_err(), "{:?}", bad.github_mirror);
+            assert!(
+                bad.github_mirror.check().is_err(),
+                "{:?}",
+                bad.github_mirror
+            );
         }
         let mut local = c.clone();
         local.github_mirror.api_url = "http://127.0.0.1:8080".into();
@@ -2799,8 +2821,14 @@ webhook_secret = { value = "s" }
         let ignored = c
             .apply_env_report(
                 [
-                    ("FLOE__GITHUB_MIRROR__ENABLED".to_string(), "true".to_string()),
-                    ("FLOE__EVENTS__WEBHOOK_URL".to_string(), "https://x".to_string()),
+                    (
+                        "FLOE__GITHUB_MIRROR__ENABLED".to_string(),
+                        "true".to_string(),
+                    ),
+                    (
+                        "FLOE__EVENTS__WEBHOOK_URL".to_string(),
+                        "https://x".to_string(),
+                    ),
                     ("FLOE__CONFIG_STORE__TTL".to_string(), "1m".to_string()),
                 ]
                 .into_iter(),
@@ -2810,7 +2838,8 @@ webhook_secret = { value = "s" }
         assert!(!c.github_mirror.enabled);
         assert!(c.events.webhook_url.is_none());
         assert_eq!(c.config_store.ttl, Duration::from_mins(1));
-        let parsed = Config::parse("[config_store]\nbucket = \"cfg\"\nhistory = \"records\"\n").unwrap();
+        let parsed =
+            Config::parse("[config_store]\nbucket = \"cfg\"\nhistory = \"records\"\n").unwrap();
         assert_eq!(parsed.config_store.bucket.as_deref(), Some("cfg"));
         assert_eq!(parsed.config_store.history, HistoryMode::Records);
     }

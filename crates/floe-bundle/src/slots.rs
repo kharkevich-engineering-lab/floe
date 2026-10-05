@@ -369,10 +369,7 @@ pub fn plan_with(
             // earliest state (for a large repository, the import) — that is what "weekly =
             // import state" means; later slots are as-of by construction.
             let first_full = strat.kind == BundleKind::Full && built.is_empty();
-            let unavailable = !first_full
-                && ctx
-                    .first_state
-                    .is_some_and(|t| from_epoch(slot) < t);
+            let unavailable = !first_full && ctx.first_state.is_some_and(|t| from_epoch(slot) < t);
             let skipped = list.skipped.iter().find(|k| {
                 k.strategy == strat.name
                     && k.slot == slot
@@ -514,17 +511,14 @@ pub fn retain(cfg: &BundlesConfig, list: &mut BundleList) -> Vec<String> {
             let in_group: Vec<&BundleEntry> =
                 v.iter().copied().filter(|b| group_of(b) == g).collect();
             if strat.chain {
-                let base_newest = strat
-                    .base
-                    .as_deref()
-                    .map_or(0, |n| {
-                        entries_of(list, n)
-                            .into_iter()
-                            .filter(|b| keep.contains(&b.id) && group_of(b) == g)
-                            .map(|b| b.creation_token)
-                            .max()
-                            .unwrap_or(0)
-                    });
+                let base_newest = strat.base.as_deref().map_or(0, |n| {
+                    entries_of(list, n)
+                        .into_iter()
+                        .filter(|b| keep.contains(&b.id) && group_of(b) == g)
+                        .map(|b| b.creation_token)
+                        .max()
+                        .unwrap_or(0)
+                });
                 // Oldest first so a link's base (the previous link) is decided before it. The first
                 // link of a group may point at a pruned link of the previous group (Monday on Sunday's
                 // daily): its prerequisites are the group's full's tips, so it stays while the full does.

@@ -33,7 +33,8 @@ pub trait Source: Send + Sync {
     /// by default the git URL without its `.git`.
     fn web_url(&self, r: &RemoteRepo) -> String {
         let git = self.git_url(r);
-        git.strip_suffix(".git").map_or_else(|| git.clone(), str::to_string)
+        git.strip_suffix(".git")
+            .map_or_else(|| git.clone(), str::to_string)
     }
 }
 

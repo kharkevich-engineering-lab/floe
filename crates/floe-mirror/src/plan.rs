@@ -78,7 +78,11 @@ pub struct PlanInput<'a> {
 /// ids already missing, or about to be (a complete discovery lacks them).
 /// Detached entries are never looked up (the mirror leaves them alone);
 /// excluded ones come last (frozen already, a lookup only relabels them).
-pub fn lookup_candidates(state: &MirrorState, discovery: &Discovery, now: DateTime<Utc>) -> Vec<String> {
+pub fn lookup_candidates(
+    state: &MirrorState,
+    discovery: &Discovery,
+    now: DateTime<Utc>,
+) -> Vec<String> {
     let seen: BTreeSet<&str> = discovery.repos.iter().map(|r| r.id.as_str()).collect();
     let mut c: Vec<(&String, &RepoEntry)> = state
         .repos
@@ -274,7 +278,12 @@ impl Planner<'_, '_> {
                 .is_some_and(|e| e.status == Status::Conflict);
         let mut steps = Vec::new();
         let status = if verdict == Verdict::TooLarge {
-            if self.state.repos.get(&r.id).is_none_or(|e| e.status != Status::TooLarge) {
+            if self
+                .state
+                .repos
+                .get(&r.id)
+                .is_none_or(|e| e.status != Status::TooLarge)
+            {
                 tracing::info!(id = %r.id, repo = %r.full_name(), size_kb = r.size_kb, "too large to mirror automatically: `floe import` it on an SSD host into its mapped name, then set [upstream] source = \"{}\"", settings::marker(self.input.source.kind(), &r.id));
                 self.change(&r.id, "too-large");
             }
@@ -425,8 +434,17 @@ mod tests {
         let src = FakeSource::new("https://github.com");
         let mut e = RepoEntry::default();
         e.observe(r, t(0));
-        e.floe = Some(format!("{}/{}", r.owner.to_lowercase(), r.name.to_lowercase()));
-        e.settings_sha = Some(settings::hash(&settings::render(&src, cfg, r, Status::Active)));
+        e.floe = Some(format!(
+            "{}/{}",
+            r.owner.to_lowercase(),
+            r.name.to_lowercase()
+        ));
+        e.settings_sha = Some(settings::hash(&settings::render(
+            &src,
+            cfg,
+            r,
+            Status::Active,
+        )));
         e.settings_revision = 1;
         e.policy = true;
         state.repos.insert(r.id.clone(), e);
@@ -444,7 +462,13 @@ mod tests {
     fn new_repository_is_created_then_idempotent() {
         let c = cfg();
         let r = remote("1", "Acme", "Widgets");
-        let p = run(&MirrorState::default(), &c, &disc(vec![r.clone()], true), &BTreeMap::new(), t(0));
+        let p = run(
+            &MirrorState::default(),
+            &c,
+            &disc(vec![r.clone()], true),
+            &BTreeMap::new(),
+            t(0),
+        );
         assert_eq!(steps(&p, "1"), ["create", "policy", "publish", "nudge"]);
         let mut s = MirrorState::default();
         mirrored(&mut s, &c, &r);
@@ -482,7 +506,11 @@ mod tests {
         let mut archived = r.clone();
         archived.archived = true;
         let p = run(&s, &c, &disc(vec![archived], true), &BTreeMap::new(), t(1));
-        assert_eq!(steps(&p, "1"), ["publish"], "archived keeps following at 24h");
+        assert_eq!(
+            steps(&p, "1"),
+            ["publish"],
+            "archived keeps following at 24h"
+        );
         assert_eq!(p.state.repos.get("1").unwrap().status, Status::Active);
 
         let mut private = r;
@@ -541,7 +569,12 @@ mod tests {
         let mut frozen = p.state.clone();
         if let Some(e) = frozen.repos.get_mut("1") {
             let src = FakeSource::new("https://github.com");
-            e.settings_sha = Some(settings::hash(&settings::render(&src, &c, &r, Status::Gone)));
+            e.settings_sha = Some(settings::hash(&settings::render(
+                &src,
+                &c,
+                &r,
+                Status::Gone,
+            )));
         }
         let p = run(&frozen, &c, &disc(vec![r], true), &BTreeMap::new(), t(31));
         let e = p.state.repos.get("1").unwrap();
@@ -558,7 +591,13 @@ mod tests {
         mirrored(&mut s, &c, &r);
         let mut excl = c.clone();
         excl.exclude = vec!["acme/*".into()];
-        let p = run(&s, &excl, &disc(vec![r.clone()], true), &BTreeMap::new(), t(1));
+        let p = run(
+            &s,
+            &excl,
+            &disc(vec![r.clone()], true),
+            &BTreeMap::new(),
+            t(1),
+        );
         assert_eq!(p.state.repos.get("1").unwrap().status, Status::Excluded);
         assert_eq!(steps(&p, "1"), ["publish"]);
 
@@ -609,18 +648,32 @@ mod tests {
             remote("3", "a", "z"),
             big,
         ];
-        let p = run(&MirrorState::default(), &c, &disc(repos, true), &BTreeMap::new(), t(0));
+        let p = run(
+            &MirrorState::default(),
+            &c,
+            &disc(repos, true),
+            &BTreeMap::new(),
+            t(0),
+        );
         let creates = p
             .actions
             .iter()
             .filter(|a| a.steps.first() == Some(&Step::Create { allow_create: true }))
             .count();
         assert_eq!(creates, 2);
-        assert!(!p.state.repos.contains_key("3"), "beyond the bound: not recorded");
+        assert!(
+            !p.state.repos.contains_key("3"),
+            "beyond the bound: not recorded"
+        );
         assert_eq!(p.state.repos.get("9").unwrap().status, Status::TooLarge);
         assert_eq!(
-            p.actions.iter().find(|a| a.id == "9").and_then(|a| a.steps.first()),
-            Some(&Step::Create { allow_create: false })
+            p.actions
+                .iter()
+                .find(|a| a.id == "9")
+                .and_then(|a| a.steps.first()),
+            Some(&Step::Create {
+                allow_create: false
+            })
         );
     }
 
@@ -664,7 +717,11 @@ mod tests {
         assert_eq!(steps(&p, "9").first(), Some(&"create"), "{:?}", p.actions);
         assert_eq!(steps(&p, "1").first(), Some(&"create"), "still retried");
         assert_eq!(p.state.repos.get("1").unwrap().status, Status::Conflict);
-        assert!(p.changes.iter().all(|(_, what)| what != "created"), "{:?}", p.changes);
+        assert!(
+            p.changes.iter().all(|(_, what)| what != "created"),
+            "{:?}",
+            p.changes
+        );
     }
 
     #[test]
@@ -704,6 +761,9 @@ mod tests {
             ["b", "c", "a"],
             "incomplete: only ids already missing"
         );
-        assert_eq!(lookup_candidates(&s, &disc(vec![], true), t(9)), ["b", "d", "c", "a"]);
+        assert_eq!(
+            lookup_candidates(&s, &disc(vec![], true), t(9)),
+            ["b", "d", "c", "a"]
+        );
     }
 }

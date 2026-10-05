@@ -118,7 +118,13 @@ impl Source for GithubSource {
         // The token's identity: `@me`, and a sanity check (401 fails the pass).
         let login = match self
             .http
-            .get(&token, &format!("{}/user", self.api), cache, &mut stats, model::project::<User>)
+            .get(
+                &token,
+                &format!("{}/user", self.api),
+                cache,
+                &mut stats,
+                model::project::<User>,
+            )
             .await
         {
             Ok(Fetched::Ok { body, .. }) => Some(model::decode::<User>(body)?.login),
@@ -169,7 +175,9 @@ impl Source for GithubSource {
                         Listing::Partial
                     }
                     Err(SourceError::RateLimited { .. }) => Listing::Stop,
-                    Err(e @ (SourceError::Unauthorized | SourceError::NoToken(_))) => return Err(e),
+                    Err(e @ (SourceError::Unauthorized | SourceError::NoToken(_))) => {
+                        return Err(e);
+                    }
                     Err(e) => {
                         tracing::warn!(url = %u, error = %e, "github listing failed");
                         Listing::Partial
@@ -208,7 +216,9 @@ impl Source for GithubSource {
                         complete = false;
                         break;
                     }
-                    Err(e @ (SourceError::Unauthorized | SourceError::NoToken(_))) => return Err(e),
+                    Err(e @ (SourceError::Unauthorized | SourceError::NoToken(_))) => {
+                        return Err(e);
+                    }
                     Err(e) => {
                         tracing::warn!(repo = %full, error = %e, "github repository fetch failed");
                         complete = false;

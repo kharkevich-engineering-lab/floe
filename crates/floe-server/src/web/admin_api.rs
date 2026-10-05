@@ -36,7 +36,10 @@ pub fn routes(mut r: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
             .route(&format!("{base}/config/validate"), post(config_validate))
             .route(&format!("{base}/config/schema"), get(config_schema))
             .route(&format!("{base}/config/history"), get(config_history))
-            .route(&format!("{base}/config/revisions/{{n}}"), get(config_revision))
+            .route(
+                &format!("{base}/config/revisions/{{n}}"),
+                get(config_revision),
+            )
             .route(&format!("{base}/config/rollback"), post(config_rollback))
             .route(&format!("{base}/overview"), get(overview))
             .route(&format!("{base}/mirror"), get(mirror_status))
@@ -261,7 +264,11 @@ struct ValidateBody {
     document: Value,
 }
 
-async fn config_validate(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn config_validate(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if let Err(r) = admin(&st, &headers).await {
         return *r;
     }
@@ -274,9 +281,17 @@ async fn config_validate(State(st): State<Arc<AppState>>, headers: HeaderMap, bo
         Ok(c) => c,
         Err(e) => return store_error(&e),
     };
-    match cs.prepare(&req.document, current.as_ref().map(|(_, r)| r), st.config.bootstrap()) {
-        Ok(p) => ok(&json!({"ok": true, "errors": [], "diff": p.diff, "restart_required": p.restart_required})),
-        Err(errors) => ok(&json!({"ok": false, "errors": errors, "diff": [], "restart_required": []})),
+    match cs.prepare(
+        &req.document,
+        current.as_ref().map(|(_, r)| r),
+        st.config.bootstrap(),
+    ) {
+        Ok(p) => ok(
+            &json!({"ok": true, "errors": [], "diff": p.diff, "restart_required": p.restart_required}),
+        ),
+        Err(errors) => {
+            ok(&json!({"ok": false, "errors": errors, "diff": [], "restart_required": []}))
+        }
     }
 }
 
@@ -301,12 +316,7 @@ async fn config_history(
     if let Err(r) = admin(&st, &headers).await {
         return *r;
     }
-    match st
-        .config
-        .store()
-        .history(q.before, q.n.unwrap_or(20))
-        .await
-    {
+    match st.config.store().history(q.before, q.n.unwrap_or(20)).await {
         Ok(entries) => ok(&json!({"entries": entries})),
         Err(e) => store_error(&e),
     }
@@ -334,7 +344,11 @@ struct RollbackBody {
     base_revision: Option<u64>,
 }
 
-async fn config_rollback(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn config_rollback(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let principal = match admin(&st, &headers).await {
         Ok(p) => p,
         Err(r) => return *r,
@@ -364,7 +378,8 @@ async fn overview(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respon
         return *r;
     }
     let cs = st.config.store();
-    let (current, instances, mirror) = tokio::join!(cs.current(), cs.instances(), mirror_summary(&st));
+    let (current, instances, mirror) =
+        tokio::join!(cs.current(), cs.instances(), mirror_summary(&st));
     let live = st.config.status();
     let applied = st.config.current();
     let config = match current {
@@ -372,7 +387,9 @@ async fn overview(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respon
             "revision": r.revision, "updated_at": r.updated_at, "author": r.author,
             "message": r.message, "error": null,
         }),
-        Ok(None) => json!({"revision": 0, "updated_at": null, "author": "", "message": "", "error": null}),
+        Ok(None) => {
+            json!({"revision": 0, "updated_at": null, "author": "", "message": "", "error": null})
+        }
         Err(e) => json!({"revision": null, "error": format!("{e:#}")}),
     };
     let me = st.config.instance_status();
@@ -410,7 +427,10 @@ async fn mirror_summary(st: &AppState) -> Value {
         Ok(s) => {
             let mut counts = serde_json::Map::new();
             for e in s.repos.values() {
-                let n = counts.get(e.status.as_str()).and_then(Value::as_u64).unwrap_or(0);
+                let n = counts
+                    .get(e.status.as_str())
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 counts.insert(e.status.as_str().to_string(), json!(n + 1));
             }
             json!({
@@ -487,7 +507,10 @@ async fn mirror_status(State(st): State<Arc<AppState>>, headers: HeaderMap) -> R
 /// The candidate `github_mirror` section of a request (`{"section": {...}}`),
 /// over the applied one for missing keys; a redacted or sealed token means
 /// "the applied token".
-fn candidate_section(st: &AppState, section: Option<&Value>) -> Result<GithubMirrorConfig, Refusal> {
+fn candidate_section(
+    st: &AppState,
+    section: Option<&Value>,
+) -> Result<GithubMirrorConfig, Refusal> {
     let applied = st.config.current().cfg.github_mirror.clone();
     let Some(section) = section else {
         return Ok(applied);
@@ -508,7 +531,11 @@ fn candidate_section(st: &AppState, section: Option<&Value>) -> Result<GithubMir
 }
 
 /// Why `select` decides what it decides (`floe_mirror::select`'s rule order).
-fn selection_reason(gm: &GithubMirrorConfig, r: &floe_mirror::RemoteRepo, explicit: bool) -> String {
+fn selection_reason(
+    gm: &GithubMirrorConfig,
+    r: &floe_mirror::RemoteRepo,
+    explicit: bool,
+) -> String {
     use floe_mirror::select::glob_match;
     let full = r.full_name();
     if let Some(g) = gm.exclude.iter().find(|g| glob_match(g, &full)) {
@@ -553,7 +580,11 @@ struct PreviewBody {
     discover: bool,
 }
 
-async fn mirror_preview(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn mirror_preview(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if let Err(r) = admin(&st, &headers).await {
         return *r;
     }
@@ -613,7 +644,10 @@ async fn mirror_preview(State(st): State<Arc<AppState>>, headers: HeaderMap, bod
 /// A real dry-run pass against the forge with a candidate section: no lease,
 /// no writes (`PassOptions::dry_run`).
 async fn discover(st: &Arc<AppState>, gm: GithubMirrorConfig) -> anyhow::Result<Value> {
-    let alias = format!("FLOE_CONFIG_PREVIEW_TOKEN_{}", uuid::Uuid::new_v4().simple());
+    let alias = format!(
+        "FLOE_CONFIG_PREVIEW_TOKEN_{}",
+        uuid::Uuid::new_v4().simple()
+    );
     floe_config::secret::set_alias(&alias, Some(gm.token.clone()));
     let result = async {
         let mut cfg = (*st.config.current().cfg).clone();
@@ -662,8 +696,15 @@ async fn mirror_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: 
         Err(r) => return *r,
     };
     let applied = st.config.current().cfg.github_mirror.clone();
-    let api = req.api_url.unwrap_or(applied.api_url).trim_end_matches('/').to_string();
-    if !(api.starts_with("https://") || api.starts_with("http://localhost") || api.starts_with("http://127.0.0.1")) {
+    let api = req
+        .api_url
+        .unwrap_or(applied.api_url)
+        .trim_end_matches('/')
+        .to_string();
+    if !(api.starts_with("https://")
+        || api.starts_with("http://localhost")
+        || api.starts_with("http://127.0.0.1"))
+    {
         return bad_request("api_url must be https:// (or a loopback http URL)");
     }
     let token = match req.token {
@@ -671,11 +712,18 @@ async fn mirror_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: 
         Some(s) => s.reveal(),
     };
     let Some(token) = token else {
-        return ok(&json!({"ok": false, "message": "no token: the reference is unset on this instance, or nothing was entered"}));
+        return ok(
+            &json!({"ok": false, "message": "no token: the reference is unset on this instance, or nothing was entered"}),
+        );
     };
     let client = match reqwest::Client::builder().timeout(TEST_TIMEOUT).build() {
         Ok(c) => c,
-        Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e.to_string()})),
+        Err(e) => {
+            return fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({"error": e.to_string()}),
+            );
+        }
     };
     let resp = client
         .get(format!("{api}/user"))
@@ -688,11 +736,19 @@ async fn mirror_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: 
         Err(e) => ok(&json!({"ok": false, "message": format!("GitHub unreachable: {e}")})),
         Ok(r) => {
             let status = r.status().as_u16();
-            let h = |k: &str| r.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
+            let h = |k: &str| {
+                r.headers()
+                    .get(k)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            };
             let scopes = h("x-oauth-scopes");
             let remaining = h("x-ratelimit-remaining").and_then(|v| v.parse::<u64>().ok());
             let body: Value = r.json().await.unwrap_or(Value::Null);
-            let login = body.get("login").and_then(Value::as_str).map(str::to_string);
+            let login = body
+                .get("login")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             ok(&json!({
                 "ok": (200..300).contains(&status),
                 "status": status,
@@ -711,7 +767,9 @@ async fn mirror_sync(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Res
         Err(r) => return *r,
     };
     match crate::mirror::request_sync(&st.store, &principal.name).await {
-        Ok(()) => ok(&json!({"ok": true, "message": "requested: the mirror loop runs a pass within about a minute"})),
+        Ok(()) => ok(
+            &json!({"ok": true, "message": "requested: the mirror loop runs a pass within about a minute"}),
+        ),
         Err(e) => store_error(&e),
     }
 }
@@ -721,17 +779,30 @@ struct PauseBody {
     full_name: String,
 }
 
-async fn mirror_pause(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn mirror_pause(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     pause_or_resume(st, headers, body, true).await
 }
 
-async fn mirror_resume(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn mirror_resume(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     pause_or_resume(st, headers, body, false).await
 }
 
 /// Pause = the exact `owner/name` in `github_mirror.exclude` (the mirror's
 /// frozen state: data kept, follow stopped); resume removes it. A config change.
-async fn pause_or_resume(st: Arc<AppState>, headers: HeaderMap, body: Bytes, pause: bool) -> Response {
+async fn pause_or_resume(
+    st: Arc<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+    pause: bool,
+) -> Response {
     let principal = match admin(&st, &headers).await {
         Ok(p) => p,
         Err(r) => return *r,
@@ -741,7 +812,11 @@ async fn pause_or_resume(st: Arc<AppState>, headers: HeaderMap, body: Bytes, pau
         Err(r) => return *r,
     };
     let name = req.full_name.trim().to_string();
-    if name.matches('/').count() != 1 || name.contains('*') || name.starts_with('/') || name.ends_with('/') {
+    if name.matches('/').count() != 1
+        || name.contains('*')
+        || name.starts_with('/')
+        || name.ends_with('/')
+    {
         return bad_request("full_name must be \"owner/name\"");
     }
     let cs = st.config.store();
@@ -759,7 +834,9 @@ async fn pause_or_resume(st: Arc<AppState>, headers: HeaderMap, body: Bytes, pau
     let ex = &mut doc.github_mirror.exclude;
     let had = ex.iter().any(|g| g.eq_ignore_ascii_case(&name));
     if pause == had {
-        return ok(&json!({"revision": base, "diff": [], "restart_required": [], "unchanged": true}));
+        return ok(
+            &json!({"revision": base, "diff": [], "restart_required": [], "unchanged": true}),
+        );
     }
     if pause {
         ex.push(name.clone());
@@ -797,12 +874,13 @@ async fn catalog_status(State(st): State<Arc<AppState>>, headers: HeaderMap) -> 
     if let Some(o) = v.as_object_mut() {
         o.insert(
             "restart_required".into(),
-            json!(st
-                .config
-                .status()
-                .restart_required
-                .iter()
-                .any(|p| p.starts_with("catalog"))),
+            json!(
+                st.config
+                    .status()
+                    .restart_required
+                    .iter()
+                    .any(|p| p.starts_with("catalog"))
+            ),
         );
     }
     ok(&v)
@@ -816,7 +894,11 @@ struct CatalogTestBody {
 /// `GET {uri}/v1/config?warehouse=…` (Iceberg REST) with the configured
 /// bearer; `OAuth2` client credentials and `SigV4` (D63) are the writer's own
 /// seams, so those probes go unauthenticated and say so.
-async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn catalog_test(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if let Err(r) = admin(&st, &headers).await {
         return *r;
     }
@@ -850,7 +932,12 @@ async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body:
     }
     let client = match reqwest::Client::builder().timeout(TEST_TIMEOUT).build() {
         Ok(c) => c,
-        Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e.to_string()})),
+        Err(e) => {
+            return fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({"error": e.to_string()}),
+            );
+        }
     };
     let mut rq = client.get(&url).header("Accept", "application/json");
     let auth = match cat.auth {
@@ -865,19 +952,27 @@ async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body:
         match floe_config::secret::env_var(var) {
             Some(t) => rq = rq.header("Authorization", format!("Bearer {}", t.trim())),
             None => {
-                return ok(&json!({"ok": false, "auth": auth, "message": format!("catalog.token_env names {var}, which is unset on this instance")}));
+                return ok(
+                    &json!({"ok": false, "auth": auth, "message": format!("catalog.token_env names {var}, which is unset on this instance")}),
+                );
             }
         }
     }
     match rq.send().await {
-        Err(e) => ok(&json!({"ok": false, "auth": auth, "url": url, "message": format!("unreachable: {e}")})),
+        Err(e) => ok(
+            &json!({"ok": false, "auth": auth, "url": url, "message": format!("unreachable: {e}")}),
+        ),
         Ok(r) => {
             let status = r.status().as_u16();
             let text = r.text().await.unwrap_or_default();
             let excerpt: String = text.chars().take(500).collect();
             let note = match auth {
-                "oauth2" => Some("OAuth2 client credentials are exchanged by the writer; this probe was unauthenticated"),
-                "sigv4" => Some("the writer signs every catalog request (SigV4, D63); this probe was unsigned, so a 403 here only proves the endpoint answers"),
+                "oauth2" => Some(
+                    "OAuth2 client credentials are exchanged by the writer; this probe was unauthenticated",
+                ),
+                "sigv4" => Some(
+                    "the writer signs every catalog request (SigV4, D63); this probe was unsigned, so a 403 here only proves the endpoint answers",
+                ),
                 _ => None,
             };
             ok(&json!({
