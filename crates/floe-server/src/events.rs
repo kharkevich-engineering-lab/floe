@@ -194,7 +194,7 @@ impl WebhookSink {
 
     /// `sha256=<hex>` over `body` with the shared secret.
     pub fn signature(secret: &[u8], body: &[u8]) -> String {
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         #[allow(clippy::expect_used, reason = "HMAC accepts keys of any length")]
         let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret).expect("hmac key");
         mac.update(body);

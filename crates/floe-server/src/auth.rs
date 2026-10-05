@@ -510,7 +510,7 @@ impl Authenticator {
     /// Sign `payload` (opaque) with the session secret: `base64url(payload).base64url(mac)`.
     pub fn sign(&self, payload: &[u8]) -> Option<String> {
         use base64::Engine;
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         let secret = self.session_secret.as_ref()?;
         let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret).ok()?;
         mac.update(payload);
@@ -521,7 +521,7 @@ impl Authenticator {
     /// Verify a value produced by [`Self::sign`], returning the payload.
     pub fn verify_signed(&self, value: &str) -> Option<Vec<u8>> {
         use base64::Engine;
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         let secret = self.session_secret.as_ref()?;
         let (p, t) = value.split_once('.')?;
         let e = base64::engine::general_purpose::URL_SAFE_NO_PAD;

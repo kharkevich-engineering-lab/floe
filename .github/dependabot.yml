@@ -1,37 +1,39 @@
 version: 2
+
+# One weekly PR across every ecosystem (GitHub Actions, cargo, the web/ SPA and SDK):
+# a multi-ecosystem group. https://docs.github.com/en/code-security/concepts/supply-chain-security/multi-ecosystem-updates
+#
+# `chore(deps)` is not a release type for semantic-release's commit-analyzer (only
+# feat/fix/perf and breaking changes are), so a dependency bump never cuts a release on its
+# own; a security fix that should ship gets a `fix:` commit by hand.
+#
+# Semver-major bumps now arrive in the same PR as everything else (there is no update-types
+# filter), so the weekly PR may need code changes before it goes green.
+#
+# Schedule and commit-message are group-level only: setting commit-message on an ecosystem
+# entry below is a configuration error.
+multi-ecosystem-groups:
+  all:
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore(deps)
+
 updates:
-  # Keeps every action at its latest release; pins stay SHA + version comment.
+  # Every action stays at its latest release; pins stay SHA + version comment.
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
-    groups:
-      actions:
-        patterns: ["*"]
-    commit-message:
-      prefix: ci
+    patterns: ["*"]
+    multi-ecosystem-group: all
 
-  # Rust dependencies, one grouped PR a week. `chore(deps)` is not a release type for
-  # semantic-release's commit-analyzer (only feat/fix/perf and breaking changes are), so a
-  # dependency bump never cuts a release on its own; a security fix that should ship gets a
-  # `fix:` commit by hand. Semver-major bumps come as their own PRs (they need code changes).
+  # Rust dependencies.
   - package-ecosystem: cargo
     directory: /
-    schedule:
-      interval: weekly
-    groups:
-      cargo:
-        update-types: [minor, patch]
-    commit-message:
-      prefix: chore(deps)
+    patterns: ["*"]
+    multi-ecosystem-group: all
 
-  # The SPA and SDK (web/), same policy as cargo.
+  # The SPA and SDK (web/).
   - package-ecosystem: npm
     directory: /web
-    schedule:
-      interval: weekly
-    groups:
-      web:
-        update-types: [minor, patch]
-    commit-message:
-      prefix: chore(deps)
+    patterns: ["*"]
+    multi-ecosystem-group: all

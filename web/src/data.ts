@@ -1,4 +1,4 @@
-import { startTransition, use, useEffect, useReducer, useSyncExternalStore } from "react";
+import { startTransition, use, useEffect, useReducer, useState, useSyncExternalStore } from "react";
 
 /**
  * Suspense data layer.
@@ -96,6 +96,20 @@ export function useData<T>(key: string, fn: () => Promise<T>, ttl = 5_000): T {
   if (entry.status === "ok") return entry.value as T;
   if (entry.status === "error") throw entry.error;
   return use(entry.promise);
+}
+
+/**
+ * Wall-clock time as render input. Rendering must stay pure (no `Date.now()`
+ * in a component body), so a component that compares against "now" reads it
+ * from here; it re-renders every `intervalMs` with a fresh value.
+ */
+export function useNow(intervalMs: number): number {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [intervalMs]);
+  return now;
 }
 
 /** Mark entries stale (e.g. after a mutation): mounted readers refetch in the
