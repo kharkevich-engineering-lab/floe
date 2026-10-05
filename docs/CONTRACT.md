@@ -19,13 +19,25 @@ Read `AGENTS.md` first (design §1–§2, decisions §3; the original layout/pha
 - `floe-proto`: prost types from `proto/floe/v1/wal.proto` (Manifest, LogSegmentRef, LogEntry, PackRef,
   RefTransaction/RefUpdate, Checkpoint(+Ref), RefSnapshot/Ref, Lease, BundleList/BundleEntry); `keys::*`;
   `frame::{encode_entries,decode_entries}` (uvarint-framed log encoding); `time::*`; `keys::POLICY` / `policy_key` (`policy.json` rule language, `docs/POLICY.md`).
+  Code intelligence (D52): `proto/floe/v1/codeintel.proto` (IndexHead, RefIndex, ArtifactRef, RecentSnapshot,
+  ReindexRequest, CommitIndex, SnapshotClaims, DirHead, McpTask, ShardMeta), same package; its maps are BTreeMaps
+  so encodings are deterministic.
 - `floe-store`: `ObjectStore` trait (`Version` opaque CAS token, `GetOptions{if_none_match,if_match,range}`,
   `GetResult::{NotModified,Object}`, `PutMode::{Overwrite,Create,Update(Version)}`, `PutBody::{Bytes,Stream,File}`,
   `PutOptions`, `StoreError::{NotFound,PreconditionFailed{current},Retryable,InvalidArgument,Other}`,
   `ObjectStoreExt`, `Prefixed`, `memory::MemoryStore`, `util::{collect,once,file_stream,backoff,retry}`),
   placeholder modules `coord.rs`, `gcs.rs`, `s3.rs`.
 - `floe-config`: `Config` for floe.toml (+ `FLOE__` env overrides, `PORT`); `Config::with_settings` accepts
-  only `[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`, and `[integrations]` in repo-scoped settings.
+  only `[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`, and `[integrations]` in repo-scoped settings;
+  plus `[codeintel]` (only `CODEINTEL_REPO_KEYS`) and `[access]` (D54). `[codeintel]`/`[mcp]` are
+  `RuntimeConfig` sections (D60); `server.auth.mcp_handle_secret` is bootstrap. They parse in
+  every build; `Config::validate_build(BuildFeatures)` refuses keys the binary's features cannot run
+  (`floe_server::BUILD_FEATURES`, `floe_server::check_build`).
+  `TlsConfig { mode: TlsMode::{Off,Files,Acme}, cert, key, acme: AcmeConfig }` + `TlsConfig::validate` (D59).
+- `floe-tls` (D59): `Tls::load(&Config, DynStore) -> Option<Arc<Tls>>` (`server_config`, `ready()`, `status()`,
+  `spawn(Arc<dyn Narrator>)`), `CertResolver` (rustls `ResolvesServerCert`, hot swap), `FilesCert`,
+  `AcmeManager` (`refresh`, `tick`, `run`, `status`), `dns::DnsProvider` (`create_txt`, `delete_txt`),
+  `cloudflare::Cloudflare`, `seal::SealKey`, `CertStatus`, `Narrator`/`Narration` (the server's task bridge).
 
 ## floe-git (owner: GitEngine)
 
@@ -292,8 +304,41 @@ Normative rules live in `docs/BUNDLE_URI_DESIGN.md §3–§4`: six-field UTC cal
 slot, slot-epoch creation tokens, oldest-first backfill, contiguous-chain retention, and main-only selection
 where configured. Do not derive scheduling behavior from this interface catalog.
 
+## floe-mirror (owner: Mirror, D49)
+
+- `Source` (forge seam: `kind`, `discover(&Selection)`, `lookup(id)`; GitHub implemented in `github/`), `RemoteRepo`,
+  `Discovery`, `Lookup`, `ApiStats`, `SourceError`.
+- `Target` (floe seam: `exists`, `create`, `put_policy`, `publish_upstream`, `nudge_follow`), `WalTarget::new(registry,
+  store, Nudge)`; `Nudge = Box<dyn Fn(&RepoId) + Send + Sync>` (the server's is `floe_server::mirror::nudge`).
+- `Mirror { cfg, source, target, store }`, `reconcile_once(&Mirror, PassOptions, lost)`, `run_once_leased`,
+  `run_loop(Arc<Mirror>, on_pass)`; `PassReport` (`changes` feed `repo_inventory`). State: `state::load`.
+
+## floe-catalog (owner: Catalog, D50)
+
+- Always compiled (no arrow): `Recorder` (`record_sync_run`, `record_inventory`; non-blocking, lossy), `NoopRecorder`,
+  rows (`SyncRun`, `InventoryRecord`, `RefEventRow`, `ForcePushRow`, `rows_for_entry`, `parse_follow_archived`),
+  `CatalogWriter::{start, append_durable, is_up, max_append_rows, shutdown}`, `cursor::{catch_up, TailSource,
+  load_epoch}`.
+- Feature `iceberg`: `iceberg::IcebergCommitter` (the REST `Committer`). Enabled by `floe-server/catalog` ←
+  `floe-cli/catalog`. `sigv4` (D63; self-contained, meant to move to a shared Iceberg crate):
+  `CredentialSource::{from_env, fixed, from_provider, get}` (D43 credentials, refreshed before expiry),
+  `Signer::{new, sign}`, `sign_headers(&SigningInput, &mut HeaderMap, &Credentials)`, `settings_for(service)`,
+  `SigningProxy::{start, catalog_uri, client}` (the in-process signing hop `RestCatalog` talks to).
+  `floe_config::{CatalogConfig, CatalogAuth}` are re-exported.
+- `floe_config::refpattern::RefPatterns` (D48) lives in floe-config: parse/matches/refspecs, shared by floe-git,
+  floe-server and floe-mirror.
+
 ## floe-cli (owner: Cli)
 `floe --config floe.toml <cmd>`: `serve` | `compact [owner/name|--all] [--once]` | `bundle run [--repo] [--strategy]` |
 `repo create|list|info` | `wal ls|show|materialize --at-seq` | `synth --out DIR --size s|m|l [--commits N --files M]`
 | `import --from GITDIR owner/name` | `config check|dump`. Also `Containerfile`, `compose.yaml` (rustfs +
 floe), `justfile`, `floe.example.toml`, `tests/e2e.sh` (real git vs. server on memory store and on rustfs).
+
+## floe-codeintel (code intelligence core, D52)
+A pure library (no store, no tokio, no axum): bytes in, records out. `lang::{Lang, classify, Attributes,
+FileFlags}`; `extract::{Extractor, ExtractOptions}` (feature `extract`, grammars behind `lang-*`):
+`Extractor::extract(path, bytes, &Attributes) -> FileFacts { lang, flags, extractor, defs: Vec<Def>, refs:
+Vec<Ref>, chunks: Vec<Chunk> }`, never failing (unparseable ⇒ `parse_timeout`); `chunk::{chunk_syntax,
+chunk_windows, chunk_hash, header}`; `version::{extractor, extractors, CHUNKER}` (`ShardMeta.extractors`).
+Deterministic: the same (path, bytes, build) gives equal records. `floe-server` depends on it only under
+`--features codeintel`. Design: `docs/design/code-intelligence.md` §2.1, §5.6–§5.7.

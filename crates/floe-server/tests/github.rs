@@ -315,7 +315,7 @@ async fn reads_a_pushed_repository_in_github_shapes() -> TestResult {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn creates_and_deletes_refs() -> TestResult {
     let s = server().await?;
-    let (_src, head) = fixture(&s)?;
+    let (src, head) = fixture(&s)?;
 
     let created = client()
         .post(format!("{}/api/v3/repos/acme/docs/git/refs", s.base_url))
@@ -347,6 +347,22 @@ async fn creates_and_deletes_refs() -> TestResult {
         .await?;
     assert_eq!(bad_sha.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
 
+    // A tree sha (exists, not a commit) on a non-force update: not a fast forward (422), not a 500.
+    let tree = git_in(src.path(), &["rev-parse", "HEAD^{tree}"])?
+        .trim()
+        .to_string();
+    let not_ff = client()
+        .patch(format!(
+            "{}/api/v3/repos/acme/docs/git/refs/heads/topic",
+            s.base_url
+        ))
+        .json(&serde_json::json!({ "sha": tree }))
+        .send()
+        .await?;
+    assert_eq!(not_ff.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let err: Value = not_ff.json().await?;
+    assert_eq!(err["message"], "Update is not a fast forward", "{err}");
+
     let r = ok(&s, "/api/v3/repos/acme/docs/git/ref/heads/topic").await?;
     assert_eq!(r["object"]["sha"], head);
 
@@ -373,6 +389,102 @@ async fn creates_and_deletes_refs() -> TestResult {
         .send()
         .await?;
     assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// The facade's ref writes go through the repository's push policy like a
+/// push: the built-in `archive-immutable` rule, and a read-only mirror's
+/// `policy.json`, refuse them with a GitHub-shaped 403 and nothing moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ref_writes_obey_the_push_policy() -> TestResult {
+    let s = server().await?;
+    let (src, head) = fixture(&s)?;
+    let refs_url = format!("{}/api/v3/repos/acme/docs/git/refs", s.base_url);
+
+    // Built in, no policy file: refs/archive/* and refs/archive itself.
+    for name in ["refs/archive/1791072000/refs/heads/main", "refs/archive"] {
+        let r = client()
+            .post(&refs_url)
+            .json(&serde_json::json!({ "ref": name, "sha": head }))
+            .send()
+            .await?;
+        assert_eq!(r.status(), reqwest::StatusCode::FORBIDDEN, "{name}");
+        let err: Value = r.json().await?;
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("archive-immutable"),
+            "{err}"
+        );
+        assert_eq!(
+            get(
+                &s,
+                &format!(
+                    "/api/v3/repos/acme/docs/git/ref/{}",
+                    name.trim_start_matches("refs/")
+                )
+            )
+            .await?
+            .0,
+            reqwest::StatusCode::NOT_FOUND
+        );
+    }
+    // Ordinary refs are still allow-all.
+    let topic = client()
+        .post(&refs_url)
+        .json(&serde_json::json!({ "ref": "refs/heads/topic", "sha": head }))
+        .send()
+        .await?;
+    assert_eq!(topic.status(), reqwest::StatusCode::CREATED);
+
+    // A read-only mirror (the policy the GitHub mirror publishes): every write refused.
+    let put = reqwest::Client::new()
+        .put(format!("{}/acme/docs/policy", s.base_url))
+        .header("content-type", "application/json")
+        .body(floe_mirror::target::READ_ONLY_POLICY)
+        .send()
+        .await?;
+    assert!(put.status().is_success(), "{}", put.text().await?);
+    let create = client()
+        .post(&refs_url)
+        .json(&serde_json::json!({ "ref": "refs/heads/other", "sha": head }))
+        .send()
+        .await?;
+    assert_eq!(create.status(), reqwest::StatusCode::FORBIDDEN);
+    let err: Value = create.json().await?;
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("github-mirror-read-only"),
+        "{err}"
+    );
+    let delete = client()
+        .delete(format!("{refs_url}/heads/topic"))
+        .send()
+        .await?;
+    assert_eq!(delete.status(), reqwest::StatusCode::FORBIDDEN);
+    let parent = git_in(src.path(), &["rev-parse", "HEAD~1"])?
+        .trim()
+        .to_string();
+    let force = client()
+        .patch(format!("{refs_url}/heads/topic"))
+        .json(&serde_json::json!({ "sha": parent, "force": true }))
+        .send()
+        .await?;
+    assert_eq!(force.status(), reqwest::StatusCode::FORBIDDEN);
+    let r = ok(&s, "/api/v3/repos/acme/docs/git/ref/heads/topic").await?;
+    assert_eq!(
+        r["object"]["sha"], head,
+        "the refused delete and force left topic in place"
+    );
+    assert_eq!(
+        get(&s, "/api/v3/repos/acme/docs/git/ref/heads/other")
+            .await?
+            .0,
+        reqwest::StatusCode::NOT_FOUND
+    );
     Ok(())
 }
 

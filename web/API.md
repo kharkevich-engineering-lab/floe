@@ -59,9 +59,9 @@ lane segment (e.g. `/{owner}/{repo}/api2/…`) without infrastructure work.
 |---|---|
 | Asset base | Built assets are served under **`/_ui/`** (`vite.config.ts` `base: "/_ui/"`, content-hashed filenames, `public, max-age=31536000, immutable`, strong ETag, brotli/gzip precompressed; `index.html` is `no-cache` + ETag and carries the import map; see `web/README.md`). |
 | Page routes | Every UI route below MUST return `web/dist/index.html` (`text/html; charset=utf-8`, `Cache-Control: no-cache`) so deep links and reloads work: `/`, `/{owner}`, `/{owner}/{repo}`, `/{owner}/{repo}/tree/*`, `/{owner}/{repo}/blob/*`, `/{owner}/{repo}/commits`, `/{owner}/{repo}/commits/*`, `/{owner}/{repo}/commit/*`, `/{owner}/{repo}/wal`, `/{owner}/{repo}/settings`, and `/api` (the "API" docs page in the UI; `?repo=owner/name` pre-fills its examples; `/api/v1` itself is the JSON discovery document). |
-| API base | **`/{owner}/{repo}/api`** (bearer / same-origin cookie) and **`/{owner}/{repo}/api-browser`** (cross-origin browser), D15/D26/D27: one path prefix per repository, so the edge routes e.g. `acme/monorepo` to its host. Non-repo: `/api/v1` (discovery, `me`, `authenticate`, `owners`), `/services/api/owners*`, `/services/api/instance`. The bundled UI fetches same-origin with the session cookie and `Accept: application/json, text/event-stream`. No aliases or application sessions. |
-| Public lane | **`/services/public/*`** — the one open prefix besides health and the SDK (nginx skips `auth_request` there; the app never authenticates here and never reads repo data). Today exactly `/services/public/install.sh[?repo=owner/name]` (`text/x-shellscript`, `Cache-Control: public, max-age=300`); plus `/services/public/ca.pem` (the certificate this process presents when it terminates TLS itself, `application/x-pem-file`, D39; 404 behind an edge); anything else under it is 404. |
-| Setup | `/services/setup.json[?repo=owner/name]` — the clone/setup recipes (`setup::Recipes`: `token_url`, `install`, `install_url`, `plain_clone`, `blobless_clone`, `bundle_list`, `manual_clone`, `setup_text`, and `ca_url` + `trust` when the host terminates self-signed TLS itself — D39), `no-cache`; `/services/public/install.sh[?repo=]` — the one-time installer (open lane, AGENTS §1.3) (POSIX sh). The Clone menu and the API page render these, never their own copies. |
+| API base | **`/{owner}/{repo}/api`** (bearer / same-origin cookie) and **`/{owner}/{repo}/api-browser`** (cross-origin browser), D15/D26/D27: one path prefix per repository, so the edge routes e.g. `acme/monorepo` to its host. Non-repo: `/api/v1` (discovery, `me`, `tls`, `authenticate`, `owners`), `/services/api/owners*`, `/services/api/instance`. The bundled UI fetches same-origin with the session cookie and `Accept: application/json, text/event-stream`. No aliases or application sessions. |
+| Public lane | **`/services/public/*`** — the one open prefix besides health and the SDK (nginx skips `auth_request` there; the app never authenticates here and never reads repo data). Today exactly `/services/public/install.sh[?repo=owner/name]` (`text/x-shellscript`, `Cache-Control: public, max-age=300`); anything else under it is 404. |
+| Setup | `/services/setup.json[?repo=owner/name]` — the clone/setup recipes (`setup::Recipes`: `token_url`, `install`, `install_url`, `plain_clone`, `blobless_clone`, `bundle_list`, `manual_clone`, `setup_text`), `no-cache`; `/services/public/install.sh[?repo=]` — the one-time installer (open lane, AGENTS §1.3) (POSIX sh). The Clone menu and the API page render these, never their own copies. |
 | Auth | `/_auth/login?next=`, `/_auth/callback`, `/_auth/logout`, `/_auth/me`, `/_auth/check` (an `auth_request` target for an edge), `/_auth/tokens` (GET: the token page; POST: mint a floe access token for the signed-in principal, `{token, principal, write, expires_at}`, same-origin only) — in-app OIDC sign-in + session cookie. Off until `session_secret` + the OAuth client are set. |
 | SDK | `/repos.js` (IIFE, registers `window.repos`) and `/repos.mjs` (ESM), built from `web/sdk/repos.ts` into `web/dist/` by `pnpm run build`; `no-cache` + strong ETag, precompressed. These data-free routes are open at the application. |
 | Dev | `vite dev` proxies `/api/`, `/api-browser/`, `/services/api/` and `/{owner}/{repo}/api[-browser]/…` (plus git/bundle paths) to `$FLOE_URL` (default `http://127.0.0.1:8080`). |
@@ -243,10 +243,33 @@ Sorted, `[]` for an unknown/empty owner (200, not 404). Cache: SWR.
 ### `GET /api/v1/me`
 
 ```json
-{ "principal": "jane@example.com", "write": true, "anonymous": false }
+{ "principal": "jane@example.com", "write": true, "admin": false, "anonymous": false }
 ```
 
+`admin` = may use `/api/v1/admin/*`, delete repositories and change settings/policy (D24, D62).
+
 `401` without credentials. `Cache-Control: no-store`.
+
+### `GET /api/v1/tls`
+
+The TLS certificate this host presents when it terminates TLS itself (D59) — for the admin UI's overview.
+**Admin only** (`403` otherwise: `last_error` may name DNS zones or CA problems); also on the browser lane
+(`/api-browser/v1/tls`); `repos.tls()` in the SDK. Bootstrap config, not a bucket document: read-only here.
+
+```json
+{ "mode": "acme", "domains": ["git.example.com", "*.git.example.com"], "loaded": true,
+  "not_before": "2026-10-01T00:00:00Z", "not_after": "2026-12-30T00:00:00Z",
+  "issuer": "C=US, O=Let's Encrypt, CN=R11", "sans": ["*.git.example.com", "git.example.com"],
+  "fingerprint": "sha256:…", "source": "bucket:tls/acme/<set>/cert.json",
+  "directory": "https://acme-v02.api.letsencrypt.org/directory",
+  "last_renewal_at": "2026-10-01T00:01:12Z", "last_attempt_at": "2026-10-01T00:00:40Z",
+  "last_error": null, "failures": 0, "next_attempt_at": null, "renewal_due": false }
+```
+
+`mode` is `off` (then everything else is empty), `files` (`domains` = the certificate's SANs, `source` =
+`files:<cert path>`, `last_renewal_at` = last reload, `last_error` = a reload that failed) or `acme`.
+`Cache-Control: no-store`. `/readyz` and `/services/api/instance` carry only `{mode, loaded, not_after, issuer}`
+under `instance.tls`.
 
 ### `GET /{owner}/{repo}/api`
 
@@ -464,7 +487,8 @@ list by `commit_date` day and shows `subject` + `author`.
 
 Backs the "WAL" tab. Not needed by Code/Commits pages; a host without a
 WAL should return `404` (the tab then shows the error text). Shape is in
-`api.ts#Overview` / `overview.go`: `repo`, `clone_url`, `hostname`,
+`api.ts#Overview` / `overview.go`: `repo`, `description?` (the settings document's `repo.description`, absent
+when unset; the GitHub mirror writes `Mirror of <url>`), `clone_url`, `hostname`,
 `health{status: ok|degraded|error, issues[], deep, suggestions[{op, params?, reason, auto?}]}` — `deep` is the
 last connectivity audit as recorded in the store (`fsck.pb`, any maintainer), `auto` says how/when the
 maintainer loop performs a suggestion by itself (absent = a human must) — `manifest{version,
@@ -476,6 +500,35 @@ bootstrap, reconciled, size_bytes}`, `packs{live, live_bytes, pushes}`,
 kind, slot, status: built|missing|pending|blocked|unavailable|too-small|skipped|wrong-host, detail, bundle_id}],
 upcoming[], maintainers[{host, disk, max_pack_bytes, last_pass_age_secs, alive, passes, last_unit}], orphaned}`,
 `compactions[]`, `node{…counters}`. Arrays `[]` when empty.
+
+### Admin: the runtime config document, the mirror, the catalog (D60–D62)
+
+Every route — reads included — needs an **admin** principal (D24's rule: `tokens[].admin`, oidc
+`admin_emails`/`admin_domains`, `mode = none` on loopback): `401` without a credential, `403` otherwise.
+Also under the browser lane (`/api-browser/v1/admin/…`). Every answer is `Cache-Control: no-store`. Errors are
+JSON `{"error": "…", "errors": [{"path"?: "github_mirror.include", "message": "…"}]}`. Design:
+`docs/design/admin-ui.md`. SDK: `repos.admin.*`.
+
+| Route | Answer |
+|---|---|
+| `GET /api/v1/admin/config` | `{revision, updated_at, author, message, rolled_back_from, document, diff, history_mode, location, sealing_key, key_env, applied{revision, restart_required[], apply_error}}`; `revision: 0` + the default document before the first publish; `ETag: "<revision>"`. Secrets read as `{"redacted": true}` (sealed) or `{"env": "NAME"}`. |
+| `PUT /api/v1/admin/config` | body `{document, message?, base_revision?}` → `200 {revision, diff[], restart_required[]}`; **`400`** with `errors[]` and nothing published when the document is invalid (unknown key, bad value, a secret that cannot be sealed/kept/opened, the effective config failing `Config::validate`); **`409 {error, revision}`** when `base_revision` is not the current revision. |
+| `POST /api/v1/admin/config/validate` | body `{document}` → `{ok, errors[], diff[], restart_required[]}`; writes nothing. |
+| `GET /api/v1/admin/config/schema` | JSON Schema (2020-12) of the document; each key has `title`, `description`, `default`, `type`/`enum`/`oneOf` and `x-floe: {format: duration\|bytesize\|secret\|glob\|url\|env\|refpattern\|"", group, live}`. |
+| `GET /api/v1/admin/config/history?before=&n=` | `{entries: [{revision, updated_at, author, message, rolled_back_from?, diff[]}]}`, newest first, `n ≤ 50`. |
+| `GET /api/v1/admin/config/revisions/{n}` | one revision as `GET …/config` (redacted document); `404` unknown, `410` when the bucket's lifecycle expired its object version. |
+| `POST /api/v1/admin/config/rollback` | body `{revision, base_revision?, message?}` → as `PUT` (publishes the old document as a new revision). |
+| `GET /api/v1/admin/overview` | `{config, store, instance{…, applied_revision, restart_required[], apply_error, last_check, check_error}, instances[], mirror, catalog}`. |
+| `GET /api/v1/admin/mirror` | `{summary{enabled, lease, token_login, last_pass, counts}, repos[{id, full_name, floe, status, private, archived, fork, size_kb, pushed_at, last_seen, missing_since, last_error, paused}]}` (`mirror/github/state.json`). |
+| `POST /api/v1/admin/mirror/preview` | body `{section?, discover?}` → the known repositories under a candidate `github_mirror` section (`verdict: in\|too-large\|out`, `reason`); `discover: true` adds `plan` from a real dry-run pass against the forge (no lease, no writes); its section must pass the section's checks and its token follows `mirror/test`'s rule. |
+| `POST /api/v1/admin/mirror/test` | body `{api_url?, token?}` → `GET {api_url}/user` (no redirects): `{ok, status, latency_ms, error_class, login, scopes, rate_remaining}`. `token` is a typed `{value}`; absent/`redacted` = the stored token, sent **only** to the applied `api_url`; an `{env}` is a 400. `api_url` must be https (loopback http) without userinfo/query/fragment. |
+| `POST /api/v1/admin/mirror/sync` | writes `mirror/github/sync-request.json`; the mirror loop restarts at its pass boundary and runs a pass within its first tick. |
+| `POST /api/v1/admin/mirror/pause` / `resume` | body `{full_name: "owner/name"}` → a config publish adding/removing that exact entry in `github_mirror.exclude` (frozen: data kept, follow stopped); answers as `PUT`, `{unchanged: true}` when already so. |
+| `GET /api/v1/admin/catalog` | `{compiled, enabled, running, up, tail, uri, warehouse, namespace, auth, restart_required}`. |
+| `POST /api/v1/admin/catalog/test` | body `{section?}` → Iceberg REST `GET {uri}/v1/config?warehouse=` (no redirects): `{ok, auth, status, latency_ms, error_class, unauthenticated}`, never the body. The candidate section must validate; env names cannot differ from the applied ones; a new `uri` must be https (loopback http) and gets no stored bearer. |
+
+`GET /api/v1/tls` (admin; read-only certificate status, D59) is what the admin overview shows; TLS itself is
+bootstrap config and never editable here.
 
 ### Service routes (not for the browser)
 
@@ -514,6 +567,7 @@ redelivers). Never cached, never served to the SPA.
 ```
 GET /api/v1                                     → 200 {version:1, base, browser_base=/api/v1, sdk, auth, endpoints}
 GET /api/v1/me                                  → 200 {principal,write,anonymous} | 401; no-store
+GET /api/v1/tls                                 → 200 {mode,domains,not_after,issuer,last_error,…} (admin) | 401 | 403; no-store
 GET /api/v1/owners                              → 200 [..]   ([] when empty)
 GET /api/v1/owners/nobody/repos                 → 200 []
 GET /o/r/api                                    → 200 {owner,name,full_name,head,branches,tags,clone_url,html_url,api_url}; SWR + ETag "<head sha>"

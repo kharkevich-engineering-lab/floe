@@ -19,6 +19,14 @@ const CommitPage = lazy(() => track(import("./pages/CommitPage")).then((m) => ({
 const OverviewPage = lazy(() => track(import("./pages/OverviewPage")).then((m) => ({ default: m.OverviewPage })));
 const SettingsPage = lazy(() => track(import("./pages/SettingsPage")).then((m) => ({ default: m.SettingsPage })));
 const ApiPage = lazy(() => track(import("./pages/ApiPage")).then((m) => ({ default: m.ApiPage })));
+// The admin area (D62): its own chunks, downloaded only by admins who open it.
+const AdminLayout = lazy(() => track(import("./admin/AdminLayout")).then((m) => ({ default: m.AdminLayout })));
+const AdminOverview = lazy(() => track(import("./admin/OverviewPage")).then((m) => ({ default: m.OverviewPage })));
+const AdminMirror = lazy(() => track(import("./admin/MirrorPage")).then((m) => ({ default: m.MirrorPage })));
+const AdminCatalog = lazy(() => track(import("./admin/CatalogPage")).then((m) => ({ default: m.CatalogPage })));
+const AdminEvents = lazy(() => track(import("./admin/EventsPage")).then((m) => ({ default: m.EventsPage })));
+const AdminRepos = lazy(() => track(import("./admin/ReposPage")).then((m) => ({ default: m.ReposPage })));
+const AdminHistory = lazy(() => track(import("./admin/HistoryPage")).then((m) => ({ default: m.HistoryPage })));
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -27,6 +35,14 @@ createRoot(document.getElementById("root")!).render(
         <Route element={<Layout />}>
           <Route index element={<Owners />} />
           <Route path="api" element={<ApiPage />} />
+          <Route path="_admin" element={<AdminLayout />}>
+            <Route index element={<AdminOverview />} />
+            <Route path="mirror" element={<AdminMirror />} />
+            <Route path="catalog" element={<AdminCatalog />} />
+            <Route path="events" element={<AdminEvents />} />
+            <Route path="repos" element={<AdminRepos />} />
+            <Route path="history" element={<AdminHistory />} />
+          </Route>
           <Route path=":owner" element={<Repos />} />
           <Route path=":owner/:repo" element={<RepoLayout />}>
             <Route index element={<TreePage />} />

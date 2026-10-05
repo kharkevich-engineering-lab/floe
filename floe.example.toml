@@ -30,12 +30,39 @@ accel_redirect = false            # behind an nginx edge that announces `X-Floe-
 # cross-origin lane (no CORS headers).
 # cors_origins = ["https://docs.example.com"]
 
-[server.tls]                      # floe can terminate TLS itself; behind a proxy leave it "off"
-mode = "off"                      # "off" (HTTP/1.1 + h2c) | "self_signed" (generated once under <cache.dir>/tls/, served at
-                                  # /services/public/ca.pem, pinned for git by install.sh) | "files" (cert + key below)
-# cert = "/etc/floe/cert.pem"   # files mode: PEM chain
-# key = "/etc/floe/key.pem"     # files mode: PKCS#8/PKCS#1 key
-# hostnames = ["git.example.com"] # self_signed SANs; empty = localhost, *.localhost, 127.0.0.1, ::1 + public_url's host
+[server.tls]                      # floe can terminate TLS itself (D59); behind an edge that does, leave it "off".
+                                  # TLS is bootstrap config (this file + FLOE__ env), never stored in the bucket.
+mode = "off"                      # "off"   — plain HTTP/1.1 + h2c (local development, or behind a TLS-terminating edge)
+                                  # "files" — cert + key below; reloaded when either file changes or on SIGHUP
+                                  # "acme"  — Let's Encrypt (any RFC 8555 CA) via DNS-01 only, [server.tls.acme] below
+# cert = "/etc/floe/cert.pem"     # files mode: PEM chain, leaf first
+# key = "/etc/floe/key.pem"       # files mode: PKCS#8 / PKCS#1 / SEC1 key
+
+[server.tls.acme]                 # read only in mode = "acme"; any key set here in another mode is refused
+                                  # State lives in the bucket under tls/ (account key, chain, private key — keys sealed
+                                  # with AES-256-GCM); one instance orders/renews at a time under leases/tls-acme-*.pb,
+                                  # every instance hot-swaps the new certificate (conditional GET every poll_interval).
+                                  # /readyz is 503 until a certificate is loaded; the first order is a `tls-acme` task.
+# domains = ["git.example.com", "*.git.example.com"]   # SANs; wildcards are fine (DNS-01). Required.
+# email = "ops@example.com"       # ACME account contact (expiry notices). Required.
+directory = "https://acme-v02.api.letsencrypt.org/directory"   # default: Let's Encrypt production; "staging" =
+                                  # Let's Encrypt staging (try it first); any other https:// RFC 8555 directory works
+renew_before = "30d"              # renew when the certificate expires within this window (1d..60d), but never before
+                                  # two thirds of its lifetime; and never within 12h of the last successful order
+storage_key_env = "FLOE_TLS_STORAGE_KEY"   # env var with the 32-byte key (base64 or hex) sealing private keys in the
+                                  # bucket — `openssl rand -base64 32`; the same on every instance; startup fails without it
+challenge = "dns-01"              # the only accepted value: HTTP-01 / TLS-ALPN-01 are refused (every instance behind
+                                  # the name would have to answer; DNS-01 needs one writer and covers wildcards)
+dns_provider = "cloudflare"       # the only provider today (Route 53 / RFC 2136 slot in behind floe_tls::dns::DnsProvider)
+propagation_timeout = "5m"        # how long to wait for _acme-challenge TXT to be visible before giving up (backs off)
+resolvers = []                    # "ip:port" to check propagation against; empty = the zone's authoritative nameservers
+poll_interval = "10m"             # how often each instance revalidates tls/…/cert.json and checks whether renewal is due
+
+[server.tls.acme.cloudflare]
+api_token_env = "CLOUDFLARE_API_TOKEN"   # env var with an API token scoped to Zone:DNS:Edit (+ Zone:Read without zone_id).
+                                  # Required in acme mode; never logged.
+# zone_id = "0123456789abcdef"    # optional: skip the zone lookup (then Zone:DNS:Edit alone is enough)
+api_url = "https://api.cloudflare.com/client/v4"   # https only (plain http just to 127.0.0.1/::1/localhost, for a mock)
 
 [server.auth]
 mode = "none"                     # "none" | "token" | "oidc"
@@ -58,6 +85,9 @@ anonymous_read = true             # must be false in oidc mode
 # oauth_client_secret = ""                 #       (set both or neither; use FLOE__SERVER__AUTH__OAUTH_CLIENT_SECRET)
 # session_secret = ""                      # oidc: HMAC key (>= 32 bytes) for the session cookie and issued tokens; shared by
 #                                          #       every host; rotating it signs everyone out and revokes every issued token
+# mcp_handle_secret = ""                   # MCP snapshot handles and cursors (D57): HMAC key (>= 32 bytes, the same on every
+#                                          #       host); prefer FLOE__SERVER__AUTH__MCP_HANDLE_SECRET. Unset = derived from
+#                                          #       session_secret; mcp.enabled (config document) needs one of the two
 # session_ttl = "30d"                      # sliding: re-issued on use once older than ttl/4
 # access_token_ttl = "90d"                 # lifetime of tokens minted at /_auth/tokens
 # audiences = []                           # oidc: `aud` values accepted on bearer ID tokens clients mint themselves;
@@ -89,7 +119,7 @@ bulk_clients = 4                  # separate data channels for pack/idx/side-fil
 bulk_concurrency = 32             # max concurrent bulk requests per process (control plane never queues behind them)
 
 [cache]
-dir = "/tmp/floe"               # local materialized repos (+ tls/ for a self-signed certificate)
+dir = "/tmp/floe"               # local materialized repos (disposable; TLS state lives in the bucket)
 mode = "auto"                     # "budget" (max_bytes caps disk; too-large repos are served remotely) | "disk" (no budget,
                                   # full materialization, watermark eviction — a host with a real SSD) | "auto" = disk when
                                   # maintenance.disk = "ssd"
@@ -257,8 +287,17 @@ max_object_bytes = "16GiB"
 # git = "https://github.com/acme/monorepo.git"           # source for the maintainer's `repair` unit (objects fsck found missing; wants by SHA)
 # lfs = "https://github.com/acme/monorepo.git/info/lfs"  # read-through for LFS objects we lack (batch upload → "present", download/GET → stream + persist)
 # token_env = "FLOE_UPSTREAM_TOKEN"                     # env var on the maintaining host holding the token; Basic x-access-token:<token>
-# follow = ["refs/heads/main"]                            # refs kept equal to upstream's by the maintaining host: fetched every
-                                                          # maintenance.follow_interval, published through the WAL as a push; fast-forward only
+# follow = ["refs/heads/*", "refs/tags/*"]  # ref patterns kept equal to upstream's by the maintaining host (D48: git refspec
+#                                           # globs: one `*`, crosses `/`; `^` excludes); probed every
+#                                           # maintenance.follow_interval, published through the WAL as a push;
+#                                           # refs/archive/* and refs/follow/* are never followed
+# on_rewrite = "archive"                    # upstream force-push/tag move/delete: keep the old tip at
+#                                           # refs/archive/<unix-ts>/<ref> then apply | "refuse" (leave as is, log)
+# head = "refs/heads/main"                  # retarget HEAD to this when it exists (the GitHub mirror sets it)
+# follow_interval = "10m"                   # per-repo minimum pause between follow rounds (unset = every tick)
+# source = "github:123"                     # provenance label written by the mirror; informational
+# [upstream.token_env_by_host]              # host-only: env var per upstream host (beats token_env)
+# "github.com" = "FLOE_GITHUB_TOKEN"
 
 [git]
 binary = "git"                    # path to upstream git binary (>= 2.47 recommended: pack.writeReverseIndex, bundle-uri)
@@ -280,19 +319,12 @@ metrics = true                    # Prometheus on /metrics
 lock_wait_warn = "1s"             # WARN "lock wait" (lock, repo, wait_ms, request_id) when a request waits longer than this on
                                   # rw/sync_mutex/pack_mutex/bulk permits; histogram floe_lock_wait_seconds{lock}
 
-[events]                          # docs/EVENTS.md — read only by the bridge (roles ∋ "events"); never gates a push
-# webhook_url = "https://hooks.example.com/floe"   # each batch of ref events is POSTed as a JSON array
-# webhook_secret = ""             # X-Floe-Signature: sha256=<HMAC-SHA256 of the body>; unset = unsigned
-# sweep_interval = "5m"           # backstop + health check (warns when a sweep finds unpublished entries); 0 = off
-
 [github]                          # docs/GITHUB.md — a fake GitHub Enterprise Server over the same repositories:
                                   # /api/v3/*, /api/graphql and /login/oauth/* so an octokit with
                                   # baseUrl = http://<host>/api/v3 reads and writes the bucket. Local development
                                   # only: auth-free by construction (any bearer, one hardcoded user, admin
                                   # everywhere), so `validate` requires server.auth.mode = "none" and lets that
-                                  # mode bind beyond loopback (the network is the trust boundary). Node will not
-                                  # trust the self-signed cert, so pair it
-                                  # with [server.tls] mode = "off".
+                                  # mode bind beyond loopback (the network is the trust boundary).
 enabled = false
 # Integrations (app ID, callback, shared secret, installations and repo selection)
 # are registered at /api/v3/_dev/integrations/{name} and stored in the bucket.
@@ -300,3 +332,157 @@ enabled = false
 # webhook_poll_interval = "1s"    # a dev bucket has no notifications, so the bridge polls this often; a push to
                                   # this instance wakes it directly, so this only covers other writers. 0 = only
                                   # [events].sweep_interval
+
+[config_store]                    # D60, docs/design/admin-ui.md — where the runtime config document lives
+# bucket = "floe-config"          # a dedicated bucket (same backend and credentials as [store]); unset = the main bucket
+prefix = "config/"                # key prefix in that bucket: current.json, history/, instances/
+ttl = "15s"                       # every instance revalidates with one conditional GET this often; 0 = only at startup
+history = "auto"                  # auto | records | versions: history bodies in floe's records or the bucket's object versions
+key_env = "FLOE_CONFIG_KEY"       # env var with 32 random bytes, base64 (openssl rand -base64 32): seals secrets (D61)
+allowed_env = ["FLOE_SECRET_*", "FLOE_GITHUB_TOKEN", "FLOE_WEBHOOK_SECRET", "FLOE_CATALOG_TOKEN", "FLOE_CATALOG_CREDENTIAL"]
+                                  # env vars the config document may name ({ env = … } and *_env keys): exact or prefix*;
+                                  # key_env, FLOE__*, AWS_* and the store/auth variables only when listed exactly
+
+[access]                          # D54 — who may read a repository (host default; per repository via settings).
+                                  # Entries: authenticated, public, group:<name>, domain:<domain>, email:<address>,
+                                  # or a principal. Until policy::authorize_read ships (M5) only the default is
+                                  # accepted, so no rule is silently ignored.
+read = ["authenticated"]
+
+# ---------------------------------------------------------------------------------------------------------------
+# Runtime configuration (D60): NOT in this file. [github_mirror], [catalog], [events], [codeintel] and [mcp] are
+# one versioned document in the config store, edited in the admin GUI (https://<host>/_admin) or with
+#   floe config show | set FILE | validate FILE | history | rollback N | import OLD_FLOE_TOML
+# The file refuses these sections and FLOE__GITHUB_MIRROR__* / __CATALOG__* / __EVENTS__* / __CODEINTEL__* / __MCP__*
+# are ignored.
+# Below: the document's keys and defaults, in the TOML form `floe config set` takes (schema:
+# GET /api/v1/admin/config/schema). Changes to [github_mirror] apply live; [catalog], [events], [codeintel], [mcp]
+# and github_mirror.git_url need a restart (the overview says which instances).
+# ---------------------------------------------------------------------------------------------------------------
+# [events]                          # docs/EVENTS.md — read only by the bridge (roles ∋ "events"); never gates a push
+## webhook_url = "https://hooks.example.com/floe"   # each batch of ref events is POSTed as a JSON array
+## webhook_secret = { env = "FLOE_WEBHOOK_SECRET" }   # X-Floe-Signature: sha256=<HMAC>; a { value = "…" } is sealed (D61); unset = unsigned
+## sweep_interval = "5m"           # backstop + health check (warns when a sweep finds unpublished entries); 0 = off
+#
+#
+# [github_mirror]                   # D49, docs/design/github-mirror.md §B — discover GitHub repositories, create
+#                                   # the same <owner>/<name> (lowercased, no prefix) with an [upstream] table and
+#                                   # repo.description = "Mirror of <url>"; follow (D48) moves the bytes. A name an
+#                                   # own repository already holds is skipped as `conflict`, never adopted.
+#                                   # Runs on maintain hosts; one reconciler fleet-wide (leases/mirror-github.pb).
+# enabled = false
+# api_url = "https://api.github.com"   # GHES: https://ghe.example.com/api/v3
+# git_url = "https://github.com"       # base of clone/LFS URLs; also maps upstream.token_env_by_host[host] = token_env
+# token = { env = "FLOE_GITHUB_TOKEN" }   # PAT (classic `repo`, or fine-grained Contents:read + Metadata:read): an env
+#                                   # reference, or { value = "ghp_…" } sealed with FLOE_CONFIG_KEY (D61); write-only
+# interval = "5m"                   # reconcile cadence; 0 = one pass at startup (and `floe github sync --once`)
+# users = []                        # "@me" = the token's user (private included)
+# orgs = []
+# starred = []                      # users whose stars are mirrored ("@me" allowed)
+# repos = []                        # explicit "owner/name": bypass include and the archived/fork skips
+# include = ["*/*"]                 # globs over owner/name; `*` stops at `/`
+# exclude = []                      # wins over everything, explicit repos included
+# skip_archived = true              # do not start mirroring archived repositories
+# skip_forks = true
+# include_private = true
+# private_visible_to_all_readers = false   # must be true when include_private (no per-repo read ACL; any auth mode)
+# lfs = true                        # write upstream.lfs (read-through, not prefetched)
+# follow = ["refs/heads/*", "refs/tags/*"]
+# on_rewrite = "archive"
+# follow_interval = "10m"           # backstop; a push seen at GitHub nudges follow on the maintaining host
+# read_only = true                  # deny-all policy.json at creation: only follow moves refs
+# max_repo_size = "2GiB"            # larger = too-large: `floe import` it, then set [upstream] source = "github:<id>"
+# max_new_per_pass = 20
+# min_rate_remaining = 200          # stop a pass (incomplete) below this x-ratelimit-remaining
+# gone_after = "24h"                # missing (404/403) this long before gone/forbidden (frozen, never deleted)
+# lease_ttl = "2m"
+#
+# [catalog]                         # docs/design/github-mirror.md §C — Iceberg audit tables (ref_events, force_push_log,
+#                                   # sync_runs, repo_inventory). Derived, never a source of truth; an outage only adds
+#                                   # catalog lag. enabled = true needs a binary built with --features catalog.
+# enabled = false
+## uri = "http://localhost:9000/iceberg"        # Iceberg REST endpoint (RustFS S3 Tables; AWS S3 Tables:
+##                                              # https://s3tables.<region>.amazonaws.com/iceberg)
+## warehouse = "floe-catalog"                   # RustFS: the table bucket's name; AWS: the table bucket ARN
+# namespace = "floe"
+# auth = "none"                                  # D63: "none" | "bearer" (token_env or credential_env) |
+##                                              # "sigv4" (every catalog request signed with the s3_* credentials;
+##                                              # RustFS and AWS S3 Tables need it)
+# sigv4_service = "s3"                           # signing name: "s3" for RustFS /iceberg, "s3tables" for AWS
+## sigv4_region = "us-east-1"                   # unset = s3_region
+## token_env = "FLOE_CATALOG_TOKEN"             # auth = "bearer": env var with a bearer token
+## credential_env = "FLOE_CATALOG_CREDENTIAL"   # auth = "bearer": env var with "client_id:client_secret" (OAuth2)
+## s3_endpoint = "http://localhost:9000"        # data files (parquet, metadata); unset = AWS S3
+# s3_region = "us-east-1"
+# s3_access_key_env = "AWS_ACCESS_KEY_ID"        # D43: both set = static keys (+ AWS_SESSION_TOKEN); neither = the
+# s3_secret_key_env = "AWS_SECRET_ACCESS_KEY"    # AWS credential chain (refreshed); one alone is an error
+# s3_path_style = true
+# flush_interval = "30s"            # max age of buffered rows before a commit
+# flush_rows = 5000                 # commit a table at this many buffered rows
+# max_buffer_rows = 100000          # beyond it durable appends fail fast (lag stays in the WAL), telemetry drops
+# commit_timeout = "60s"
+# backfill = false                  # a repository older than the catalog: false = start at head, true = full history
+# create_tables = true
+#
+# [codeintel]                       # docs/design/code-intelligence.md (D52–D58) — agent code navigation and search.
+#                                   # Needs a binary built with --features codeintel (a fatal config error otherwise);
+#                                   # every change needs a restart. The MCP HMAC key is a bootstrap key:
+#                                   # [server.auth] mcp_handle_secret.
+#                                   # Per repository (settings, D24) only enabled, refs, semantic, embed_remote,
+#                                   # max_file_bytes and exclude may be set; the rest is host-only.
+# enabled = false                   # this host does code intelligence (indexes what it maintains, serves what it serves)
+# default_enabled = true            # a repository is indexed unless its settings say [codeintel] enabled = false
+# refs = ["HEAD"]                   # ref patterns whose tips are indexed; refs/archive/* and refs/follow/* never are
+# max_refs = 8                      # tracked refs per repository
+# semantic = true                   # embed chunks (needs [codeintel.embed] provider != "none")
+# embed_remote = false              # allow a remote (http) embedder for this repository's chunks (privacy gate, §6.5)
+# max_file_bytes = "1MiB"           # larger files are not indexed (read/grep through git only)
+# exclude = ["**/vendor/**", "**/node_modules/**", "**/*.min.js", "**/*_pb2.py", "**/*.pb.go"]
+#                                   # plus .gitattributes linguist-vendored / linguist-generated
+# part_max_bytes = "512MiB"         # monorepo base shards are cut into path-range parts of at most this much content
+# delta_max_files = 5000            # a delta above this many files (or delta_max_ratio of the base) becomes a new base
+# delta_max_ratio = 0.10
+# cache_bytes = "4GiB"              # local shard cache, counted inside cache.max_bytes
+# sync_fetch_max_bytes = "64MiB"    # larger cold artifacts answer `warming` and hydrate in the background
+# query_threads = 0                 # 0 = num_cpus/2, min 2
+# head_ttl = "1s"                   # a cached head.pb older than this is revalidated before use
+# retention = "7d"                  # >= mcp.snapshot_ttl + 1h (validated); GC keeps retired generations this long
+# recent_max = 64                   # retired generations reachable by rev = <full sha>
+# catalog_retry_max = "5m"          # backoff cap of the catalog phase while the catalog is down
+# reindex_queue_timeout = "1h"      # a queued reindex never admitted by a maintainer pass is failed
+# require_catalog = true            # false = standalone: shards from git only, embeddings not durable (warns).
+#                                   # This build has no Iceberg catalog yet, so codeintel.enabled needs false here.
+# index_private_mirrors = false     # keep private mirrors out until per-repo [access] rules exist for them (D54)
+# known_blobs_max_bytes = "256MiB"  # maintainer's known-blobs set; past this it is loaded per bucket
+# prewarm = []                      # repo patterns whose artifacts are fetched at startup
+# adhoc_max_files = 200             # ad-hoc overlay for an unindexed commit covers at most this many changed files
+#
+# [codeintel.embed]
+# provider = "none"                 # none | local (--features embed-local) | http (--features embed-http)
+# model = "jina-v2-base-code"
+# model_object = ""                 # codeintel/models/<sha256>/ (required for local; nothing is downloaded at runtime)
+# http_url = ""                     # OpenAI-compatible /v1/embeddings (required for http)
+# http_model = ""
+# api_key_env = ""                  # NAME of the env var holding the API key (D43 style), never the key
+# batch = 32
+# max_rps = 20
+#
+# [codeintel.catalog]               # where the code.* Iceberg tables live (connection shared with the catalog)
+# table_bucket = "floe-code"
+# namespace = "code"
+# flush_interval = "30s"
+# flush_rows = 50000
+#
+# [mcp]                             # D55 — stateless MCP 2026-07-28 at /api/v1/mcp and /{owner}/{repo}/mcp (fixed).
+#                                   # Needs --features mcp and codeintel.enabled.
+# enabled = false
+# allowed_origins = []              # default [server.public_url]; never empty in oidc/token mode (validated)
+# allowed_hosts = []                # default: the host of server.public_url
+# audiences = []                    # default ["<public_url>/api/v1/mcp"]
+# scopes = ["floe.code.read", "floe.code.admin"]
+# snapshot_ttl = "24h"              # lifetime of a snapshot handle (D57)
+# min_handle_ttl = "10m"            # pin refuses a retired generation with less lifetime left
+# semantic_deadline_ms = 40
+# max_concurrent_per_principal = 8
+# query_log = "sampled"             # off | sampled | all
+# query_log_text = false

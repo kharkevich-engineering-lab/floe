@@ -25,9 +25,9 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use anyhow::Context;
 use chrono::Utc;
-use futures::StreamExt;
 use floe_git::RepoId;
 use floe_store::{ObjectStoreExt, PutMode, StoreError};
+use futures::StreamExt;
 
 use crate::events::{self, RefEvent, Sink};
 
@@ -64,6 +64,25 @@ pub struct Bridge {
     serial: dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
 
+/// The webhook's signing secret: `None` = unsigned (no secret configured);
+/// an error when one is configured but resolves to nothing on this instance.
+pub(crate) fn webhook_secret(events: &floe_config::EventsConfig) -> anyhow::Result<Option<String>> {
+    match &events.webhook_secret {
+        None => Ok(None),
+        Some(s) => match s.reveal() {
+            Some(v) => Ok(Some(v)),
+            None => match s {
+                floe_config::Secret::Env(name) => anyhow::bail!(
+                    "events.webhook_secret names {name}, which is unset or empty on this instance; refusing to send unsigned webhooks"
+                ),
+                _ => anyhow::bail!(
+                    "events.webhook_secret is set but cannot be opened on this instance; refusing to send unsigned webhooks"
+                ),
+            },
+        },
+    }
+}
+
 impl Bridge {
     /// `None` unless this instance has the `events` role and a sink is
     /// configured (`events.webhook_url`).
@@ -76,10 +95,13 @@ impl Bridge {
         }
         let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
         if let Some(url) = &cfg.events.webhook_url {
-            sinks.push(Box::new(events::WebhookSink::new(
-                url.clone(),
-                cfg.events.webhook_secret.clone().filter(|s| !s.is_empty()),
-            )));
+            match webhook_secret(&cfg.events) {
+                Ok(secret) => sinks.push(Box::new(events::WebhookSink::new(url.clone(), secret))),
+                // Fail closed: a configured secret that resolves to nothing must
+                // not turn into unsigned deliveries. The cursor stays where it is,
+                // so the events are delivered (signed) once the secret resolves.
+                Err(e) => tracing::error!(error = %e, "events webhook NOT delivering"),
+            }
         }
         // The GitHub facade's own sink (`docs/GITHUB.md` §Webhooks): the same
         // WAL entries, rendered as GitHub `push` / `create` / `delete`
@@ -351,15 +373,7 @@ impl Bridge {
 
     /// `prefix/repos/<o>/<r>/manifest.pb` → `o/r`.
     fn manifest_repo(&self, object: &str) -> Option<RepoId> {
-        let rel = object
-            .strip_prefix(self.store_prefix.as_str())?
-            .strip_prefix("repos/")?
-            .strip_suffix("/manifest.pb")?;
-        let (owner, name) = rel.split_once('/')?;
-        if name.contains('/') {
-            return None;
-        }
-        RepoId::new(owner, name).ok()
+        manifest_repo(&self.store_prefix, object)
     }
 
     async fn publish(&self, batch: &[RefEvent]) -> anyhow::Result<()> {
@@ -383,6 +397,19 @@ impl Bridge {
         }
         Ok(())
     }
+}
+
+/// `prefix/repos/<o>/<r>/manifest.pb` → `o/r`; anything else `None`.
+fn manifest_repo(store_prefix: &str, object: &str) -> Option<RepoId> {
+    let rel = object
+        .strip_prefix(store_prefix)?
+        .strip_prefix("repos/")?
+        .strip_suffix("/manifest.pb")?;
+    let (owner, name) = rel.split_once('/')?;
+    if name.contains('/') {
+        return None;
+    }
+    RepoId::new(owner, name).ok()
 }
 
 /// The object keys (or repository ids) a notification body names. Store-agnostic.
@@ -439,6 +466,8 @@ fn notified_keys(v: &serde_json::Value) -> Vec<String> {
 
 /// `POST /_events/notify`: a bucket notification naming a finalized `manifest.pb`.
 /// `200` (ack) when handled or ignored, `503` (redeliver) when a sink failed.
+/// The catalog tail (D50) is only woken (`try_send`), never awaited: its
+/// outage can neither slow this answer nor turn it into a 503.
 pub async fn http_notify(
     st: &crate::AppState,
     headers: &axum::http::HeaderMap,
@@ -447,16 +476,28 @@ pub async fn http_notify(
     use crate::error::ApiError;
     use axum::response::IntoResponse;
     let _ = st.auth.require_read(headers).await.map_err(auth_err)?;
-    let Some(bridge) = &st.bridge else {
+    if st.bridge.is_none() && st.catalog_tail.is_none() {
         return Err(ApiError::NotFound(
             "events bridge is not enabled here".into(),
         ));
-    };
+    }
     let bytes = crate::collect_body(body).await?;
     let v: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| ApiError::BadRequest(format!("notify body: {e}")))?;
+    let keys = notified_keys(&v);
+    if let Some(tail) = &st.catalog_tail {
+        let prefix = st.cfg.store_prefix();
+        for key in &keys {
+            if let Some(id) = manifest_repo(&prefix, key) {
+                tail.wake(&id);
+            }
+        }
+    }
+    let Some(bridge) = &st.bridge else {
+        return Ok(axum::Json(Vec::<CatchUp>::new()).into_response());
+    };
     let mut reports = Vec::new();
-    for key in notified_keys(&v) {
+    for key in keys {
         match bridge.object_finalized(&key).await {
             Ok(Some(report)) => reports.push(report),
             Ok(None) => {}
@@ -519,6 +560,34 @@ pub fn spawn_sweeper(state: Arc<crate::AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A configured secret that resolves to nothing never becomes an unsigned
+    /// webhook: the sink is not built (the cursor waits), and the bridge says why.
+    #[test]
+    fn an_unresolvable_webhook_secret_refuses_to_deliver() {
+        let mut cfg = floe_config::Config::default();
+        cfg.events.webhook_url = Some("https://hooks.example/x".into());
+        assert_eq!(
+            webhook_secret(&cfg.events).unwrap(),
+            None,
+            "no secret = unsigned, as configured"
+        );
+        cfg.events.webhook_secret = Some(floe_config::Secret::Value("s".into()));
+        assert_eq!(webhook_secret(&cfg.events).unwrap().as_deref(), Some("s"));
+        cfg.events.webhook_secret = Some(floe_config::Secret::Env(
+            "FLOE_SECRET_TEST_BRIDGE_UNSET".into(),
+        ));
+        let err = webhook_secret(&cfg.events).unwrap_err().to_string();
+        assert!(err.contains("FLOE_SECRET_TEST_BRIDGE_UNSET"), "{err}");
+        let registry = floe_wal::Registry::new(
+            Arc::new(floe_store::memory::MemoryStore::new()),
+            Arc::new(cfg.clone()),
+        );
+        assert!(
+            Bridge::new(&cfg, registry).is_none(),
+            "no sink, no unsigned deliveries"
+        );
+    }
 
     #[test]
     fn manifest_object_names() {

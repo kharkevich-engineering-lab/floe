@@ -4,10 +4,12 @@
 //!
 //! A **scratch bare repository per followed repository** (`<dir>/<owner>/<name>.git`,
 //! kept between rounds) whose `objects/info/alternates` is the serving copy's object
-//! directory. Before each round its `refs/follow/<ref>` are set to the values the WAL
-//! has, so `git fetch` negotiates from exactly our tips (one `ls-refs` round trip when
-//! nothing moved), `index-pack --fix-thin` completes the thin pack from our own objects,
-//! and the pack on disk is self-contained. Nothing is written into the serving copy
+//! directory. Before each fetch its `refs/follow/*` are set to exactly the values the
+//! WAL has for the refs matching the follow patterns (D48, `floe_config::refpattern`),
+//! so `git fetch --prune` negotiates from exactly our tips and leaves exactly
+//! upstream's matching set behind; `index-pack --fix-thin` completes the thin pack from
+//! our own objects, and the pack on disk is self-contained. [`probe`] (one `ls-remote`)
+//! tells the caller whether a fetch is needed at all. Nothing is written into the serving copy
 //! here: the caller streams the pack through `ingest_pack` like any push and then
 //! calls [`FetchedDelta::discard_pack`]. Token (optional) goes through a one-shot
 //! credential helper that reads it from the environment — never argv.
@@ -16,6 +18,8 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+
+use floe_config::refpattern::{RefPatterns, scratch_ref};
 
 use crate::GitError;
 
@@ -41,8 +45,66 @@ impl FetchedDelta {
     }
 }
 
-/// Fetch `refs` from `upstream` into the scratch for `(owner, name)` under `dir`,
-/// negotiating from `have` (`ref → oid` we hold; missing = fetch its history).
+/// What upstream advertises right now, filtered by the follow patterns
+/// ([`probe`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Probe {
+    /// `ref → oid` of every advertised ref that `patterns.matches`.
+    pub tips: HashMap<String, String>,
+    /// Whether upstream advertised **any** ref at all, before filtering (the
+    /// empty-advertisement guard: an upstream that suddenly has nothing is an
+    /// outage or a wiped repository, not a mass delete).
+    pub advertised_any: bool,
+}
+
+/// The longest a [`probe`] may take (one `ls-refs`; normally well under a second).
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
+
+/// One `git ls-remote <upstream>` (the same single `ls-refs` round trip a fetch's
+/// advertisement costs; no objects, no scratch), filtered by `patterns` in floe:
+/// `ls-remote`'s own patterns are tail matches, not refspecs.
+pub async fn probe(
+    upstream: &str,
+    token: Option<&str>,
+    patterns: &RefPatterns,
+) -> Result<Probe, GitError> {
+    // Bounded: the follow loop probes repositories one after another, and an
+    // upstream that accepts the connection but never answers must not stall it.
+    let mut cmd = git_cmd(None, upstream, token);
+    cmd.args(["-c", "protocol.version=2", "ls-remote", upstream])
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| {
+            GitError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("git ls-remote <upstream> gave no answer in {PROBE_TIMEOUT:?}"),
+            ))
+        })?
+        .map_err(GitError::Io)?;
+    let out = ok(out, "git ls-remote <upstream>")?;
+    let mut probe = Probe::default();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some((oid, name)) = line.split_once('\t') else {
+            continue;
+        };
+        if name.ends_with("^{}") {
+            continue; // peeled tag line: the tag object's oid is what we follow
+        }
+        probe.advertised_any = true;
+        if patterns.matches(name) {
+            probe.tips.insert(name.to_string(), oid.to_string());
+        }
+    }
+    Ok(probe)
+}
+
+/// Fetch the refs matching `patterns` from `upstream` into the scratch, negotiating
+/// from `have` (every WAL ref matching `patterns`, `ref → oid`). Exact entries the
+/// fresh `probe` did not see are left out of the refspecs (git fails the whole fetch
+/// on a missing exact ref) and are absent from the result's tips: a deletion.
+/// After the fetch (`--prune`) the scratch's `refs/follow/*` is exactly upstream's
+/// matching set, so `have − tips` is what upstream deleted.
 #[allow(
     clippy::implicit_hasher,
     reason = "pub API used by other crates with the default hasher"
@@ -52,41 +114,14 @@ pub async fn fetch_refs(
     token: Option<&str>,
     serving_objects: &Path,
     have: &HashMap<String, String>,
-    refs: &[String],
+    patterns: &RefPatterns,
+    probe: &Probe,
     scratch: &Path,
 ) -> Result<FetchedDelta, GitError> {
     let git = |args: &[&str]| {
-        let mut c = tokio::process::Command::new("git");
-        c.arg("--git-dir")
-            .arg(scratch)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        c.env("GIT_TERMINAL_PROMPT", "0");
-        if let Some(t) = token {
-            // The helper reads the token from the environment: it appears neither on a
-            // command line nor in a config file.
-            c.env("FLOE_UPSTREAM_TOKEN", t)
-                .env("GIT_CONFIG_COUNT", "1")
-                .env("GIT_CONFIG_KEY_0", "credential.helper")
-                .env(
-                    "GIT_CONFIG_VALUE_0",
-                    "!f() { echo username=x-access-token; echo \"password=$FLOE_UPSTREAM_TOKEN\"; }; f",
-                );
-        }
+        let mut c = git_cmd(Some(scratch), upstream, token);
+        c.args(args);
         c
-    };
-    let ok = |out: std::process::Output, what: &str| -> Result<std::process::Output, GitError> {
-        if out.status.success() {
-            Ok(out)
-        } else {
-            Err(GitError::Subprocess {
-                cmd: what.to_string(),
-                status: out.status.code(),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            })
-        }
     };
 
     // Scratch: create once; its alternates are the serving copy's objects.
@@ -121,17 +156,23 @@ pub async fn fetch_refs(
             let _ = tokio::fs::remove_file(e.path()).await;
         }
     }
-    // Negotiation tips = exactly the WAL's current values of the followed refs.
+    let absent: Vec<&str> = patterns
+        .exact()
+        .filter(|r| !probe.tips.contains_key(*r))
+        .collect();
+    // Negotiation tips = exactly the WAL's current values of the matching refs
+    // (minus exact refs upstream no longer has): every other `refs/follow/*` goes,
+    // since with globs the set changes from round to round.
     {
         let mut input = String::new();
-        for r in refs {
-            match have.get(r) {
-                Some(oid) => {
-                    let _ = writeln!(input, "update {} {oid}", follow_ref(r));
-                }
-                None => {
-                    let _ = writeln!(input, "delete {}", follow_ref(r));
-                }
+        for name in read_scratch(scratch).await?.tips.keys() {
+            if !have.contains_key(name) || absent.contains(&name.as_str()) {
+                let _ = writeln!(input, "delete {}", scratch_ref(name));
+            }
+        }
+        for (name, oid) in have {
+            if !absent.contains(&name.as_str()) {
+                let _ = writeln!(input, "update {} {oid}", scratch_ref(name));
             }
         }
         let mut child = git(&["update-ref", "--stdin"])
@@ -140,9 +181,10 @@ pub async fn fetch_refs(
             .map_err(GitError::Io)?;
         {
             use tokio::io::AsyncWriteExt;
-            let mut stdin = child.stdin.take().ok_or_else(|| {
-                GitError::Io(std::io::Error::other("git update-ref: stdin not piped"))
-            })?;
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| GitError::InvalidInput("update-ref: no stdin pipe".into()))?;
             stdin
                 .write_all(input.as_bytes())
                 .await
@@ -154,10 +196,11 @@ pub async fn fetch_refs(
         )?;
     }
 
-    let refspecs: Vec<String> = refs
-        .iter()
-        .map(|r| format!("+{r}:{}", follow_ref(r)))
-        .collect();
+    let refspecs = patterns.refspecs(&absent);
+    if refspecs.is_empty() {
+        // Every positive entry is an exact ref upstream deleted: nothing to fetch.
+        return read_scratch(scratch).await;
+    }
     let mut args: Vec<&str> = vec![
         // Always a pack, never loose objects (ingest_pack takes a pack).
         "-c",
@@ -172,6 +215,7 @@ pub async fn fetch_refs(
         "protocol.version=2",
         "fetch",
         "--no-tags",
+        "--prune",
         "--no-write-fetch-head",
         "--no-auto-gc",
         "--quiet",
@@ -180,9 +224,70 @@ pub async fn fetch_refs(
     args.extend(refspecs.iter().map(String::as_str));
     ok(
         git(&args).output().await.map_err(GitError::Io)?,
-        "git fetch <upstream> <refs>",
+        "git fetch <upstream> <refspecs>",
     )?;
     read_scratch(scratch).await
+}
+
+/// `git` with `--git-dir` (when given), no terminal prompt, a stalled-transfer
+/// limit, and the token (when given) through a one-shot credential helper that
+/// reads it from the environment: it appears neither on a command line nor in a
+/// config file. The helper answers only `get` for the upstream's own authority
+/// (the `host=` line git passes, `host[:port]`), so a redirect or a URL parsed
+/// differently elsewhere never carries the token to another host.
+fn git_cmd(git_dir: Option<&Path>, upstream: &str, token: Option<&str>) -> tokio::process::Command {
+    let mut c = tokio::process::Command::new("git");
+    if let Some(d) = git_dir {
+        c.arg("--git-dir").arg(d);
+    }
+    c.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Abort an HTTP transfer slower than 1 KiB/s for a minute (a tarpit).
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "60")
+        // An empty `credential.helper` resets the list: no helper from the host's
+        // system or global git config runs, so none can store the upstream token
+        // (`store`, `cache`, a keychain) or hand out the host's own credentials.
+        // The system/global files themselves stay in effect: proxies, CA
+        // bundles and `url.*.insteadOf` there are the operator's and follow needs them.
+        .env("GIT_CONFIG_KEY_0", "credential.helper")
+        .env("GIT_CONFIG_VALUE_0", "");
+    if let Some(t) = token {
+        c.env("FLOE_UPSTREAM_TOKEN", t)
+            .env(
+                "FLOE_UPSTREAM_HOST",
+                floe_config::upstream_authority(upstream),
+            )
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_1", "credential.helper")
+            .env("GIT_CONFIG_VALUE_1", CREDENTIAL_HELPER);
+    } else {
+        c.env("GIT_CONFIG_COUNT", "1");
+    }
+    c
+}
+
+/// `credential.helper` for [`git_cmd`]: reads git's request from stdin and
+/// prints the token only for `get` on `$FLOE_UPSTREAM_HOST`.
+const CREDENTIAL_HELPER: &str = concat!(
+    "!f() { test \"$1\" = get || return 0; h=; ",
+    "while IFS= read -r l && test -n \"$l\"; do case \"$l\" in host=*) h=\"${l#host=}\";; esac; done; ",
+    "test -n \"$h\" && test \"$h\" = \"$FLOE_UPSTREAM_HOST\" || return 0; ",
+    "echo username=x-access-token; echo \"password=$FLOE_UPSTREAM_TOKEN\"; }; f"
+);
+
+fn ok(out: std::process::Output, what: &str) -> Result<std::process::Output, GitError> {
+    if out.status.success() {
+        Ok(out)
+    } else {
+        Err(GitError::Subprocess {
+            cmd: what.to_string(),
+            status: out.status.code(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })
+    }
 }
 
 /// What a previous [`fetch_refs`] left in the scratch: upstream's tips
@@ -232,7 +337,335 @@ pub async fn read_scratch(scratch: &Path) -> Result<FetchedDelta, GitError> {
     })
 }
 
-/// `refs/heads/main` → `refs/follow/heads/main` (the scratch's copy of upstream's ref).
-fn follow_ref(r: &str) -> String {
-    format!("refs/follow/{}", r.strip_prefix("refs/").unwrap_or(r))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn envs(c: &tokio::process::Command) -> std::collections::BTreeMap<String, String> {
+        c.as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect()
+    }
+
+    /// Only floe's helper answers: an empty `credential.helper` first resets
+    /// whatever the host's system/global config lists (a `store` helper would
+    /// otherwise write the upstream token to disk after a fetch).
+    #[test]
+    fn git_cmd_resets_host_credential_helpers() {
+        let with = envs(&git_cmd(None, "https://github.com/acme/w.git", Some("tok")));
+        let get = |m: &std::collections::BTreeMap<String, String>, k: &str| m.get(k).cloned();
+        assert_eq!(get(&with, "GIT_CONFIG_COUNT").as_deref(), Some("2"));
+        assert_eq!(
+            get(&with, "GIT_CONFIG_KEY_0").as_deref(),
+            Some("credential.helper")
+        );
+        assert_eq!(get(&with, "GIT_CONFIG_VALUE_0").as_deref(), Some(""));
+        assert_eq!(
+            get(&with, "GIT_CONFIG_KEY_1").as_deref(),
+            Some("credential.helper")
+        );
+        assert_eq!(
+            get(&with, "GIT_CONFIG_VALUE_1").as_deref(),
+            Some(CREDENTIAL_HELPER)
+        );
+        assert_eq!(
+            get(&with, "FLOE_UPSTREAM_HOST").as_deref(),
+            Some("github.com")
+        );
+        // Without a token no helper runs at all, not even the host's.
+        let without = envs(&git_cmd(None, "https://github.com/acme/w.git", None));
+        assert_eq!(get(&without, "GIT_CONFIG_COUNT").as_deref(), Some("1"));
+        assert_eq!(get(&without, "GIT_CONFIG_VALUE_0").as_deref(), Some(""));
+        assert!(!without.contains_key("FLOE_UPSTREAM_TOKEN"));
+        assert!(!without.contains_key("GIT_CONFIG_KEY_1"));
+    }
+
+    /// With a real git: a `store` helper from the global config comes first,
+    /// then the empty reset (git drops every helper listed before it), then
+    /// floe's, so the host's helper is never asked to answer or to store.
+    #[test]
+    fn the_reset_follows_host_helpers_and_precedes_ours() {
+        let home = tempfile::tempdir().unwrap();
+        let store = home.path().join("creds");
+        let global = home.path().join("gitconfig");
+        std::fs::write(
+            &global,
+            format!(
+                "[credential]\n\thelper = store --file={}\n",
+                store.display()
+            ),
+        )
+        .unwrap();
+        let mut c = git_cmd(None, "https://example.invalid/r.git", Some("tok"));
+        c.env("GIT_CONFIG_GLOBAL", &global)
+            .args(["config", "--get-all", "credential.helper"]);
+        let out = c.as_std_mut().output().unwrap();
+        let helpers = String::from_utf8_lossy(&out.stdout);
+        // git lists the reset (empty) entry and floe's helper after the host's; the
+        // empty one makes git drop everything listed before it.
+        let lines: Vec<&str> = helpers.lines().collect();
+        assert_eq!(lines.len(), 3, "{helpers}");
+        assert!(lines[0].starts_with("store"), "{helpers}");
+        assert_eq!(lines[1], "", "{helpers}");
+        assert_eq!(lines[2], CREDENTIAL_HELPER, "{helpers}");
+    }
+
+    fn run(dir: &Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// `git credential fill` through [`git_cmd`]'s helper for a request to `host`.
+    async fn fill(upstream: &str, host: &str) -> String {
+        use tokio::io::AsyncWriteExt;
+        let mut c = git_cmd(None, upstream, Some("tok-secret"));
+        c.env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["credential", "fill"])
+            .stdin(Stdio::piped());
+        let mut child = c.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin
+            .write_all(format!("protocol=https\nhost={host}\n\n").as_bytes())
+            .await
+            .unwrap();
+        drop(stdin);
+        let out = child.wait_with_output().await.unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[tokio::test]
+    async fn credential_helper_answers_only_the_upstream_host() {
+        let ok = fill("https://github.com/a/b.git", "github.com").await;
+        assert!(ok.contains("password=tok-secret"), "{ok}");
+        assert!(ok.contains("username=x-access-token"), "{ok}");
+        let port = fill("https://h.example:8443/a/b", "h.example:8443").await;
+        assert!(port.contains("password=tok-secret"), "{port}");
+        // Another host (a redirect, a differently parsed URL): no token; with
+        // prompts disabled, git fails to fill instead.
+        let other = fill("https://github.com/a/b.git", "evil.example").await;
+        assert!(!other.contains("tok-secret"), "{other}");
+    }
+
+    fn pats(list: &[&str]) -> RefPatterns {
+        RefPatterns::parse(&list.iter().map(|s| (*s).to_string()).collect::<Vec<_>>()).unwrap()
+    }
+
+    /// An upstream work repository with one commit on `main`; returns (dir, url, oid).
+    fn upstream() -> (tempfile::TempDir, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        run(dir.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("a"), "a").unwrap();
+        run(dir.path(), &["add", "."]);
+        run(dir.path(), &["commit", "-q", "-m", "a"]);
+        let oid = run(dir.path(), &["rev-parse", "HEAD"]);
+        let url = format!("file://{}", dir.path().display());
+        (dir, url, oid)
+    }
+
+    /// A serving copy (empty bare repository) and a scratch path next to it.
+    fn serving() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = dir.path().join("serving.git");
+        run(dir.path(), &["init", "-q", "--bare", "serving.git"]);
+        let scratch = dir.path().join("scratch.git");
+        (dir, bare.join("objects"), scratch)
+    }
+
+    #[test]
+    fn ref_patterns_agree_with_git() {
+        let corpus = [
+            "refs/heads/main",
+            "refs/heads/*",
+            "refs/heads/feat-*",
+            "refs/*/main",
+            "refs/tags/v1.2.0",
+            "refs/heads/a..b",
+            "refs/heads/a b",
+            "refs/heads/a:b",
+            "refs/heads/a?b",
+            "refs/heads/a[b",
+            "refs/heads/a~b",
+            "refs/heads/a\\b",
+            "refs/heads/x.lock",
+            "refs/heads/x.lock/y",
+            "refs/heads/.x",
+            "refs/heads/x/.y",
+            "refs/heads/",
+            "refs/heads//x",
+            "refs/heads/a@{1}",
+            "refs/heads/a@b",
+            "refs/heads/x.",
+            "refs/heads/\u{1}",
+            "refs/heads/ünï",
+        ];
+        for name in corpus {
+            let git = std::process::Command::new("git")
+                .args(["check-ref-format", "--refspec-pattern", name])
+                .status()
+                .unwrap()
+                .success();
+            let ours = floe_config::refpattern::check_refspec_pattern(name).is_ok();
+            assert_eq!(ours, git, "{name:?}: ours {ours}, git {git}");
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_reports_matching_tips_and_advertised_any() {
+        let (up, url, main) = upstream();
+        run(up.path(), &["tag", "v1"]);
+        let p = probe(&url, None, &pats(&["refs/heads/*"])).await.unwrap();
+        assert!(p.advertised_any);
+        assert_eq!(
+            p.tips,
+            HashMap::from([("refs/heads/main".to_string(), main)])
+        );
+        // Nothing matches, but upstream advertised something: not "empty".
+        let p = probe(&url, None, &pats(&["refs/heads/nope"]))
+            .await
+            .unwrap();
+        assert!(p.advertised_any && p.tips.is_empty());
+        // An upstream with no refs at all.
+        let empty = tempfile::tempdir().unwrap();
+        run(empty.path(), &["init", "-q", "--bare"]);
+        let p = probe(
+            &format!("file://{}", empty.path().display()),
+            None,
+            &pats(&["refs/heads/*"]),
+        )
+        .await
+        .unwrap();
+        assert!(!p.advertised_any && p.tips.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_with_globs_reports_new_and_pruned_refs() {
+        let (up, url, main) = upstream();
+        run(up.path(), &["branch", "feat/x"]);
+        let (_s, objects, scratch) = serving();
+        let pat = pats(&["refs/heads/*"]);
+        let p = probe(&url, None, &pat).await.unwrap();
+        let d = fetch_refs(&url, None, &objects, &HashMap::new(), &pat, &p, &scratch)
+            .await
+            .unwrap();
+        assert_eq!(d.tips.len(), 2, "{:?}", d.tips);
+        assert!(d.pack.is_some());
+        // Install the objects in the serving copy as ingest would (alternates
+        // make the scratch's pack visible only to the scratch).
+        let pack_dir = objects.join("pack");
+        for e in std::fs::read_dir(scratch.join("objects/pack")).unwrap() {
+            let e = e.unwrap();
+            std::fs::copy(e.path(), pack_dir.join(e.file_name())).unwrap();
+        }
+        d.discard_pack().await;
+        let have = d.tips.clone();
+
+        // Upstream: feat/x deleted, feat/y created.
+        run(up.path(), &["branch", "-D", "feat/x"]);
+        run(up.path(), &["branch", "feat/y"]);
+        let p = probe(&url, None, &pat).await.unwrap();
+        let d = fetch_refs(&url, None, &objects, &have, &pat, &p, &scratch)
+            .await
+            .unwrap();
+        assert_eq!(
+            d.tips,
+            HashMap::from([
+                ("refs/heads/main".to_string(), main.clone()),
+                ("refs/heads/feat/y".to_string(), main),
+            ])
+        );
+        assert_eq!(
+            d.tips, p.tips,
+            "after --prune the scratch is the probe's set"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_skips_exact_refs_the_probe_did_not_see() {
+        let (_up, url, main) = upstream();
+        let (_s, objects, scratch) = serving();
+        let pat = pats(&["refs/heads/main", "refs/heads/gone"]);
+        let p = probe(&url, None, &pat).await.unwrap();
+        // We "had" gone: it must come back absent, not fail the fetch.
+        let have = HashMap::new();
+        let d = fetch_refs(&url, None, &objects, &have, &pat, &p, &scratch)
+            .await
+            .unwrap();
+        assert_eq!(
+            d.tips,
+            HashMap::from([("refs/heads/main".to_string(), main)])
+        );
+        // Only the missing exact ref: nothing fetched, nothing left.
+        let only = pats(&["refs/heads/gone"]);
+        let p = probe(&url, None, &only).await.unwrap();
+        let d = fetch_refs(&url, None, &objects, &HashMap::new(), &only, &p, &scratch)
+            .await
+            .unwrap();
+        assert!(d.tips.is_empty(), "{:?}", d.tips);
+    }
+
+    #[tokio::test]
+    async fn negative_refspec_excludes() {
+        let (up, url, _main) = upstream();
+        run(up.path(), &["branch", "dependabot/npm"]);
+        run(
+            up.path(),
+            &["update-ref", "refs/archive/1/refs/heads/main", "HEAD"],
+        );
+        let (_s, objects, scratch) = serving();
+        let pat = pats(&["refs/*", "^refs/heads/dependabot/*"]);
+        let p = probe(&url, None, &pat).await.unwrap();
+        let d = fetch_refs(&url, None, &objects, &HashMap::new(), &pat, &p, &scratch)
+            .await
+            .unwrap();
+        let mut names: Vec<&String> = d.tips.keys().collect();
+        names.sort();
+        assert_eq!(names, vec!["refs/heads/main"], "{:?}", d.tips);
+        assert_eq!(d.tips, p.tips);
+    }
+
+    #[tokio::test]
+    async fn is_ancestor_errors_on_missing_object() {
+        let (up, _url, c1) = upstream();
+        std::fs::write(up.path().join("b"), "b").unwrap();
+        run(up.path(), &["add", "."]);
+        run(up.path(), &["commit", "-q", "-m", "b"]);
+        let c2 = run(up.path(), &["rev-parse", "HEAD"]);
+        let root = tempfile::tempdir().unwrap();
+        let id = crate::RepoId::new("o", "r").unwrap();
+        let local = crate::LocalRepo::init(root.path(), &id, crate::ObjectFormat::Sha1).unwrap();
+        let out = local
+            .git(&[
+                "fetch",
+                "-q",
+                &up.path().display().to_string(),
+                "main:refs/heads/main",
+            ])
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(local.is_ancestor(&c1, &c2).await.unwrap());
+        assert!(!local.is_ancestor(&c2, &c1).await.unwrap());
+        let missing = "1".repeat(40);
+        assert!(local.is_ancestor(&missing, &c2).await.is_err());
+    }
 }

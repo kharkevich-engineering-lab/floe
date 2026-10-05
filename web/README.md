@@ -15,7 +15,18 @@ FLOE_URL=http://127.0.0.1:8080 pnpm run dev
 ```
 
 Checks: `pnpm run lint` (oxlint, config in `.oxlintrc.json`), `pnpm run typecheck`,
-`pnpx react-doctor@latest .` (kept at 100/100).
+`pnpm run test` (`node --experimental-strip-types --test` over the pure admin modules — no test framework,
+no extra dependency; part of `pnpm run build`), `pnpx react-doctor@latest .` (kept at 100/100).
+
+## Admin area (`src/admin/`, `/_admin/*`, D62)
+
+Lazy chunks for admins only (the top bar shows "Admin" when `/api/v1/me` says `admin`). The runtime config
+document's sections are rendered from `GET /api/v1/admin/config/schema` by `schema-form.ts` (pure, tested), so a new
+key needs no UI work; `SectionEditor` adds the raw JSON view, validation as you type, inline errors, the diff preview,
+the CAS'd publish (`base_revision`, 409 → "reload latest") and the unsaved-changes guard (`useUnsavedGuard`: a
+`beforeunload` prompt and a capture-phase link guard, since the SPA has no data router). Secrets are write-only
+fields. Per-repository settings are edited line by line (`toml-lines.ts`, tested) so keys the form does not manage
+stay verbatim. TLS is never edited here; the overview shows `GET /api/v1/tls` read-only.
 
 ## SDK (`sdk/repos.ts` → `/repos.js`, `/repos.mjs`)
 

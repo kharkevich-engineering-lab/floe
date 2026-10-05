@@ -16,10 +16,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use gix_pack::data::entry::Header;
-use tracing::Instrument;
 use floe_proto::v1::{Manifest, PackRef};
 use floe_store::{GetOptions, GetResult, ObjectStore, Prefixed};
+use gix_pack::data::entry::Header;
+use tracing::Instrument;
 
 use crate::error::WalError;
 use crate::progress::Reporter;
@@ -317,7 +317,10 @@ impl RemotePacks {
         self.packs.iter().map(|p| p.checksum.as_str()).collect()
     }
     pub fn total_objects(&self) -> u64 {
-        self.packs.iter().map(|p| u64::from(p.idx.num_objects())).sum()
+        self.packs
+            .iter()
+            .map(|p| u64::from(p.idx.num_objects()))
+            .sum()
     }
 
     /// Locate an object: (pack index, pack offset).

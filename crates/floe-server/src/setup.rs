@@ -12,8 +12,8 @@
 //! real 401), pointing at the token page. With `server.auth.mode = "none"` nothing
 //! is asked. The UI is a client of these recipes, never a fork.
 
+use floe_config::{AuthMode, Config};
 use serde::Serialize;
-use floe_config::{AuthMode, Config, TlsMode};
 
 fn slug(host: &str) -> String {
     host.chars()
@@ -31,16 +31,6 @@ pub fn helper_file(host: &str) -> String {
 /// Where the helper keeps the token (mode 0600).
 pub fn token_file(host: &str) -> String {
     format!("{}-token", slug(host))
-}
-
-/// Where the installer keeps a self-signed host certificate for git (`http.<url>.sslCAInfo`).
-fn ca_file(host: &str) -> String {
-    format!("{}-ca.pem", slug(host))
-}
-
-/// `server.tls.mode = "self_signed"`: clients have to pin our certificate.
-fn self_signed(cfg: &Config) -> bool {
-    cfg.server.tls.mode == TlsMode::SelfSigned
 }
 
 /// Whether clients need a credential at all.
@@ -71,10 +61,6 @@ pub struct Recipes {
     pub bundle_list: String,
     /// Multi-line setup text (auth errors, overview `setup` field).
     pub setup_text: String,
-    /// Self-signed TLS: where this host's certificate is published, and the one-time
-    /// command that pins it for git. `None` when the certificate chains to a public CA.
-    pub ca_url: Option<String>,
-    pub trust: Option<String>,
 }
 
 pub fn host_of(base_url: &str) -> &str {
@@ -104,16 +90,10 @@ pub fn recipes(cfg: &Config, base_url: &str, repo: Option<&str>) -> Recipes {
     };
     // `sh -c "$(curl …)"`, not `curl | sh`: the script's stdin stays the terminal, so the token
     // prompt can read it. The piped form still works — the script talks to /dev/tty when it can.
-    // A self-signed origin: curl cannot verify us before the installer pinned the certificate, so
-    // the bootstrap fetch is `-k`; everything after it is verified.
-    let insecure = if self_signed(cfg) { "k" } else { "" };
+    // Always verified: floe presents a certificate that chains to a CA the client already
+    // trusts (`files` or `acme`, D59), or plain HTTP (`off`). Nothing to pin.
     // The URL is single-quoted inside the substitution: an unquoted `?repo=` is a glob in zsh.
-    let install = format!("sh -c \"$(curl -fsSL{insecure} '{install_url}')\"");
-    let ca_url = self_signed(cfg).then(|| format!("{base_url}/services/public/ca.pem"));
-    let trust = ca_url.as_ref().map(|ca| {
-        let file = format!("${{XDG_CONFIG_HOME:-$HOME/.config}}/git/{}", ca_file(&host));
-        format!("mkdir -p \"$(dirname \"{file}\")\" && curl -fsSk \"{ca}\" -o \"{file}\" && git config --global http.https://{host}/.sslCAInfo \"{file}\"")
-    });
+    let install = format!("sh -c \"$(curl -fsSL '{install_url}')\"");
     let url = match repo {
         Some(r) => format!("{base_url}/{r}.git"),
         None => format!("{base_url}/<owner>/<repo>.git"),
@@ -135,12 +115,6 @@ pub fn recipes(cfg: &Config, base_url: &str, repo: Option<&str>) -> Recipes {
     let blobless_clone = format!(
         "git clone --filter=blob:none --sparse --bundle-uri={bundle_list}?filter=blob:none -c fetch.bundleURI={catchup}?filter=blob:none {url}"
     );
-    let trust_text = match &trust {
-        Some(_) => format!(
-            "# {host} presents a self-signed certificate: the installer pins it for git; browsers accept it once.\n"
-        ),
-        None => String::new(),
-    };
     let where_from = match (&token_url, needs_token(cfg)) {
         (Some(u), _) => format!("# Tokens: sign in at {u} and create one (the installer asks for it; CI: export FLOE_TOKEN).\n"),
         (None, true) => "# Tokens: issued by whoever runs this server (the installer asks for it; CI: export FLOE_TOKEN).\n".to_string(),
@@ -148,14 +122,14 @@ pub fn recipes(cfg: &Config, base_url: &str, repo: Option<&str>) -> Recipes {
     };
     let setup_text = match repo {
         Some(_) => format!(
-            "{trust_text}{where_from}# Run once per machine (installs the git credential helper, enables bundle URIs and clones; safe to re-run):\n\
+            "{where_from}# Run once per machine (installs the git credential helper, enables bundle URIs and clones; safe to re-run):\n\
              {install}\n\
              \n\
              # Already set up? {plain_clone}\n\
              # One-shot (CI): {manual_clone}\n"
         ),
         None => format!(
-            "{trust_text}{where_from}# Run once per machine (installs the git credential helper and enables bundle URIs; safe to re-run):\n\
+            "{where_from}# Run once per machine (installs the git credential helper and enables bundle URIs; safe to re-run):\n\
              {install}\n\
              {plain_clone}\n\
              \n\
@@ -173,8 +147,6 @@ pub fn recipes(cfg: &Config, base_url: &str, repo: Option<&str>) -> Recipes {
         blobless_clone,
         bundle_list,
         setup_text,
-        ca_url,
-        trust,
     }
 }
 
@@ -230,7 +202,7 @@ esac
 /// The installer served at `/services/public/install.sh[?repo=owner/name]` (`sh -c "$(curl -fsSL …)"`).
 /// Pure POSIX sh, **idempotent**: every step checks before it acts, re-running converges on the same state.
 ///
-/// git ≥ 2.46 + curl → (self-signed: pin `/services/public/ca.pem`) → the credential helper → a token
+/// git ≥ 2.46 + curl → the credential helper → a token
 /// (`$FLOE_TOKEN`, an already stored one, or asked for on the terminal; no terminal: exit 2 with the
 /// two things to do) → git config for the host (`credential.<host>.helper` = exactly ours,
 /// `transfer.bundleURI true`, `fetch.uriProtocols https`, stale `fetch.bundleURI`/`extraHeader` removed)
@@ -239,21 +211,6 @@ pub fn install_script(cfg: &Config, base_url: &str, repo: Option<&str>) -> Strin
     let r = recipes(cfg, base_url, repo);
     let host = &r.host;
     let delim = "__FLOE_CREDENTIAL_HELPER__";
-    let trust = match &r.ca_url {
-        Some(ca) => format!(
-            "# Self-signed origin: pin its certificate for git (browsers accept it once themselves).\n\
-             CA=\"$DIR/{ca_file}\"\n\
-             curl -fsSk \"{ca}\" -o \"$CA.tmp\" && mv \"$CA.tmp\" \"$CA\"\n\
-             git config --global \"http.https://$HOST/.sslCAInfo\" \"$CA\"\n",
-            ca_file = ca_file(host)
-        ),
-        None => String::new(),
-    };
-    let curl_ca = if r.ca_url.is_some() {
-        "--cacert \"$CA\""
-    } else {
-        ""
-    };
     let token_from = match &r.token_url {
         Some(u) => format!("sign in at {u} and create one"),
         None => format!("the operator of {host} issues them"),
@@ -301,7 +258,7 @@ pub fn install_script(cfg: &Config, base_url: &str, repo: Option<&str>) -> Strin
         ),
         None => format!(
             "# Self-test: the token against the server (repository-independent, so it holds on an empty server).\n\
-             WHO=\"$(curl -fsS {curl_ca} -H \"$AUTH\" \"{base}/api/v1/me\")\" || {{ echo \"$HOST: self-test failed — {base}/api/v1/me refused the token ({token_from})\" >&2; exit 1; }}\n\
+             WHO=\"$(curl -fsS -H \"$AUTH\" \"{base}/api/v1/me\")\" || {{ echo \"$HOST: self-test failed — {base}/api/v1/me refused the token ({token_from})\" >&2; exit 1; }}\n\
              ACCOUNT=\"$(printf '%s' \"$WHO\" | sed -n 's/.*\"principal\":\"\\([^\"]*\\)\".*/\\1/p')\"\n",
             base = r.base_url,
         ),
@@ -353,7 +310,7 @@ GMAJ="${{GV%%.*}}"; GREST="${{GV#*.}}"; GMIN="${{GREST%%.*}}"
 [ "$GMAJ" -gt 2 ] 2>/dev/null || [ "$GMAJ" -eq 2 ] && [ "${{GMIN:-0}}" -ge 46 ] || {{
   echo "$HOST: git $GV is too old — need git >= 2.46 (credential authtype, bundle URIs)" >&2; exit 1; }}
 mkdir -p "$DIR"
-{trust}{token}cat > "$HELPER.tmp" <<'{delim}'
+{token}cat > "$HELPER.tmp" <<'{delim}'
 {helper}{delim}
 chmod 755 "$HELPER.tmp"
 if cmp -s "$HELPER.tmp" "$HELPER" 2>/dev/null; then rm -f "$HELPER.tmp"; else mv "$HELPER.tmp" "$HELPER"; fi
@@ -432,10 +389,7 @@ mod tests {
             "sh -c \"$(curl -fsSL 'https://git.example.com/services/public/install.sh?repo=acme/monorepo')\"",
             "URL quoted (zsh globs `?`)"
         );
-        assert!(
-            r.manual_clone
-                .contains("Authorization: Bearer $FLOE_TOKEN")
-        );
+        assert!(r.manual_clone.contains("Authorization: Bearer $FLOE_TOKEN"));
         assert!(r.manual_clone.contains("-c fetch.bundleURI=https://git.example.com/acme/monorepo.git/bundles/catchup clone https://git.example.com/acme/monorepo.git"));
         assert_eq!(
             r.plain_clone,
@@ -467,35 +421,30 @@ mod tests {
     }
 
     #[test]
-    fn self_signed_host_pins_its_certificate_for_git() {
-        let mut cfg = Config::default();
-        cfg.server.tls.mode = TlsMode::SelfSigned;
-        let r = recipes(&cfg, "https://floe.localhost:8888", Some("me/repo"));
-        assert_eq!(
-            r.ca_url.as_deref(),
-            Some("https://floe.localhost:8888/services/public/ca.pem")
-        );
-        let trust = r.trust.as_deref().unwrap();
-        assert!(
-            trust.contains("http.https://floe.localhost:8888/.sslCAInfo"),
-            "{trust}"
-        );
-        assert!(
-            r.install.starts_with("sh -c \"$(curl -fsSLk "),
-            "{}",
-            r.install
-        );
-        assert!(
-            r.setup_text
-                .starts_with("# floe.localhost:8888 presents a self-signed certificate")
-        );
-        let script = install_script(&cfg, "https://floe.localhost:8888", Some("me/repo"));
-        assert_posix(&script);
-        assert!(script.contains("floe-localhost-8888-ca.pem"));
-        assert!(script.contains("floe-localhost-8888-credential-helper"));
-        assert!(script.contains("sslCAInfo"));
+    fn host_derived_names_and_nothing_to_pin() {
         assert_eq!(helper_file(HOST), "git-example-com-credential-helper");
         assert_eq!(token_file(HOST), "git-example-com-token");
+        // Every TLS mode floe has (off/files/acme, D59) presents a certificate the client
+        // already trusts or no TLS at all: the installer never pins a CA or skips verification.
+        for mode in [
+            floe_config::TlsMode::Off,
+            floe_config::TlsMode::Files,
+            floe_config::TlsMode::Acme,
+        ] {
+            let mut cfg = oidc_cfg();
+            cfg.server.tls.mode = mode;
+            let r = recipes(&cfg, BASE, Some("acme/monorepo"));
+            assert!(
+                r.install.starts_with("sh -c \"$(curl -fsSL '"),
+                "{}",
+                r.install
+            );
+            let script = install_script(&cfg, BASE, None);
+            assert_posix(&script);
+            assert!(!script.contains("sslCAInfo"));
+            assert!(!script.contains("curl -fsSk"));
+            assert!(!script.contains("--cacert"));
+        }
     }
 
     #[test]

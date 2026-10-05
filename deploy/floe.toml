@@ -35,3 +35,7 @@ max_bytes = "5GiB"
 [telemetry]
 log_format = "json"
 log_filter = "info"
+
+# Runtime configuration — the GitHub mirror (D49), the catalog (D50), the events webhook — is not in this
+# file: it is the versioned config document in the bucket (D60), edited at https://<host>/_admin or with
+# `floe config set|import`. Secrets entered there are sealed with FLOE_CONFIG_KEY (D61).

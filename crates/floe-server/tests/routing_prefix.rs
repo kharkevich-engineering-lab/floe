@@ -41,13 +41,15 @@ fn allowed_route(path: &str) -> bool {
         "/repos.mjs",
         "/_ui/{*path}",
         "/services/public/install.sh",
-        "/services/public/ca.pem",
         "/services/public/{*rest}",
         "/services/setup.json",
         "/services/api/instance",
         "/services/api/owners",
         "/services/api/owners/{owner}",
         "/api",
+        // D62: the SPA's admin area (non-repo; reserved like `/api` and `/_ui`).
+        "/_admin",
+        "/_admin/{*rest}",
         "/{owner}",
     ];
     if allow.contains(&p) {

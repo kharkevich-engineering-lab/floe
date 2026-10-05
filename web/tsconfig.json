@@ -13,5 +13,6 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true
   },
-  "include": ["src", "sdk"]
+  "include": ["src", "sdk"],
+  "exclude": ["src/**/*.test.ts"]
 }

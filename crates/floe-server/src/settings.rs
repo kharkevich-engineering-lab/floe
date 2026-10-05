@@ -145,13 +145,32 @@ pub async fn http_put(
     }
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| ApiError::BadRequest("settings must be UTF-8 TOML".into()))?;
-    let message = query
-        .split('&')
-        .filter_map(|kv| kv.split_once('='))
-        .find(|(k, _)| *k == "message")
-        .map(|(_, v)| percent_decode(v))
-        .unwrap_or_default();
-    publish(&h, text, &principal.name, &message).await
+    let param = |name: &str| {
+        query
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| percent_decode(v))
+    };
+    let message = param("message").unwrap_or_default();
+    // `?base_revision=N`: the revision the editor started from; another one is
+    // a 409 (a CAS on the settings revision, `publish_settings_if`), never a
+    // silent overwrite. Without it, D24's unconditional publish.
+    let base = match param("base_revision") {
+        None => None,
+        Some(b) => Some(
+            b.parse::<u64>()
+                .map_err(|_| ApiError::BadRequest("base_revision must be a number".into()))?,
+        ),
+    };
+    let result = match base {
+        None => h.publish_settings(text, &principal.name, &message).await,
+        Some(b) => {
+            h.publish_settings_if(text, &principal.name, &message, b)
+                .await
+        }
+    };
+    published(result)
 }
 
 pub async fn http_delete(
@@ -170,11 +189,20 @@ async fn publish(
     author: &str,
     message: &str,
 ) -> Result<Response, ApiError> {
-    match h.publish_settings(text, author, message).await {
+    published(h.publish_settings(text, author, message).await)
+}
+
+fn published(result: Result<u64, floe_wal::WalError>) -> Result<Response, ApiError> {
+    match result {
         Ok(revision) => {
             Ok((StatusCode::OK, axum::Json(json!({"revision": revision}))).into_response())
         }
         Err(floe_wal::WalError::Invalid(why)) => Err(ApiError::BadRequest(why)),
+        Err(floe_wal::WalError::SettingsConflict { expected, actual }) => {
+            Err(ApiError::Conflict(format!(
+                "the settings changed: you edited revision {expected}, the current one is {actual}"
+            )))
+        }
         Err(e) => Err(ApiError::Internal(e.to_string())),
     }
 }
@@ -278,10 +306,13 @@ fn describe_json(
         .collect();
     // Sources: every key of the settings sections; a key is "setting" when the
     // repo document sets it (rev/author), else "host" (floe.toml ⊕ env).
-    let host_doc: toml::Table =
+    let mut host_doc: toml::Table =
         toml::Table::try_from(&*st.cfg).map_err(|e| ApiError::Internal(e.to_string()))?;
-    let eff_doc: toml::Table =
+    let mut eff_doc: toml::Table =
         toml::Table::try_from(effective).map_err(|e| ApiError::Internal(e.to_string()))?;
+    // Only what a repository's settings may set (host-only codeintel keys stay hidden).
+    floe_config::repo_settings_view(&mut host_doc);
+    floe_config::repo_settings_view(&mut eff_doc);
     let set_doc: toml::Table = settings
         .map(|s| s.toml.parse::<toml::Table>().unwrap_or_default())
         .unwrap_or_default();
@@ -302,7 +333,8 @@ fn describe_json(
         let host_map: std::collections::HashMap<String, toml::Value> =
             host_flat.into_iter().collect();
         for (k, v) in eff_flat {
-            if k.ends_with("token_env") {
+            // `token_env` and `token_env_by_host.<host>`: host-only names.
+            if k.contains("token_env") {
                 continue;
             }
             // Array-of-tables (strategies) count as set when the document has the array.
@@ -338,8 +370,11 @@ fn describe_json(
         "upstream": {
             "git": effective.upstream.git,
             "lfs": effective.upstream.lfs,
-            "token_env": effective.upstream.token_env.is_some(),
+            "token_env": effective.upstream.git.as_deref().and_then(|g| effective.upstream_token_env(g)).is_some(),
             "follow": effective.upstream.follow,
+            "on_rewrite": effective.upstream.on_rewrite,
+            "head": effective.upstream.head,
+            "source": effective.upstream.source,
             "follow_interval_secs": st.cfg.maintenance.follow_interval.as_secs(),
             "last_round": st.follow.get(&h.id().to_string()),
         },
@@ -506,7 +541,8 @@ pub async fn http_policy_dry_run(
         if policy.has_protect() {
             for u in &txn.updates {
                 if crate::policy::classify(&u.old_oid, &u.new_oid) == crate::policy::RefOp::Update
-                    && matches!(local.is_ancestor(&u.old_oid, &u.new_oid).await, Ok(false))
+                    // Cannot tell (missing object) counts as a force, as on receive-pack.
+                    && !matches!(local.is_ancestor(&u.old_oid, &u.new_oid).await, Ok(true))
                 {
                     forces.insert(u.name.clone());
                 }

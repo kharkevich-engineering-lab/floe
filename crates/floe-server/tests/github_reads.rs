@@ -123,7 +123,10 @@ fn fixture(s: &Server) -> anyhow::Result<Fixture> {
     git_in(&dir, &["commit", "-q", "-m", "rename, edit and a binary"])?;
     let main = git_in(&dir, &["rev-parse", "HEAD"])?.trim().to_string();
 
-    git_in(&dir, &["remote", "add", "origin", &s.repo_url("acme", "docs")])?;
+    git_in(
+        &dir,
+        &["remote", "add", "origin", &s.repo_url("acme", "docs")],
+    )?;
     git_in(&dir, &["push", "-q", "origin", "main", "topic"])?;
     Ok(Fixture {
         _src: tmp,
@@ -230,7 +233,10 @@ async fn git_blobs_as_json_and_as_raw_bytes() -> TestResult {
     )
     .await?;
     assert!(status.is_success());
-    assert!(ct.starts_with("application/vnd.github.raw"), "content-type {ct}");
+    assert!(
+        ct.starts_with("application/vnd.github.raw"),
+        "content-type {ct}"
+    );
     assert_eq!(bytes, b"# docs\n\nread me\n");
 
     // A tree sha is not a blob.
@@ -252,8 +258,14 @@ async fn contents_serves_directories_files_and_raw() -> TestResult {
     // The root, which octokit emits as `contents/` with an empty path.
     let root = ok(&s, "/api/v3/repos/acme/docs/contents").await?;
     let arr = root.as_array().expect("directories are arrays");
-    assert!(arr.iter().any(|e| e["path"] == "pages" && e["type"] == "dir"));
-    assert!(arr.iter().any(|e| e["path"] == "link.mdx" && e["type"] == "symlink"));
+    assert!(
+        arr.iter()
+            .any(|e| e["path"] == "pages" && e["type"] == "dir")
+    );
+    assert!(
+        arr.iter()
+            .any(|e| e["path"] == "link.mdx" && e["type"] == "symlink")
+    );
     let readme = arr
         .iter()
         .find(|e| e["path"] == "README.md")
@@ -276,7 +288,11 @@ async fn contents_serves_directories_files_and_raw() -> TestResult {
     assert!(names.contains(&"pages/new.mdx"), "{names:?}");
 
     // A file.
-    let file = ok(&s, "/api/v3/repos/acme/docs/contents/pages/index.mdx?ref=main").await?;
+    let file = ok(
+        &s,
+        "/api/v3/repos/acme/docs/contents/pages/index.mdx?ref=main",
+    )
+    .await?;
     assert_eq!(file["type"], "file");
     assert_eq!(file["encoding"], "base64");
     assert_eq!(file["size"], 8);
@@ -287,10 +303,13 @@ async fn contents_serves_directories_files_and_raw() -> TestResult {
     );
 
     // Pinned to the base commit, the same path has the older body.
-    let old = ok(&s, &format!(
-        "/api/v3/repos/acme/docs/contents/pages/index.mdx?ref={}",
-        f.base
-    ))
+    let old = ok(
+        &s,
+        &format!(
+            "/api/v3/repos/acme/docs/contents/pages/index.mdx?ref={}",
+            f.base
+        ),
+    )
     .await?;
     assert_eq!(
         decode(old["content"].as_str().unwrap_or_default())?,
@@ -305,7 +324,10 @@ async fn contents_serves_directories_files_and_raw() -> TestResult {
     )
     .await?;
     assert!(status.is_success());
-    assert!(ct.starts_with("application/vnd.github.raw"), "content-type {ct}");
+    assert!(
+        ct.starts_with("application/vnd.github.raw"),
+        "content-type {ct}"
+    );
     assert_eq!(bytes, b"a\nB\nc\nd\n");
 
     // `object+json` turns the array into an envelope with `entries`.
@@ -318,16 +340,24 @@ async fn contents_serves_directories_files_and_raw() -> TestResult {
     assert!(status.is_success());
     let obj: Value = serde_json::from_slice(&bytes)?;
     assert_eq!(obj["type"], "dir");
-    assert!(obj["entries"].as_array().is_some_and(|a| a.len() == 2), "{obj}");
+    assert!(
+        obj["entries"].as_array().is_some_and(|a| a.len() == 2),
+        "{obj}"
+    );
 
     assert_eq!(
-        get(&s, "/api/v3/repos/acme/docs/contents/nope.mdx").await?.0,
+        get(&s, "/api/v3/repos/acme/docs/contents/nope.mdx")
+            .await?
+            .0,
         reqwest::StatusCode::NOT_FOUND
     );
     assert_eq!(
-        get(&s, "/api/v3/repos/acme/docs/contents/pages/index.mdx?ref=missing")
-            .await?
-            .0,
+        get(
+            &s,
+            "/api/v3/repos/acme/docs/contents/pages/index.mdx?ref=missing"
+        )
+        .await?
+        .0,
         reqwest::StatusCode::NOT_FOUND
     );
 
@@ -379,7 +409,10 @@ async fn compare_reports_ahead_diverged_and_identical() -> TestResult {
 
     let binary = by_name("bin.dat").expect("binary");
     assert_eq!(binary["status"], "added");
-    assert!(binary.get("patch").is_none(), "binaries carry no patch: {binary}");
+    assert!(
+        binary.get("patch").is_none(),
+        "binaries carry no patch: {binary}"
+    );
 
     let edited = by_name("pages/index.mdx").expect("edit");
     assert_eq!(edited["status"], "modified");
@@ -418,7 +451,10 @@ async fn compare_reports_ahead_diverged_and_identical() -> TestResult {
     // Pagination: `per_page` bounds both lists.
     let paged = ok(
         &s,
-        &format!("/api/v3/repos/acme/docs/compare/{}...main?per_page=1&page=2", f.base),
+        &format!(
+            "/api/v3/repos/acme/docs/compare/{}...main?per_page=1&page=2",
+            f.base
+        ),
     )
     .await?;
     assert_eq!(paged["commits"].as_array().map(Vec::len), Some(0));
@@ -447,7 +483,11 @@ async fn readme_in_both_representations() -> TestResult {
         b"# docs\n\nread me\n"
     );
 
-    let pinned = ok(&s, &format!("/api/v3/repos/acme/docs/readme?ref={}", f.base)).await?;
+    let pinned = ok(
+        &s,
+        &format!("/api/v3/repos/acme/docs/readme?ref={}", f.base),
+    )
+    .await?;
     assert_eq!(pinned["sha"], readme["sha"]);
 
     let (status, ct, bytes) = get_accept(
@@ -457,7 +497,10 @@ async fn readme_in_both_representations() -> TestResult {
     )
     .await?;
     assert!(status.is_success());
-    assert!(ct.starts_with("application/vnd.github.raw"), "content-type {ct}");
+    assert!(
+        ct.starts_with("application/vnd.github.raw"),
+        "content-type {ct}"
+    );
     assert_eq!(bytes, b"# docs\n\nread me\n");
 
     // A repository with no README at the root is a 404.
@@ -486,7 +529,10 @@ async fn archives_stream_a_real_zip_and_tarball() -> TestResult {
     let f = fixture(&s)?;
 
     let resp = client()
-        .get(format!("{}/api/v3/repos/acme/docs/zipball/main", s.base_url))
+        .get(format!(
+            "{}/api/v3/repos/acme/docs/zipball/main",
+            s.base_url
+        ))
         .send()
         .await?;
     assert!(resp.status().is_success(), "zipball -> {}", resp.status());
@@ -513,7 +559,10 @@ async fn archives_stream_a_real_zip_and_tarball() -> TestResult {
         .output()?;
     let listing = String::from_utf8_lossy(&listing.stdout).to_string();
     let short: String = f.main.chars().take(7).collect();
-    assert!(listing.contains(&format!("docs-{short}/pages/index.mdx")), "{listing}");
+    assert!(
+        listing.contains(&format!("docs-{short}/pages/index.mdx")),
+        "{listing}"
+    );
 
     // The tarball defaults to the default branch when the ref is empty, which
     // is what `onboardingTemplateSeed` sends.
@@ -564,7 +613,10 @@ async fn branch_protection_follows_the_bucket_toggle() -> TestResult {
         .expect("pull_request rule");
     assert_eq!(pr["parameters"]["required_approving_review_count"], 1);
     assert_eq!(pr["parameters"]["require_code_owner_review"], false);
-    assert!(arr.iter().any(|r| r["type"] == "non_fast_forward"), "{rules}");
+    assert!(
+        arr.iter().any(|r| r["type"] == "non_fast_forward"),
+        "{rules}"
+    );
 
     // `protected` is what short-circuits `getBranchProtections`, so it has to
     // move with the toggle or the rules above are never asked for.

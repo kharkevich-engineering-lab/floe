@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use prost::Message;
 use floe_proto::keys;
 use floe_proto::time;
 use floe_proto::v1::{Checkpoint, CheckpointRef, Manifest, RefSnapshot};
 use floe_store::{ObjectStore, PutBody, PutMode, PutOptions, StoreError};
+use prost::Message;
 
 use crate::error::WalError;
 use crate::handle::RepoHandle;

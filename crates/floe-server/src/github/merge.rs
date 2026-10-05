@@ -129,11 +129,13 @@ pub async fn merge_into_ref(
         drop(guard);
         return Err(GhError::not_found(base_ref));
     };
-    if local
-        .is_ancestor(head, &base)
-        .await
-        .map_err(|e| GhError::Internal(format!("merge-base: {e}")))?
-    {
+    // A non-commit head makes `merge-base` exit 128: not up to date; the merge
+    // below then reports it as it did before `is_ancestor` returned `Err` for it.
+    if match local.is_ancestor(head, &base).await {
+        Ok(a) => a,
+        Err(floe_git::GitError::Subprocess { .. }) => false,
+        Err(e) => return Err(GhError::Internal(format!("merge-base: {e}"))),
+    } {
         drop(guard);
         return Ok(Outcome::UpToDate);
     }
@@ -226,6 +228,7 @@ pub async fn publish(
         atomic: true,
         ..Default::default()
     };
+    super::write::enforce_policy(st, handle, &txn).await?;
     handle.local().fill_peeled(&mut txn);
     let meta = HashMap::from([
         ("principal".to_string(), super::auth::USER_LOGIN.to_string()),

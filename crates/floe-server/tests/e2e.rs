@@ -15,6 +15,16 @@
 )]
 mod harness;
 
+/// Held for the whole of every test that changes this process's environment
+/// (`PATH` with a slow `git` shim, `FLOE_TEST_BLOCK_INSTALL_MS`,
+/// `FLOE_TEST_PUBLISH_GAP_MS`). The environment is process-wide and libtest
+/// runs tests in parallel, so without it one timing test runs under another's
+/// injected delays: `blocking_work_in_the_install_path_does_not_stall_requests`
+/// measured a 1191 ms refs request on aarch64 while
+/// `history_pack_install_does_not_stall_the_runtime` ran with its shim
+/// (run 37243055645).
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 type TestResult = anyhow::Result<()>;
 use anyhow::Context;
 use harness::{Server, TestRepo, git, git_in};
@@ -1827,6 +1837,7 @@ async fn partial_clone_tree_zero_and_depth_with_filter() -> TestResult {
     reason = "test mutates process env vars; see the SAFETY comments"
 )]
 async fn history_pack_install_does_not_stall_the_runtime() -> TestResult {
+    let _env = ENV_LOCK.lock().await;
     // git shim: slow only for multi-pack-index.
     let shim = tempfile::tempdir()?;
     let real_git = String::from_utf8(
@@ -1990,6 +2001,7 @@ async fn history_pack_install_does_not_stall_the_runtime() -> TestResult {
     reason = "test mutates process env vars; see the SAFETY comments"
 )]
 async fn blocking_work_in_the_install_path_does_not_stall_requests() -> TestResult {
+    let _env = ENV_LOCK.lock().await;
     // SAFETY: test process; read by the sibling's sync below.
     unsafe { std::env::set_var("FLOE_TEST_BLOCK_INSTALL_MS", "2500") };
     let big = Server::start().await?;
@@ -2730,7 +2742,8 @@ async fn public_lane_serves_only_the_installer_without_auth() -> TestResult {
     for (path, want) in [
         ("/services/public/nothing-else", 404),
         ("/services/public/", 404),
-        ("/services/install.sh", 401), // the old path: not an alias, not open
+        ("/services/public/ca.pem", 404), // self-signed TLS is gone (D59): nothing to pin
+        ("/services/install.sh", 401),    // the old path: not an alias, not open
         ("/services/setup.json", 401),
         ("/t/r/api/refs", 401),
         ("/t/r.git/info/refs?service=git-upload-pack", 401),
@@ -2936,6 +2949,7 @@ async fn stale_cached_credential_is_erased_by_the_401_and_replaced_on_the_next_c
     reason = "test mutates process env vars; see the SAFETY comments"
 )]
 async fn reads_after_an_acknowledged_push_never_show_the_previous_tip() -> TestResult {
+    let _env = ENV_LOCK.lock().await;
     // Widen the gap between the publish's two local-commit steps (refs applied; version advertised)
     // to 150 ms so the reader reliably lands in it: harmless in the right order, the poison window
     // in the wrong one.

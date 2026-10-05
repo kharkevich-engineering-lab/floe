@@ -8,7 +8,8 @@
 //! sha256-verified read). Pushes through floe upload straight into our store,
 //! so the upstream only ever serves history.
 //!
-//! Token: `upstream.token_env` names an environment variable on the maintaining
+//! Token: `Config::upstream_token_env` (`upstream.token_env_by_host` for the URL's
+//! host, else `upstream.token_env`) names an environment variable on the maintaining
 //! host holding the token (settings are published to the bucket, so never the
 //! token itself); sent as HTTP Basic `x-access-token:<token>` (GitHub's LFS
 //! endpoint). Unset = unauthenticated upstream (tests).
@@ -164,11 +165,7 @@ impl Upstream {
             out.insert(
                 o.oid.clone(),
                 UpstreamObject {
-                    size: if o.size > 0 {
-                        o.size
-                    } else {
-                        asked_size
-                    },
+                    size: if o.size > 0 { o.size } else { asked_size },
                     oid: o.oid,
                     href: dl.href,
                     header: dl.header,
@@ -212,14 +209,17 @@ impl Upstream {
         Ok((len, stream))
     }
 
-    /// The upstream token: the value of the environment variable `upstream.token_env` names.
-    #[allow(clippy::unused_async, reason = "awaited by callers in other modules (ops.rs)")]
+    /// The upstream token: the value of the environment variable
+    /// `Config::upstream_token_env` names, resolved through the config
+    /// store's secret aliases first (D61: a token entered in the admin GUI).
+    #[allow(
+        clippy::unused_async,
+        reason = "awaited by callers in other modules (ops.rs)"
+    )]
     pub async fn secret(&self, env_name: &str) -> anyhow::Result<String> {
-        let v = std::env::var(env_name).map_err(|_| {
-            anyhow::anyhow!("upstream.token_env {env_name:?} is not set in this host's environment")
+        let v = floe_config::secret::env_var(env_name).ok_or_else(|| {
+            anyhow::anyhow!("upstream token env var {env_name:?} is not set (or empty) in this host's environment or config store")
         })?;
-        let v = v.trim().to_string();
-        anyhow::ensure!(!v.is_empty(), "upstream.token_env {env_name:?} is empty");
-        Ok(v)
+        Ok(v.trim().to_string())
     }
 }

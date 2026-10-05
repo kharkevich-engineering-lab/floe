@@ -1,0 +1,14 @@
+file lib/util.js lang=javascript flags= size=328 lines=23
+extractor ts-tags/1;cast/2;javascript=0.25.0@b4ab3574
+def #0 function joinAll @7:10-7:17 body=7-9 parent=- in="" flags=0 sig="function joinAll(a, b) {" doc="Joins two segments."
+def #1 class Cache @11:7-11:12 body=11-19 parent=- in="" flags=0 sig="class Cache {" doc=""
+def #2 method get @16:3-16:6 body=16-18 parent=1 in="Cache" flags=0 sig="get(key) {" doc=""
+def #3 function double @21:7-21:13 body=21-21 parent=- in="" flags=0 sig="const double = (x) => x * 2;" doc=""
+ref call join @8:15-19 in=0
+ref type Map @13:20-23 in=1
+ref call get @17:21-24 in=2
+chunk lines=1-2 bytes=0-53 kind=block def=- symbol="" tokens=16 hash=7c6b041c5e3c83ffe3e6422649a11447c6fd8051bd688d49e91feedec46647f3
+chunk lines=4-9 bytes=55-138 kind=function def=0 symbol="joinAll" tokens=22 hash=a2bcce02af3a37347d099c078199d86be150a6325e118587b064baf497f8ddcb
+chunk lines=11-19 bytes=140-251 kind=class def=1 symbol="Cache" tokens=27 hash=ce75fdf46af3ec8f4fe84bc98f90700d4e80a8dfa41829fa6120c677452b503e
+chunk lines=21-21 bytes=253-281 kind=function def=3 symbol="double" tokens=7 hash=468b2bf872b53793bc18f97f9fc5cf227c6e1608d62e3ee868f1f9d0d2252de1
+chunk lines=23-23 bytes=283-327 kind=block def=- symbol="" tokens=13 hash=9647b3f5b7978b7c3c6cb26f6570bc1b2b3fb7dfe2e670d0c1a07b760fd60c41

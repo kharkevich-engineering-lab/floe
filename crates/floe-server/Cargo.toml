@@ -3,6 +3,20 @@ name = "floe-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# The Iceberg writer for the audit tables (D50, `docs/design/github-mirror.md`
+# §C). Off by default: without it the catalog core still compiles (Recorder,
+# rows, cursor), and `catalog.enabled = true` is a fatal startup error.
+catalog = ["floe-catalog/iceberg"]
+# Code intelligence (D52, docs/design/code-intelligence.md). Off by default: the default build
+# is unchanged, and `codeintel.enabled` / `mcp.enabled` in a binary without the feature is a
+# fatal config error naming the flag (`check_build`).
+codeintel = ["dep:floe-codeintel"]
+# The MCP endpoints (D55); implies codeintel.
+mcp = ["codeintel", "dep:rmcp"]
 
 [dependencies]
 humantime.workspace = true
@@ -11,8 +25,11 @@ floe-store.workspace = true
 floe-config.workspace = true
 floe-git.workspace = true
 floe-wal.workspace = true
+floe-mirror.workspace = true
+floe-catalog.workspace = true
 async-trait.workspace = true
 floe-bundle.workspace = true
+floe-tls.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
@@ -60,15 +77,16 @@ reqwest.workspace = true
 base64.workspace = true
 
 bytesize.workspace = true
-rustls.workspace = true
-rustls-pemfile.workspace = true
-rcgen.workspace = true
+ring.workspace = true
 tokio-rustls.workspace = true
 tempfile.workspace = true
 graphql-parser.workspace = true
+floe-codeintel = { workspace = true, optional = true, features = ["extract", "lang-rust", "lang-go", "lang-python", "lang-typescript", "lang-javascript", "lang-java"] }
+rmcp = { workspace = true, optional = true }
+
 [dev-dependencies]
 reqwest.workspace = true
-rcgen = { workspace = true, features = ["x509-parser"] }
+rcgen.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,47 @@
+[package]
+name = "floe-tls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# TLS for the listener (D39, D59): a hot-swappable rustls certificate resolver, `files` mode
+# reload, and ACME (RFC 8555) DNS-01 with state in the bucket. Its own crate so the Pebble
+# integration job compiles this and the store's memory backend, not the whole server.
+
+[dependencies]
+floe-config.workspace = true
+# The memory backend is all this crate needs; the server enables gcs/s3 itself.
+floe-store = { path = "../floe-store", default-features = false }
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+hex.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+ring.workspace = true
+instant-acme.workspace = true
+hickory-resolver.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+rcgen.workspace = true
+tempfile.workspace = true
+tokio-rustls.workspace = true
+futures.workspace = true
+
+[lints]
+workspace = true

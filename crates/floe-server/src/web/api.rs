@@ -26,10 +26,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use futures::StreamExt;
-use serde::Serialize;
 use floe_store::{GetOptions, ObjectStore, Prefixed, PutBody, PutMode};
 use floe_wal::{ObjectAccess, RepoHandle, Reporter};
+use futures::StreamExt;
+use serde::Serialize;
 
 use crate::sse::Rendered;
 use crate::web::objects::{CommitMeta, Remote};
@@ -66,7 +66,10 @@ struct Resolved {
     kind: &'static str,
 }
 #[derive(Serialize, Clone)]
-#[allow(clippy::struct_field_names, reason = "field names are the JSON wire contract")]
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names are the JSON wire contract"
+)]
 struct Commit {
     sha: String,
     parents: Vec<String>,
@@ -149,7 +152,10 @@ struct Readme {
     contents: String,
 }
 #[derive(Serialize)]
-#[allow(clippy::struct_field_names, reason = "field names are the JSON wire contract")]
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names are the JSON wire contract"
+)]
 struct Commits {
     #[serde(rename = "ref")]
     ref_name: String,
@@ -466,7 +472,7 @@ async fn instance_info(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     st.auth.require_read(&headers).await.map_err(auth_err)?;
-    let mut r = axum::Json(crate::instance::info(&st.cfg)).into_response();
+    let mut r = axum::Json(crate::instance::info_for(&st)).into_response();
     r.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(r)
@@ -925,8 +931,7 @@ async fn render_tree(
         .and_then(|b| parse_commits(&b).into_iter().next());
     let mut readme = None;
     if let Some(e) = readme_entry(&entries)
-        && let Ok(content) =
-            git(local, vec!["cat-file".into(), "blob".into(), e.sha.clone()]).await
+        && let Ok(content) = git(local, vec!["cat-file".into(), "blob".into(), e.sha.clone()]).await
         && let Ok(s) = String::from_utf8(content)
     {
         readme = Some(Readme {

@@ -31,6 +31,27 @@ export type {
 } from "../sdk/repos";
 import type { RefInfo, OpEvent, OpSpec, OpRecord, Tasks } from "../sdk/repos";
 export type { SettingsDescribe, SettingsValidation, SettingsHistory, StrategyInfo, SettingsField, Policy, PolicyValidation, PolicyDryRun, RepoSettings } from "../sdk/repos";
+export type {
+  AdminConfig,
+  AdminOverview,
+  CatalogStatus,
+  CatalogTest,
+  ConfigDiffEntry,
+  ConfigDocument,
+  ConfigFieldError,
+  ConfigHistoryEntry,
+  ConfigRevision,
+  CredentialTest,
+  InstanceStatus,
+  JsonSchema,
+  MirrorPreview,
+  MirrorRepo,
+  MirrorStatus,
+  PublishResult,
+  SecretValue,
+  TlsStatus,
+  ValidationResult,
+} from "../sdk/repos";
 
 /** Kept for callers: the SDK's error class under the UI's historical name. */
 export const ApiError = ReposError;
@@ -98,6 +119,12 @@ export const api = {
   overview: (repo: string) => authRedirect(client.repo(repo).overview() as unknown as Promise<Overview>),
   /** What is happening to this repo on the instance that answers (API.md §2c). Never cached. */
   tasks: (repo: string): Promise<Tasks> => client.repo(repo).tasks(),
+  /** Who is signed in (`admin` gates the admin area). */
+  me: () => authRedirect(client.me()),
+  /** D60–D62: the admin area. Admin principals only; never cached. */
+  admin: client.admin,
+  /** TLS certificate status (admin, D59). */
+  tls: () => client.tls(),
   /** D24 settings + policy (Settings tab). Writes are never cached. */
   settings: (repo: string) => client.repo(repo).settings,
   policy: (repo: string) => client.repo(repo).policy,
@@ -132,9 +159,6 @@ export interface SetupRecipes {
   /** The repository's unfiltered bundle list URL. */
   bundle_list: string;
   setup_text: string;
-  /** Self-signed TLS: the CA to pin and the one-liner that does it (null behind a public certificate). */
-  ca_url: string | null;
-  trust: string | null;
 }
 
 export interface BundleInfo {
@@ -155,6 +179,8 @@ export interface BundleInfo {
 }
 export interface Overview {
   repo: string;
+  /** `repo.description` from the repository's settings (the GitHub mirror writes `Mirror of <url>`). */
+  description?: string;
   instance: { kind: string; name: string; revision: string; instance: string; version: string; roles: string[]; disk: string; shape: string; cpus: number; memory_bytes: number };
   clone_url: string;
   setup: string;

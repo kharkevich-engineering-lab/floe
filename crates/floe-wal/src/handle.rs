@@ -7,12 +7,12 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use parking_lot::{Mutex as PLMutex, RwLock as PLRwLock};
-use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock, mpsc};
-use tracing::Instrument;
 use floe_git::{LocalRepo, RepoId};
 use floe_proto::v1::Manifest;
 use floe_store::{Prefixed, Version};
+use parking_lot::{Mutex as PLMutex, RwLock as PLRwLock};
+use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock, mpsc};
+use tracing::Instrument;
 
 use crate::error::WalError;
 use crate::progress::{ProgressRx, ProgressTx, Reporter};
@@ -418,6 +418,13 @@ impl RepoHandle {
             self.spawn_pack_prefetch();
         }
         Ok(guard)
+    }
+
+    /// [`sync_refs`] without the background pack prefetch: for loops that only
+    /// read refs and settings (upstream follow's probe) and must not
+    /// re-materialize an evicted repository's packs every tick.
+    pub async fn sync_refs_only(&self) -> Result<crate::sync::ReadGuard<'_>, WalError> {
+        self.sync_level(SyncLevel::Refs).await
     }
 
     /// Whether a refs-level sync should pull the serving copy in the background:
@@ -891,11 +898,9 @@ impl RepoHandle {
         .await;
 
         // Read manifest fresh
-        let Some((meta, manifest)) = crate::store_proto::get_message::<Manifest>(
-            &self.store,
-            floe_proto::keys::MANIFEST,
-        )
-        .await?
+        let Some((meta, manifest)) =
+            crate::store_proto::get_message::<Manifest>(&self.store, floe_proto::keys::MANIFEST)
+                .await?
         else {
             return Err(WalError::NotFound);
         };
@@ -1069,7 +1074,26 @@ impl RepoHandle {
         self.cfg
             .with_settings(toml)
             .map_err(|e| WalError::Invalid(format!("{e:#}")))?;
-        crate::publish::publish_settings_impl(self, toml, author, message).await
+        crate::publish::publish_settings_impl(self, toml, author, message, None).await
+    }
+
+    /// [`publish_settings`](Self::publish_settings) as a compare-and-set on the
+    /// settings revision: after the refs sync, a manifest whose
+    /// `settings.revision` (0 when none) is not `expected_revision` is
+    /// [`WalError::SettingsConflict`], nothing published and no retry. For
+    /// read-modify-write callers (the GitHub mirror) racing a human `PUT`.
+    pub async fn publish_settings_if(
+        &self,
+        toml: &str,
+        author: &str,
+        message: &str,
+        expected_revision: u64,
+    ) -> Result<u64, WalError> {
+        self.cfg
+            .with_settings(toml)
+            .map_err(|e| WalError::Invalid(format!("{e:#}")))?;
+        crate::publish::publish_settings_impl(self, toml, author, message, Some(expected_revision))
+            .await
     }
 
     /// Write checkpoint at current head.
@@ -1201,10 +1225,7 @@ impl RepoHandle {
         let cp = m.checkpoint.as_ref()?;
         let from_ref = CheckpointTimes {
             created_at: cp.created_at.as_ref().map(floe_proto::time::to_system),
-            first_state_at: cp
-                .first_state_at
-                .as_ref()
-                .map(floe_proto::time::to_system),
+            first_state_at: cp.first_state_at.as_ref().map(floe_proto::time::to_system),
             as_of: cp.as_of.as_ref().map(floe_proto::time::to_system),
         };
         if from_ref.created_at.is_some() {

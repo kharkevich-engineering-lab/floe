@@ -107,6 +107,7 @@ impl From<GhError> for GqlError {
                 }
             }
             GhError::BadRequest(m) => GqlError::bad_request(m),
+            GhError::Forbidden(m) => GqlError::new("FORBIDDEN", m),
             GhError::Unavailable(m) | GhError::Internal(m) => GqlError::internal(m),
         }
     }

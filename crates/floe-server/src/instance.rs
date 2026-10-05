@@ -26,6 +26,10 @@ pub struct InstanceInfo {
     pub shape: String,
     pub cpus: usize,
     pub memory_bytes: u64,
+    /// In-process TLS certificate, public facts only (`mode`, `loaded`, `not_after`,
+    /// `issuer`; D59). Absent when TLS is off. The admin API `/api/v1/tls` has the rest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<serde_json::Value>,
 }
 
 fn cgroup_memory_max() -> Option<u64> {
@@ -101,7 +105,10 @@ fn gce_machine_type() -> Option<String> {
     })
     .clone()
 }
-#[allow(clippy::cast_precision_loss, reason = "display value; precision loss above 2^52 is irrelevant")]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "display value; precision loss above 2^52 is irrelevant"
+)]
 fn gib(b: u64) -> String {
     let g = b as f64 / (1u64 << 30) as f64;
     if g >= 10.0 {
@@ -159,9 +166,8 @@ pub fn info(cfg: &floe_config::Config) -> InstanceInfo {
             .map(|r| format!("{r:?}").to_lowercase())
             .collect()
     };
-    let cpus = cgroup_cpus().unwrap_or_else(|| {
-        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
-    });
+    let cpus = cgroup_cpus()
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
     let memory_bytes = cgroup_memory_max().or_else(meminfo_total).unwrap_or(0);
     let shape = match kind {
         "ssd" => gce_machine_type().map_or_else(
@@ -182,7 +188,15 @@ pub fn info(cfg: &floe_config::Config) -> InstanceInfo {
         shape,
         cpus,
         memory_bytes,
+        tls: None,
     }
+}
+
+/// [`info`] plus this process's TLS certificate facts.
+pub fn info_for(state: &crate::AppState) -> InstanceInfo {
+    let mut i = info(&state.cfg);
+    i.tls = state.tls.as_ref().map(|t| t.status().public());
+    i
 }
 
 /// Value of the `Server` response header: who answered, at a glance —

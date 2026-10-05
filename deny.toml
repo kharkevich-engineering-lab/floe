@@ -1,0 +1,65 @@
+# cargo-deny policy (`just deny`). CI runs it on a PR that touches Cargo.lock or this file, and
+# nightly (new advisories land without any change here). https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Every feature, so the `catalog` build the release image ships (arrow/parquet/iceberg) is in
+# the graph too, not only the default build.
+all-features = true
+
+[advisories]
+# RustSec: vulnerabilities, unsoundness and yanked crates fail; so does an unmaintained crate
+# we depend on directly. An exception goes in `ignore` with the advisory id and the reason.
+unmaintained = "workspace"
+yanked = "deny"
+# What the first run found, each tracked in #10 with its fix. Delete an entry when it is fixed;
+# never add one without a reason and an issue.
+ignore = [
+    { id = "RUSTSEC-2026-0258", reason = "h2 0.4.15 (cargo update) and 0.3.27 (aws-smithy legacy stack), #10" },
+    { id = "RUSTSEC-2026-0285", reason = "rustls 0.23.43, fixed by cargo update to >= 0.23.45, #10" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39 needs a dependent bump to >= 0.41, #10" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39 needs a dependent bump to >= 0.41, #10" },
+    { id = "RUSTSEC-2023-0071", reason = "rsa: no fixed release exists, #10" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained, direct dependency of floe-server, #10" },
+    { crate = "bisync@0.3.0", reason = "yanked, fixed by cargo update, #10" },
+    { crate = "chacha20@0.10.1", reason = "yanked, fixed by cargo update, #10" },
+]
+
+[licenses]
+# The licences actually in the tree (every crate's SPDX expression, Cargo.lock as of this
+# file). An OR-expression passes when one of its arms is listed. Adding a licence is a decision:
+# put it here with the crate that needs it.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",          # brotli, encoding_rs, matchit, aws-lc-sys, ...
+    "ISC",                   # ring, rustls-webpki, untrusted, simple_asn1, aws-lc-rs
+    "Zlib",                  # foldhash, zlib-rs
+    "Unicode-3.0",           # icu_*, unicode-ident
+    "CDLA-Permissive-2.0",   # webpki-roots, webpki-root-certs (Mozilla's CA bundle)
+    "MPL-2.0",               # uluru (file-level copyleft; used unmodified)
+    "CC0-1.0",               # tiny-keccak
+]
+confidence-threshold = 0.9
+
+# The workspace's own crates are MIT and unpublished (`publish = false`); do not lint them.
+[licenses.private]
+ignore = true
+
+[bans]
+# Several versions of one crate cost compile time, not correctness: warn, never fail.
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between the workspace's (unpublished, `publish = false`) crates carry no
+# version requirement; that is not a wildcard.
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+# crates.io only: no git dependencies, no other registries, until one is a reviewed decision.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

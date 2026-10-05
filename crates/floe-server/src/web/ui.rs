@@ -8,11 +8,11 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use floe_proto::v1::{Checkpoint, EntryKind};
+use floe_store::{GetOptions, GetResult, ObjectStore};
 use prost::Message;
 use rust_embed::RustEmbed;
 use serde::Serialize;
-use floe_proto::v1::{Checkpoint, EntryKind};
-use floe_store::{GetOptions, GetResult, ObjectStore};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -58,6 +58,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/services/setup.json", get(setup_json))
         // "API" docs page (SPA route); `/api/v1` is the JSON discovery document (D20).
         .route("/api", get(index_route))
+        // D62: the admin area (the SPA checks `admin` on /api/v1/me; the API enforces it).
+        .route("/_admin", get(index_route))
+        .route("/_admin/{*rest}", get(index_route))
         .route("/{owner}", get(index_route))
         .route(
             "/{owner}/{repo}",
@@ -93,9 +96,6 @@ pub fn router(state: Arc<AppState>) -> Router {
 pub fn public_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/services/public/install.sh", get(install_sh))
-        // The certificate this process presents (self_signed/files, D39): public
-        // material, what the installer pins for git. 404 behind an edge (h2c).
-        .route("/services/public/ca.pem", get(ca_pem))
         // Nothing else lives on the public lane: explicit 404 so no gated route can ever be
         // reached through it by accident.
         .route(
@@ -103,25 +103,6 @@ pub fn public_router(state: Arc<AppState>) -> Router {
             get(|| async { StatusCode::NOT_FOUND }),
         )
         .with_state(state)
-}
-
-async fn ca_pem(State(state): State<Arc<AppState>>) -> Response {
-    match &state.tls {
-        Some(t) => (
-            [
-                (header::CONTENT_TYPE, "application/x-pem-file"),
-                (header::CACHE_CONTROL, "no-cache"),
-                (header::CONTENT_DISPOSITION, "inline; filename=\"ca.pem\""),
-            ],
-            t.cert_pem.clone(),
-        )
-            .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            "this host does not terminate TLS itself",
-        )
-            .into_response(),
-    }
 }
 
 async fn root(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
@@ -374,6 +355,10 @@ fn content_type(path: &str) -> &'static str {
 #[derive(Serialize)]
 struct Overview {
     repo: String,
+    /// `repo.description` from the settings document (`floe_config::RepoMeta`);
+    /// the GitHub mirror sets it to `Mirror of <url>`. Absent when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     /// Which instance rendered this page (kind, name, shape, build).
     instance: crate::instance::InstanceInfo,
     clone_url: String,
@@ -583,8 +568,7 @@ async fn overview(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     state.auth.require_read(&headers).await.map_err(auth_err)?;
-    let id =
-        floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
+    let id = floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
     let handle = state.registry.open(&id).await.map_err(wal_err)?;
     // read_log performs its own freshness check; acquire the read guard only
     // after it has completed because read_log may need the write lock.
@@ -973,9 +957,15 @@ async fn overview(
             orphaned,
         }
     };
+    let description = manifest
+        .settings
+        .as_ref()
+        .and_then(|s| floe_config::RepoMeta::from_settings(&s.toml).ok())
+        .and_then(|m| m.description);
     let body = Overview {
         repo: id.to_string(),
-        instance: crate::instance::info(&state.cfg),
+        description,
+        instance: crate::instance::info_for(&state),
         clone_url,
         setup,
         install: recipes.install.clone(),
@@ -1052,8 +1042,7 @@ async fn ops_list(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     state.auth.require_read(&headers).await.map_err(auth_err)?;
-    let id =
-        floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
+    let id = floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
     let body = OpsInfo {
         available: crate::ops::OPS.to_vec(),
         recent: state.registry.tasks().recent(&id.to_string()),
@@ -1087,8 +1076,7 @@ async fn ops_start(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let principal = state.auth.require_write(&headers).await.map_err(auth_err)?;
-    let id =
-        floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
+    let id = floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
     // Make sure the repo exists before spawning anything.
     state.registry.open(&id).await.map_err(wal_err)?;
     tracing::info!(repo = %id, op = %op, by = %principal.name, ?params, "ops.start");
@@ -1111,8 +1099,7 @@ async fn tasks_list(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     state.auth.require_read(&headers).await.map_err(auth_err)?;
-    let id =
-        floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
+    let id = floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
     let tasks = state.registry.tasks();
     let body = serde_json::json!({
         "hostname": floe_store::coord::instance_id(),
@@ -1138,8 +1125,7 @@ async fn task_stream(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     state.auth.require_read(&headers).await.map_err(auth_err)?;
-    let id =
-        floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
+    let id = floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
     let task = state
         .registry
         .tasks()

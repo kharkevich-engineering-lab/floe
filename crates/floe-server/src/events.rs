@@ -9,9 +9,9 @@
 //! `old`/`new` are always full zero OIDs on create/delete, never empty;
 //! dedup key = `(repo, _floe.seq, ref_name)`; order by `_floe.seq`.
 
-use serde::Serialize;
 use floe_git::RepoId;
 use floe_proto::v1::{EntryKind, LogEntry};
+use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

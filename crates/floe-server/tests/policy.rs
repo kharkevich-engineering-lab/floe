@@ -147,3 +147,96 @@ async fn protected_main_rejects_force_and_delete() -> TestResult {
     git_in(&src, &["push", "--force", "origin", "other:main"])?;
     Ok(())
 }
+
+/// D48: `refs/archive/*` is upstream follow's; with no policy file at all a
+/// pusher can neither forge nor delete an archive name (built-in rule
+/// `archive-immutable`), while every other ref stays allow-all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn archive_refs_are_immutable_without_a_policy() -> TestResult {
+    let server = Server::start().await?;
+    server.put_repo("t", "r").await?;
+
+    let src = TestRepo::synthetic(1, 1)?;
+    git_in(&src, &["commit", "--allow-empty", "-m", "a"])?;
+    git_in(&src, &["branch", "-M", "main"])?;
+    git_in(
+        &src,
+        &["remote", "add", "origin", &server.repo_url("t", "r")],
+    )?;
+    git_in(&src, &["push", "origin", "main"])?;
+
+    let forge = Command::new("git")
+        .current_dir(&*src)
+        .args([
+            "push",
+            "origin",
+            "main:refs/archive/1791072000/refs/heads/main",
+        ])
+        .output()?;
+    let stderr = String::from_utf8_lossy(&forge.stderr);
+    assert!(
+        !forge.status.success(),
+        "creating an archive ref succeeded: {stderr}"
+    );
+    assert!(
+        stderr.contains("archive-immutable"),
+        "stderr should name the built-in rule: {stderr}"
+    );
+    let ls = Command::new("git")
+        .current_dir(&*src)
+        .args(["ls-remote", "origin", "refs/archive/*"])
+        .output()?;
+    assert!(ls.status.success());
+    assert!(
+        ls.stdout.is_empty(),
+        "nothing was published under refs/archive/"
+    );
+
+    // Everything else is still allow-all.
+    git_in(&src, &["push", "origin", "main:refs/heads/topic"])?;
+    git_in(&src, &["push", "origin", ":refs/heads/topic"])?;
+    Ok(())
+}
+
+/// Per-repo policy and settings writes from an editor are conditional: a
+/// document another admin changed meanwhile is a 409, never overwritten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_and_settings_writes_are_conditional() -> TestResult {
+    let server = Server::start().await?;
+    server.put_repo("t", "r").await?;
+    let client = reqwest::Client::new();
+    let url = format!("{}/t/r/policy", server.base_url);
+
+    let got = client.get(&url).send().await?;
+    let etag = got.headers().get("etag").unwrap().to_str()?.to_string();
+    assert_eq!(etag, "\"none\"");
+    let put = |if_match: String| {
+        client
+            .put(&url)
+            .header("content-type", "application/json")
+            .header("if-match", if_match)
+            .body(PROTECT_MAIN)
+            .send()
+    };
+    assert_eq!(put(etag.clone()).await?.status(), 204);
+    // The same (now stale) ETag again: someone else's write in between.
+    assert_eq!(put(etag).await?.status(), 409);
+    let fresh = client.get(&url).send().await?;
+    let etag = fresh.headers().get("etag").unwrap().to_str()?.to_string();
+    assert_ne!(etag, "\"none\"");
+    assert_eq!(put(etag).await?.status(), 204);
+
+    let settings = format!("{}/t/r/api/settings", server.base_url);
+    let put_settings = |base: u64| {
+        client
+            .put(format!("{settings}?base_revision={base}"))
+            .header("content-type", "application/toml")
+            .body("[compaction]\nenabled = false\n")
+            .send()
+    };
+    let first = put_settings(0).await?;
+    assert_eq!(first.status(), 200, "{}", first.text().await?);
+    assert_eq!(put_settings(0).await?.status(), 409, "stale base revision");
+    assert_eq!(put_settings(1).await?.status(), 200);
+    Ok(())
+}

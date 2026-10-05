@@ -11,10 +11,10 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 
-use gix_hash::ObjectId;
-use gix_object::Kind;
 use floe_wal::remote::Obj;
 use floe_wal::{RemotePacks, Reporter};
+use gix_hash::ObjectId;
+use gix_object::Kind;
 
 use crate::error::ApiError;
 
@@ -234,14 +234,18 @@ impl Remote {
         for (i, seg) in segs.iter().enumerate() {
             let entries = self.tree_entries(&cur).await?;
             let Some(e) = entries.into_iter().find(|e| e.name == seg.as_bytes()) else {
-                return Err(not_found(format!("path '{path}' does not exist in {commit}")));
+                return Err(not_found(format!(
+                    "path '{path}' does not exist in {commit}"
+                )));
             };
             cur = e.oid;
             mode = e.mode;
             if e.mode.is_tree() {
                 self.fault(&cur).await?;
             } else if i + 1 < segs.len() {
-                return Err(not_found(format!("path '{path}' does not exist in {commit}")));
+                return Err(not_found(format!(
+                    "path '{path}' does not exist in {commit}"
+                )));
             } else if e.mode.is_blob() {
                 // blob: caller decides whether to fault (size check)
             }

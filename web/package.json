@@ -6,9 +6,10 @@
     "dev": "vite",
     "lint": "oxlint",
     "typecheck": "tsc --noEmit",
-    "build": "oxlint --deny-warnings && tsc --noEmit && vite build && vite build -c vite.sdk.config.ts",
+    "build": "oxlint --deny-warnings && tsc --noEmit && node --experimental-strip-types --test src/admin/schema-form.test.ts src/admin/toml-lines.test.ts && vite build && vite build -c vite.sdk.config.ts",
     "preview": "vite preview",
-    "build:sdk": "vite build -c vite.sdk.config.ts"
+    "build:sdk": "vite build -c vite.sdk.config.ts",
+    "test": "node --experimental-strip-types --test src/admin/schema-form.test.ts src/admin/toml-lines.test.ts"
   },
   "dependencies": {
     "@pierre/diffs": "^1.3.5",

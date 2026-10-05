@@ -10,9 +10,9 @@
 #
 # The image carries git (upload-pack, repack, bundle, index-pack run as subprocesses),
 # git-lfs, CA certificates and tini. Config comes from /etc/floe/floe.toml or
-# FLOE__SECTION__KEY environment overrides; the local cache (materialized repositories,
-# a self-signed TLS cert) lives under /var/lib/floe and can be wiped at any time — the
-# bucket is the only durable state. flake.nix provides separate standalone floe packaging.
+# FLOE__SECTION__KEY environment overrides; the local cache (materialized repositories)
+# lives under /var/lib/floe and can be wiped at any time — the bucket is the only durable
+# state (with [server.tls] mode = "acme", the certificate too). flake.nix provides separate standalone floe packaging.
 
 # ---- 1. web UI (embedded into the binary at compile time) ---------------------------
 FROM docker.io/library/node:24-bookworm-slim AS web
@@ -37,9 +37,12 @@ ENV FLOE_BUILD_SHA=${FLOE_BUILD_SHA}
 # workspace version from Cargo.toml. `floe --version` prints "<version> (<sha>)".
 ARG FLOE_VERSION=
 ENV FLOE_VERSION=${FLOE_VERSION}
+# `--features catalog` (D50): the shipped binaries can write the Iceberg audit tables, so
+# `[catalog] enabled = true` works on the image and the release tarballs instead of being
+# the fatal startup error a featureless build answers with. Off it costs nothing at runtime.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p floe-cli \
+    cargo build --release --locked -p floe-cli --features catalog \
     && install -D target/release/floe /out/bin/floe \
     && install -D target/release/floe-server /out/bin/floe-server
 

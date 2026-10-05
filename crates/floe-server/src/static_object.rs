@@ -260,8 +260,7 @@ pub async fn serve(
         base_headers(&mut resp, &meta, &opts);
         let h = resp.headers_mut();
         let hv = |s: &str| {
-            HeaderValue::from_str(s)
-                .map_err(|e| ApiError::Internal(format!("accel header: {e}")))
+            HeaderValue::from_str(s).map_err(|e| ApiError::Internal(format!("accel header: {e}")))
         };
         h.insert("x-accel-redirect", HeaderValue::from_static(ACCEL_LOCATION));
         // Where and how the edge fetches. nginx keeps the upstream headers of this answer
@@ -271,10 +270,7 @@ pub async fn serve(
             h.insert("x-floe-store-authorization", hv(auth)?);
         }
         // The edge's cache key: the object, not the (possibly presigned, changing) URL.
-        h.insert(
-            "x-floe-store-key",
-            hv(&floe_store::util::encode_path(key))?,
-        );
+        h.insert("x-floe-store-key", hv(&floe_store::util::encode_path(key))?);
         h.insert("x-floe-accel", HeaderValue::from_static(store.backend()));
         // nginx keeps only Content-Type/Disposition, Accept-Ranges, Cache-Control and Expires
         // of this answer across the internal redirect and would otherwise hand the client
@@ -326,12 +322,9 @@ pub async fn serve(
                         (StatusCode::PARTIAL_CONTENT, Body::from_stream(body)).into_response();
                     base_headers(&mut resp, &meta, &opts);
                     let h = resp.headers_mut();
-                    if let Ok(v) = HeaderValue::from_str(&format!(
-                        "bytes {}-{}/{}",
-                        r.start,
-                        r.end - 1,
-                        total
-                    )) {
+                    if let Ok(v) =
+                        HeaderValue::from_str(&format!("bytes {}-{}/{}", r.start, r.end - 1, total))
+                    {
                         h.insert(header::CONTENT_RANGE, v);
                     }
                     h.insert(header::CONTENT_LENGTH, HeaderValue::from(r.end - r.start));

@@ -140,7 +140,34 @@ export interface RepoSummary {
 export interface Me {
   principal: string;
   write: boolean;
+  /** May use `/api/v1/admin/*`, delete repositories, and change settings/policy (D24, D62). */
+  admin: boolean;
   anonymous: boolean;
+}
+/** `tls` (admin): the certificate this host presents when it terminates TLS itself (D59). */
+export interface TlsStatus {
+  /** `off` | `files` | `acme`. */
+  mode: "off" | "files" | "acme";
+  /** Configured names (`acme`) or the certificate's SANs (`files`). */
+  domains: string[];
+  loaded: boolean;
+  /** RFC 3339. */
+  not_before: string | null;
+  /** RFC 3339. */
+  not_after: string | null;
+  issuer: string | null;
+  sans: string[];
+  fingerprint: string | null;
+  /** `files:<path>` or `bucket:<object>`. */
+  source: string | null;
+  /** ACME directory URL. */
+  directory: string | null;
+  last_renewal_at: string | null;
+  last_attempt_at: string | null;
+  last_error: string | null;
+  failures: number;
+  next_attempt_at: string | null;
+  renewal_due: boolean;
 }
 export interface TaskProgress {
   label: string;
@@ -224,6 +251,8 @@ export class ReposError extends Error {
     public status: number,
     message: string,
     public url = "",
+    /** The parsed JSON error body, when the server sent one (e.g. `{error, errors[]}` from the admin API). */
+    public details?: unknown,
   ) {
     super(message);
     this.name = "ReposError";
@@ -338,6 +367,11 @@ export class ReposClient {
     return this.json<Me>("me", opts);
   }
 
+  /** The host's TLS certificate status (admin; 403 → ReposError). */
+  tls(opts?: CallOptions) {
+    return this.json<TlsStatus>("tls", opts);
+  }
+
   /**
    * Browser lane: make sure a session exists, opening the sign-in popup if
    * needed. Resolves true when signed in. Safe to call pre-emptively from a
@@ -399,6 +433,50 @@ export class ReposClient {
     repos: (owner: string, opts?: CallOptions) => this.json<string[]>(`owners/${enc(owner)}/repos`, opts),
   };
 
+  // ---- admin (D60–D62; an admin principal) ----------------------------------------
+
+  /** The admin area: the runtime config document and its history, the GitHub mirror, the catalog. */
+  readonly admin = {
+    config: {
+      /** The current document (secrets redacted); `revision: 0` = none yet. */
+      get: (opts?: CallOptions) => this.json<AdminConfig>("admin/config", opts),
+      /** Publish a whole document. `base_revision` makes a concurrent change a 409. Invalid = 400 with `details.errors`. */
+      put: (document: ConfigDocument, o: { base_revision?: number; message?: string } = {}, opts?: CallOptions) =>
+        this.json<PublishResult>("admin/config", opts, jsonBody("PUT", { document, ...o })),
+      /** Check without publishing: errors, the diff against the current revision, keys that need a restart. */
+      validate: (document: ConfigDocument, opts?: CallOptions) => this.json<ValidationResult>("admin/config/validate", opts, jsonBody("POST", { document })),
+      /** JSON Schema of the document (with `x-floe` annotations: format, group, live). */
+      schema: (opts?: CallOptions) => this.json<JsonSchema>("admin/config/schema", opts),
+      /** Revisions, newest first (`before` pages). */
+      history: (q: { before?: number; n?: number } = {}, opts?: CallOptions) => this.json<{ entries: ConfigHistoryEntry[] }>(`admin/config/history${qs(q)}`, opts),
+      /** One revision with its (redacted) document. 410 when the bucket no longer keeps it. */
+      revision: (n: number, opts?: CallOptions) => this.json<ConfigRevision>(`admin/config/revisions/${n}`, opts),
+      /** Publish revision `n`'s document as a new revision. */
+      rollback: (revision: number, o: { base_revision?: number; message?: string } = {}, opts?: CallOptions) =>
+        this.json<PublishResult>("admin/config/rollback", opts, jsonBody("POST", { revision, ...o })),
+    },
+    /** Revision, instances, mirror and catalog at a glance. */
+    overview: (opts?: CallOptions) => this.json<AdminOverview>("admin/overview", opts),
+    mirror: {
+      status: (opts?: CallOptions) => this.json<MirrorStatus>("admin/mirror", opts),
+      /** Selection of the known repositories under a candidate section; `discover` runs a real dry-run pass. */
+      preview: (section: Record<string, unknown> | null, o: { discover?: boolean } = {}, opts?: CallOptions) =>
+        this.json<MirrorPreview>("admin/mirror/preview", opts, jsonBody("POST", { section, discover: o.discover ?? false })),
+      /** `GET /user` at GitHub: a freshly typed `{value}`, or (no token) the stored one — only to the configured `api_url`. Env references are refused. */
+      test: (o: { api_url?: string; token?: SecretValue } = {}, opts?: CallOptions) => this.json<CredentialTest>("admin/mirror/test", opts, jsonBody("POST", o)),
+      /** Ask the mirror loop for a pass now. */
+      sync: (opts?: CallOptions) => this.json<{ ok: boolean; message: string }>("admin/mirror/sync", opts, jsonBody("POST", {})),
+      /** Pause = an exact `owner/name` in `github_mirror.exclude` (a config change); resume removes it. */
+      pause: (full_name: string, opts?: CallOptions) => this.json<PublishResult>("admin/mirror/pause", opts, jsonBody("POST", { full_name })),
+      resume: (full_name: string, opts?: CallOptions) => this.json<PublishResult>("admin/mirror/resume", opts, jsonBody("POST", { full_name })),
+    },
+    catalog: {
+      status: (opts?: CallOptions) => this.json<CatalogStatus>("admin/catalog", opts),
+      /** Iceberg REST `GET /v1/config` with the configured (or a candidate section's) connection. */
+      test: (section?: Record<string, unknown>, opts?: CallOptions) => this.json<CatalogTest>("admin/catalog/test", opts, jsonBody("POST", { section })),
+    },
+  };
+
   /** A handle on `owner/name` (no request is made). */
   repo(fullName: string): RepoClient;
   repo(owner: string, name: string): RepoClient;
@@ -420,7 +498,7 @@ export class ReposClient {
       signal: opts.signal,
     });
     if (r.status === 204) return undefined as T;
-    if (!r.ok) throw new ReposError(r.status, (await r.text()).trim() || r.statusText, url);
+    if (!r.ok) throw await errorFrom(r, url);
     const ct = r.headers.get("content-type") ?? "";
     if (!ct.startsWith("text/event-stream")) {
       return ct.startsWith("application/json") ? ((await r.json()) as T) : ((await r.text()) as unknown as T);
@@ -529,6 +607,21 @@ export class ReposClient {
     if (!result) throw new ReposError(502, "stream ended without a result", url);
     return result.value;
   }
+}
+
+/** A failed response as a `ReposError`: a JSON `{error}` body becomes the message and `details`. */
+async function errorFrom(r: Response, url: string): Promise<ReposError> {
+  const text = (await r.text()).trim();
+  if ((r.headers.get("content-type") ?? "").startsWith("application/json")) {
+    try {
+      const body: unknown = JSON.parse(text);
+      const msg = typeof body === "object" && body !== null && typeof (body as { error?: unknown }).error === "string" ? (body as { error: string }).error : text;
+      return new ReposError(r.status, msg || r.statusText, url, body);
+    } catch {
+      // fall through: not JSON after all
+    }
+  }
+  return new ReposError(r.status, text || r.statusText, url);
 }
 
 /** Parse a `text/event-stream` body, dispatching each event as it completes. */
@@ -688,10 +781,18 @@ export class RepoClient {
   readonly policy = {
     /** The push policy document (docs/POLICY.md); missing = `{}`-equivalent allow-all. */
     get: (opts?: CallOptions) => this.client.json<Policy>(`${this.p}/policy`, opts),
-    put: async (policy: Policy, opts?: CallOptions): Promise<void> => {
+    /** The document with the version it was read at (its `ETag`), for a conditional `put`. */
+    getVersioned: async (opts?: CallOptions): Promise<{ policy: Policy; version: string }> => {
+      const url = this.client.url(`${this.p}/policy`);
+      const r = await this.client.fetch(url, { headers: { Accept: "application/json", ...opts?.headers }, signal: opts?.signal });
+      if (!r.ok) throw new ReposError(r.status, (await r.text()).trim() || r.statusText, url);
+      return { policy: (await r.json()) as Policy, version: r.headers.get("etag") ?? "" };
+    },
+    /** Save; with `version` (from `getVersioned`) a policy changed meanwhile is a 409, never overwritten. */
+    put: async (policy: Policy, opts?: CallOptions, version?: string): Promise<void> => {
       await this.client.json<unknown>(`${this.p}/policy`, opts, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(version ? { "If-Match": version } : {}) },
         body: JSON.stringify(policy),
       });
     },
@@ -718,9 +819,9 @@ export class RepoClient {
   readonly settings = {
     /** The settings document (`revision: 0` = none). */
     get: (opts?: CallOptions) => this.client.json<RepoSettings>(`${this.p}/settings`, opts),
-    /** Publish a new document (validated server-side; 400 with the reason on failure). */
-    put: (toml: string, message = "", opts?: CallOptions) =>
-      this.client.json<{ revision: number }>(`${this.p}/settings${message ? `?message=${enc(message)}` : ""}`, opts, {
+    /** Publish a new document (validated server-side; 400 with the reason on failure). With `base_revision`, a document changed meanwhile is a 409. */
+    put: (toml: string, message = "", opts?: CallOptions, base_revision?: number) =>
+      this.client.json<{ revision: number }>(`${this.p}/settings${qs({ message, base_revision })}`, opts, {
         method: "PUT",
         headers: { "Content-Type": "application/toml" },
         body: toml,
@@ -826,6 +927,176 @@ export interface PolicyDryRun {
 // ---- module surface ----------------------------------------------------------------
 
 /** Build a client. */
+// ---- admin wire types (API.md §4 "Admin", D60–D62) -----------------------------
+
+function jsonBody(method: string, body: unknown): RequestInit {
+  return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+}
+
+/** A secret field (D61): an env reference, a value to seal (input only), "keep" (what reads return), or sealed. */
+export type SecretValue = { env: string } | { value: string } | { redacted: true } | { sealed: string };
+/** The runtime config document: sections → keys. */
+export type ConfigDocument = Record<string, Record<string, unknown>>;
+export interface ConfigDiffEntry {
+  path: string;
+  op: "added" | "removed" | "changed";
+  old?: unknown;
+  new?: unknown;
+}
+export interface ConfigFieldError {
+  path?: string;
+  message: string;
+}
+export interface ConfigRevision {
+  revision: number;
+  updated_at: string | null;
+  author: string;
+  message: string;
+  rolled_back_from: number | null;
+  document: ConfigDocument;
+  diff: ConfigDiffEntry[];
+}
+export interface AdminConfig extends ConfigRevision {
+  history_mode: "records" | "versions";
+  location: string;
+  /** This instance can seal secrets (`FLOE_CONFIG_KEY` is set). */
+  sealing_key: boolean;
+  key_env: string;
+  applied: { revision: number; restart_required: string[]; apply_error: string | null };
+}
+export interface PublishResult {
+  revision: number;
+  diff: ConfigDiffEntry[];
+  restart_required: string[];
+  unchanged?: boolean;
+}
+export interface ValidationResult {
+  ok: boolean;
+  errors: ConfigFieldError[];
+  diff: ConfigDiffEntry[];
+  restart_required: string[];
+}
+export interface ConfigHistoryEntry {
+  revision: number;
+  updated_at: string;
+  author: string;
+  message: string;
+  rolled_back_from?: number | null;
+  diff: ConfigDiffEntry[];
+}
+/** A JSON Schema node (the subset `GET …/config/schema` emits). */
+export interface JsonSchema {
+  type?: string | string[];
+  title?: string;
+  description?: string;
+  default?: unknown;
+  enum?: string[];
+  properties?: Record<string, JsonSchema>;
+  items?: JsonSchema;
+  oneOf?: JsonSchema[];
+  minimum?: number;
+  "x-floe"?: { format?: string; group?: string; live?: boolean };
+  [k: string]: unknown;
+}
+export interface InstanceStatus {
+  instance: string;
+  version: string;
+  roles: string[];
+  started_at: string;
+  seen_at: string;
+  applied_revision: number;
+  restart_required: string[];
+  apply_error?: string | null;
+}
+export interface MirrorSummary {
+  enabled: boolean;
+  lease: { holder: string; expires_at: string } | null;
+  token_login?: string | null;
+  last_pass?: { started_at: string | null; finished_at: string | null; complete: boolean; created: number; updated: number; errors: number } | null;
+  counts?: Record<string, number>;
+  repos?: number;
+  error: string | null;
+}
+export interface CatalogStatus {
+  compiled: boolean;
+  enabled: boolean;
+  running: boolean;
+  up: boolean | null;
+  tail: boolean;
+  uri: string | null;
+  warehouse: string | null;
+  namespace: string;
+  /** `[catalog] auth` (D63). */
+  auth: "none" | "bearer" | "sigv4";
+  restart_required?: boolean;
+}
+export interface AdminOverview {
+  config: { revision: number | null; updated_at?: string | null; author?: string; message?: string; error: string | null };
+  store: { location: string; history_mode: "records" | "versions"; sealing_key: boolean; key_env: string };
+  instance: {
+    id: string;
+    version: string;
+    roles: string[];
+    started_at: string;
+    applied_revision: number;
+    restart_required: string[];
+    apply_error: string | null;
+    last_check: string | null;
+    check_error: string | null;
+  };
+  instances: InstanceStatus[];
+  mirror: MirrorSummary;
+  catalog: CatalogStatus;
+}
+export interface MirrorRepo {
+  id: string;
+  full_name: string;
+  floe: string | null;
+  status: string;
+  private: boolean;
+  archived: boolean;
+  fork: boolean;
+  size_kb: number;
+  pushed_at: string | null;
+  last_seen: string | null;
+  missing_since: string | null;
+  last_error: string | null;
+  paused: boolean;
+}
+export interface MirrorStatus {
+  summary: MirrorSummary;
+  repos: MirrorRepo[];
+}
+export interface MirrorPreview {
+  known: number;
+  selected: number;
+  too_large: number;
+  out: number;
+  repos: { full_name: string; floe: string | null; status: string; verdict: "in" | "too-large" | "out"; reason: string }[];
+  plan: null | { error: string } | { summary: string; discovered: number; complete: boolean; lines: string[]; rate_remaining: number | null };
+}
+/** A fixed class for a failed probe; response bodies are never echoed (D61). */
+export type ProbeErrorClass = "no_token" | "timeout" | "unreachable" | "transport" | "redirect" | "unauthorized" | "not_found" | "http_4xx" | "http_5xx";
+export interface CredentialTest {
+  ok: boolean;
+  status?: number;
+  latency_ms?: number;
+  error_class?: ProbeErrorClass | null;
+  login?: string | null;
+  scopes?: string | null;
+  rate_remaining?: number | null;
+  message?: string;
+}
+export interface CatalogTest {
+  ok: boolean;
+  auth?: string;
+  status?: number;
+  latency_ms?: number;
+  error_class?: ProbeErrorClass | null;
+  /** The writer authenticates (OAuth2, SigV4) but the probe did not. */
+  unauthenticated?: boolean;
+}
+
 export function createClient(opts: ClientOptions = {}): ReposClient {
   return new ReposClient(opts);
 }

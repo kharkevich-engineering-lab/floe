@@ -6,6 +6,8 @@ pub mod auth;
 pub mod bridge;
 pub mod bundles;
 pub mod cache;
+pub mod catalog_tail;
+pub mod config_store;
 pub mod error;
 pub mod events;
 pub mod follow;
@@ -18,6 +20,7 @@ pub mod lfs_upstream;
 pub mod maintain;
 pub mod metrics;
 pub mod middleware;
+pub mod mirror;
 pub mod ops;
 pub mod pktline;
 pub mod policy;
@@ -45,8 +48,8 @@ use axum::http::{Method, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bytes::Bytes;
-use metrics_exporter_prometheus::PrometheusHandle;
 use floe_store::DynStore;
+use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::error::ApiError;
 use crate::repo::{RepoRoute, parse_repo_route};
@@ -73,8 +76,47 @@ pub struct AppState {
     pub bridge: Option<Arc<bridge::Bridge>>,
     /// Last upstream-follow round per repository on this instance (`[upstream] follow`).
     pub follow: follow::FollowStatuses,
-    /// In-process TLS (standalone, D39); `None` behind an edge (h2c).
+    /// In-process TLS (D39, D59: `files` or `acme`); `None` behind an edge (h2c).
     pub tls: Option<Arc<tls::Tls>>,
+    /// Lossy catalog telemetry (`sync_runs`/`repo_inventory`, D50): the writer
+    /// when the catalog is compiled in and enabled, else a no-op. Follow and
+    /// the mirror call it after a write finished, like a metric.
+    pub recorder: Arc<dyn floe_catalog::Recorder>,
+    /// The Iceberg writer (`--features catalog` and `catalog.enabled`). Only
+    /// the catalog tail awaits it; shut down (final flush) after serving.
+    pub catalog: Option<Arc<floe_catalog::CatalogWriter>>,
+    /// The catalog's WAL tail (`events` role with a catalog writer).
+    pub catalog_tail: Option<Arc<catalog_tail::CatalogTail>>,
+    /// D60: this instance's view of the runtime config document. `cfg` is the
+    /// effective config the process started with; the live one is here.
+    pub config: Arc<config_store::live::Live>,
+}
+
+/// What this binary was built with (D52): the cargo features a config key may need. The
+/// embedders (`embed-local`, `embed-http`) are not features of any build yet (milestone M7).
+pub const BUILD_FEATURES: floe_config::BuildFeatures = floe_config::BuildFeatures {
+    codeintel: cfg!(feature = "codeintel"),
+    mcp: cfg!(feature = "mcp"),
+    embed_local: false,
+    embed_http: false,
+};
+
+/// The extraction core (`crates/floe-codeintel`), linked in by `--features codeintel`.
+#[cfg(feature = "codeintel")]
+pub use floe_codeintel;
+
+/// Refuse a config this binary cannot run, before anything starts (fail closed, D52): a
+/// `[codeintel]`/`[mcp]` key needing a feature the build lacks names the build flag, and with
+/// the feature the indexer (M3) and the MCP routes (M4) are not part of this build yet, so
+/// turning them on is refused rather than accepted and silently ignored.
+pub fn check_build(cfg: &floe_config::Config) -> anyhow::Result<()> {
+    cfg.validate_build(BUILD_FEATURES)?;
+    if cfg.codeintel.enabled || cfg.mcp.enabled {
+        anyhow::bail!(
+            "codeintel.enabled / mcp.enabled: this build parses and validates [codeintel] and [mcp] but has no indexer (milestone M3) or MCP endpoints (M4) yet (docs/design/code-intelligence.md §13)"
+        );
+    }
+    Ok(())
 }
 
 impl AppState {
@@ -84,19 +126,48 @@ impl AppState {
         reason = "public constructor awaited by callers across the workspace"
     )]
     pub async fn new(
-        cfg: Arc<floe_config::Config>,
+        bootstrap: Arc<floe_config::Config>,
         store: DynStore,
     ) -> anyhow::Result<Arc<Self>> {
+        // D60: read the runtime config document first (bounded; an outage
+        // starts the instance on the built-in runtime defaults), so the bridge
+        // and the catalog writer are built from its values.
+        // Boxed: opening a dedicated bucket is a backend client's large future.
+        let config_store =
+            Arc::new(Box::pin(config_store::ConfigStore::open(&bootstrap, &store)).await?);
+        let config = Box::pin(config_store::live::Live::start(bootstrap, config_store)).await;
+        let cfg = config.current().cfg;
+        check_build(&cfg)?;
         let registry = floe_wal::Registry::new(store.clone(), cfg.clone());
         let bridge = bridge::Bridge::new(&cfg, registry.clone());
         let bundle_source: Arc<dyn floe_bundle::BundleSource> =
             Arc::new(RegistryBundleSource(registry.clone()));
         let bundles = floe_bundle::Bundler::new_with_source(bundle_source, cfg.clone());
         let metrics_handle = metrics::install()?;
-        let tls = tls::load(&cfg)?;
+        let tls = tls::Tls::load(&cfg, store.clone())?;
         if let Some(t) = &tls {
-            tracing::info!(fingerprint = %t.fingerprint, mode = ?cfg.server.tls.mode, "TLS terminated in-process");
+            let s = t.status();
+            tracing::info!(mode = ?cfg.server.tls.mode, loaded = s.loaded, not_after = ?s.not_after, issuer = ?s.issuer, "TLS terminated in-process");
         }
+        // The catalog section comes from the config document: one that this
+        // binary cannot honour disables the catalog here, never the instance.
+        let catalog = match catalog_writer(&cfg.catalog) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "catalog disabled on this instance");
+                None
+            }
+        };
+        let recorder: Arc<dyn floe_catalog::Recorder> = match &catalog {
+            Some(w) => w.clone() as Arc<dyn floe_catalog::Recorder>,
+            None => Arc::new(floe_catalog::NoopRecorder),
+        };
+        let catalog_tail = catalog
+            .as_ref()
+            .filter(|_| cfg.has_role(floe_config::Role::Events))
+            .map(|w| {
+                catalog_tail::CatalogTail::new(registry.clone(), w.clone(), cfg.catalog.backfill)
+            });
         let state = Arc::new(Self {
             cfg: cfg.clone(),
             store,
@@ -112,6 +183,10 @@ impl AppState {
             bridge,
             follow: follow::FollowStatuses::default(),
             tls,
+            recorder,
+            catalog,
+            catalog_tail,
+            config,
         });
         // The GitHub sink renders its payloads out of the repository, so it
         // needs this instance — which did not exist when the bridge was built.
@@ -120,6 +195,39 @@ impl AppState {
         }
         Ok(state)
     }
+}
+
+/// The catalog writer (D50): started (it connects in the background, startup
+/// never waits for the catalog) when compiled in and enabled.
+#[cfg(feature = "catalog")]
+#[allow(clippy::unnecessary_wraps)] // the featureless variant's signature
+fn catalog_writer(
+    cfg: &floe_config::CatalogConfig,
+) -> anyhow::Result<Option<Arc<floe_catalog::CatalogWriter>>> {
+    if !cfg.enabled {
+        return Ok(None);
+    }
+    let committer = Arc::new(floe_catalog::iceberg::IcebergCommitter::new(cfg));
+    tracing::info!(uri = cfg.uri.as_deref().unwrap_or(""), namespace = %cfg.namespace, auth = ?cfg.auth, "catalog writer enabled");
+    Ok(Some(floe_catalog::CatalogWriter::start(
+        committer,
+        floe_catalog::FlushPolicy::from_config(cfg),
+    )))
+}
+
+/// Without the `catalog` feature, `catalog.enabled` is a fatal config error
+/// (fail closed): the operator asked for audit tables this binary cannot write.
+#[cfg(not(feature = "catalog"))]
+fn catalog_writer(
+    cfg: &floe_config::CatalogConfig,
+) -> anyhow::Result<Option<Arc<floe_catalog::CatalogWriter>>> {
+    if cfg.enabled {
+        anyhow::bail!(
+            "catalog.enabled = true, but this binary was built without the catalog feature \
+             (cargo build --release -p floe-cli --features catalog)"
+        );
+    }
+    Ok(None)
 }
 
 /// Build a full axum router.
@@ -285,10 +393,7 @@ fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
 /// under tmpfs pressure — so the line carries RSS and an explicit caveat
 /// (2026-08-22: 11 stalls on a front during a 11.9 GB background prefetch,
 /// every one in a gap between requests, none inside one).
-fn spawn_runtime_watchdog(
-    tasks: Arc<floe_wal::tasks::Tasks>,
-    inflight: Arc<middleware::Inflight>,
-) {
+fn spawn_runtime_watchdog(tasks: Arc<floe_wal::tasks::Tasks>, inflight: Arc<middleware::Inflight>) {
     tokio::spawn(async move {
         let mut last = std::time::Instant::now();
         loop {
@@ -423,18 +528,26 @@ pub(crate) async fn dispatch_route(
                 settings::http_describe(st, route, &headers).await
             }
             (&Method::PUT, "settings") => {
-                settings::http_put(st, route, &headers, &query, body.take().unwrap_or_default()).await
+                settings::http_put(st, route, &headers, &query, body.take().unwrap_or_default())
+                    .await
             }
             (&Method::DELETE, "settings") => settings::http_delete(st, route, &headers).await,
             (&Method::POST, "settings/validate") => {
                 settings::http_validate(st, route, &headers, body.take().unwrap_or_default()).await
             }
             (&Method::POST, "policy/validate") => {
-                settings::http_policy_validate(st, route, &headers, body.take().unwrap_or_default()).await
+                settings::http_policy_validate(st, route, &headers, body.take().unwrap_or_default())
+                    .await
             }
             (&Method::POST, "policy/dry-run") => {
-                settings::http_policy_dry_run(st, route, &headers, &query, body.take().unwrap_or_default())
-                    .await
+                settings::http_policy_dry_run(
+                    st,
+                    route,
+                    &headers,
+                    &query,
+                    body.take().unwrap_or_default(),
+                )
+                .await
             }
             _ => Err(ApiError::NotFound(format!("no route for {method} {sub}"))),
         }
@@ -559,7 +672,11 @@ pub async fn serve(
     let addr = state.cfg.server.listen;
     let state_for_shutdown = state.clone();
     prewarm::spawn(state.clone());
+    if let Some(t) = &state.tls {
+        t.spawn(Arc::new(tls::TaskNarrator(state.registry.tasks().clone())));
+    }
     bridge::spawn_sweeper(state.clone());
+    state.config.spawn();
     spawn_runtime_watchdog(state.registry.tasks().clone(), state.inflight.clone());
     let app = router(state);
     let listener = TcpAccept::bind(addr).await?;
@@ -608,7 +725,7 @@ pub async fn serve(
             axum::serve(
                 tls::TlsListener {
                     tcp: listener,
-                    acceptor: t.acceptor.clone(),
+                    acceptor: tokio_rustls::TlsAcceptor::from(t.server_config.clone()),
                 },
                 app,
             )
@@ -673,9 +790,7 @@ impl floe_bundle::BundleSource for RegistryBundleSource {
         id: &floe_git::RepoId,
     ) -> Result<floe_bundle::BundleRepoHandle, floe_bundle::BundleError> {
         let h = self.0.open(id).await.map_err(|e| match e {
-            floe_wal::WalError::NotFound => {
-                floe_bundle::BundleError::RepoNotFound(id.to_string())
-            }
+            floe_wal::WalError::NotFound => floe_bundle::BundleError::RepoNotFound(id.to_string()),
             other => floe_bundle::BundleError::Other(other.to_string()),
         })?;
         Ok(floe_bundle::BundleRepoHandle {
@@ -687,10 +802,7 @@ impl floe_bundle::BundleSource for RegistryBundleSource {
         })
     }
 
-    async fn prepare_objects(
-        &self,
-        id: &floe_git::RepoId,
-    ) -> Result<(), floe_bundle::BundleError> {
+    async fn prepare_objects(&self, id: &floe_git::RepoId) -> Result<(), floe_bundle::BundleError> {
         // `git bundle create` streams from the local copy: bring the packs
         // here first (Serve level). Registry::open alone is refs-level — the
         // maintainer built from it and git said "bad object refs/heads/main".
@@ -733,13 +845,10 @@ impl floe_bundle::BundleSource for RegistryBundleSource {
                 }
             }
         }
-        let linked = h
-            .local()
-            .packs()
-            .is_ok_and(|ps| {
-                ps.iter()
-                    .any(|p| h.local().pack_path(&p.checksum).is_symlink())
-            });
+        let linked = h.local().packs().is_ok_and(|ps| {
+            ps.iter()
+                .any(|p| h.local().pack_path(&p.checksum).is_symlink())
+        });
         if linked {
             return floe_bundle::BundleEngine::Gix { faulter: None };
         }
@@ -789,5 +898,20 @@ mod listen_tests {
         tokio::net::TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, port))
             .await
             .expect("::1 twin");
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    /// Off is no writer; without the feature, on is a fatal error (fail closed).
+    #[test]
+    fn catalog_writer_off_and_featureless() {
+        let mut cfg = floe_config::CatalogConfig::default();
+        assert!(super::catalog_writer(&cfg).unwrap().is_none());
+        cfg.enabled = true;
+        if cfg!(not(feature = "catalog")) {
+            let err = super::catalog_writer(&cfg).err().unwrap();
+            assert!(err.to_string().contains("catalog feature"), "{err}");
+        }
     }
 }

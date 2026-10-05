@@ -17,9 +17,9 @@
 
 use std::sync::{Arc, OnceLock, Weak};
 
+use floe_git::RepoId;
 use futures::StreamExt;
 use serde_json::{Value, json};
-use floe_git::RepoId;
 
 use super::auth::USER_LOGIN;
 use super::models::{self, Urls};

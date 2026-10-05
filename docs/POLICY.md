@@ -30,7 +30,16 @@ Leave out anything receive-pack cannot enforce: required reviews, required CI,
 file just lies.
 
 Missing file / empty `rules` = allow-all (anyone with write may move any
-ref). That is the only implicit default.
+ref), with **one built-in rule**: `archive-immutable` restricts `create`,
+`update` and `delete` on `refs/archive/**`, and on the ref `refs/archive`
+itself (it would shadow the namespace), with an empty bypass. That
+namespace holds the tips upstream follow kept when upstream rewrote or deleted
+a followed ref (D48); follow writes there without going through policy, so
+the built-in only stops pushers from forging, moving or deleting archive
+names. It is evaluated after the file's rules and it is the only implicit
+default. A file that defines its own rule named `archive-immutable` replaces
+it (the example below adds an admin bypass so archives can be cleaned up);
+there is no other way to turn it off.
 
 ## Envelope
 
@@ -204,6 +213,16 @@ Do not put secrets, signatures, or “required PR” in this file.
       }
     },
     {
+      "name": "archive-immutable",
+      "match": { "refs": ["refs/archive/**"] },
+      "effect": {
+        "protect": {
+          "restricts": ["create", "update", "delete"],
+          "bypass": ["group:admins"]
+        }
+      }
+    },
+    {
       "name": "reserve-queue-ns",
       "match": { "refs": ["refs/heads/mq/**"] },
       "effect": { "protect": { "bypass": ["group:queue", "group:admins"] } }
@@ -213,7 +232,10 @@ Do not put secrets, signatures, or “required PR” in this file.
 ```
 
 That is enough for a real host: lock the trunk, reserve bot namespaces, keep
-tags still. History / size rules can be added later without changing the
+tags still, and keep the tips upstream follow archived (`refs/archive/`, D48) where they are
+(follow is not a principal, so `create` here stops only pushers from forging archive names). Without
+the `archive-immutable` rule the built-in one applies (same refs and ops, no bypass); naming it here
+replaces the built-in, which is how an admin bypass is granted. History / size rules can be added later without changing the
 envelope; they will not change a verdict until this document says they do.
 
 ## Load rules

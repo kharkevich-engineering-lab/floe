@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use crate::error::WalError;
 use crate::store_proto::{get_message, get_message_if_changed};
-use tracing::Instrument;
 use floe_git::LocalRepo;
 use floe_proto::keys;
 use floe_proto::v1::{EntryKind, LogEntry, Manifest, PackRef, RefSnapshot};
 use floe_store::{GetOptions, GetResult, ObjectStore, Prefixed, Version};
+use tracing::Instrument;
 
 /// A read guard held for the lifetime of a request. While any guard is alive
 /// no pack is removed locally (the inner `RwLock` read guard prevents it).

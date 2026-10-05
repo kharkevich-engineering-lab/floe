@@ -1,17 +1,19 @@
 //! Per-repo push policy. Language: `docs/POLICY.md`.
 //!
 //! Stored at `repos/<owner>/<repo>/policy.json` (not on the WAL). Missing file
-//! = empty rules = allow-all. Receive-pack evaluates after ingest so
-//! force-push can use `merge-base --is-ancestor`.
+//! = empty rules = allow-all, except for the built-in [`ARCHIVE_RULE`]
+//! (`refs/archive/**` is immutable to pushers unless the file names its own
+//! rule of that name). Receive-pack evaluates after ingest so force-push can
+//! use `merge-base --is-ancestor`.
 
 use std::collections::{HashMap, HashSet};
 
-use serde::de::{self, Deserializer};
-use serde::{Deserialize, Serialize};
 use floe_git::RepoId;
 use floe_proto::keys;
 use floe_proto::v1::{RefTransaction, RefUpdate};
 use floe_store::{DynStore, GetOptions, PutBody, PutMode, StoreError};
+use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Document
@@ -32,6 +34,24 @@ pub struct RepoPolicy {
 
 fn default_version() -> u32 {
     1
+}
+
+/// The built-in rule that keeps upstream follow's archived tips (D48,
+/// `refs/archive/<unix-ts>/<ref>`) where they are: no pusher may create,
+/// update or delete a ref under [`ARCHIVE_REFS`]. Follow writes there without
+/// going through policy. A policy file that defines a rule with this name
+/// replaces the built-in (e.g. to give admins a bypass); see `docs/POLICY.md`.
+pub const ARCHIVE_RULE: &str = "archive-immutable";
+
+/// The namespace [`ARCHIVE_RULE`] protects.
+pub const ARCHIVE_REFS: &str = "refs/archive/";
+
+/// Under [`ARCHIVE_REFS`], or the ref `refs/archive` itself: a ref of that
+/// exact name would shadow the namespace (git cannot hold `refs/archive` and
+/// `refs/archive/<ts>/…` at once), so follow could never archive again. The
+/// same rule follow's patterns use (`floe_config::refpattern::in_namespace`).
+fn in_archive_namespace(name: &str) -> bool {
+    floe_config::refpattern::in_namespace(name, ARCHIVE_REFS)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -580,6 +600,13 @@ fn deny_reason(
             return Some(format!("rejected by rule '{}'", rule.name));
         }
     }
+    // Built-in: every op is restricted and nobody bypasses, so no ancestry
+    // check (`is_force`) is needed for it.
+    if in_archive_namespace(&u.name) && !policy.rules.iter().any(|r| r.name == ARCHIVE_RULE) {
+        return Some(format!(
+            "rejected by rule '{ARCHIVE_RULE}' (built-in: {ARCHIVE_REFS}* holds tips upstream follow archived)"
+        ));
+    }
     None
 }
 
@@ -615,16 +642,59 @@ pub fn store_key(id: &RepoId) -> String {
 }
 
 pub async fn load(store: &DynStore, id: &RepoId) -> Result<RepoPolicy, StoreError> {
+    Ok(load_versioned(store, id).await?.1)
+}
+
+/// The policy with the object version it was read at (`None` = no file).
+pub async fn load_versioned(
+    store: &DynStore,
+    id: &RepoId,
+) -> Result<(Option<floe_store::Version>, RepoPolicy), StoreError> {
     let key = store_key(id);
     match store.get(&key, GetOptions::default()).await {
         Ok(got) => {
-            let Some((_, bytes)) = got.bytes().await? else {
-                return Ok(RepoPolicy::empty());
+            let Some((meta, bytes)) = got.bytes().await? else {
+                return Ok((None, RepoPolicy::empty()));
             };
-            parse_bytes(&bytes)
+            Ok((Some(meta.version), parse_bytes(&bytes)?))
         }
-        Err(StoreError::NotFound { .. }) => Ok(RepoPolicy::empty()),
+        Err(StoreError::NotFound { .. }) => Ok((None, RepoPolicy::empty())),
         Err(e) => Err(e),
+    }
+}
+
+/// The `ETag` of a policy read: the object version, or `"none"` when there is no file.
+fn policy_etag(version: Option<&floe_store::Version>) -> String {
+    format!(
+        "\"{}\"",
+        version.map_or("none", floe_store::Version::as_str)
+    )
+}
+
+/// The precondition of a policy write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expected {
+    /// Unconditional (D24's original write).
+    Any,
+    /// The file must not exist (`If-Match: "none"`).
+    Absent,
+    /// The file must be at this version (`If-Match: "<etag>"`).
+    At(floe_store::Version),
+}
+
+/// The precondition an `If-Match` header asks for.
+fn if_match(headers: &HeaderMap) -> Expected {
+    let Some(v) = headers
+        .get(axum::http::header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return Expected::Any;
+    };
+    let v = v.trim().trim_start_matches("W/").trim_matches('"');
+    if v == "none" {
+        Expected::Absent
+    } else {
+        Expected::At(floe_store::Version::new(v))
     }
 }
 
@@ -643,13 +713,27 @@ fn parse_bytes(bytes: &[u8]) -> Result<RepoPolicy, StoreError> {
 }
 
 pub async fn save(store: &DynStore, id: &RepoId, policy: &RepoPolicy) -> Result<(), StoreError> {
+    save_if(store, id, policy, Expected::Any).await
+}
+
+/// [`save`] with a precondition ([`Expected`]): a policy changed since the
+/// editor read it is `PreconditionFailed`, never overwritten.
+pub async fn save_if(
+    store: &DynStore,
+    id: &RepoId,
+    policy: &RepoPolicy,
+    expected: Expected,
+) -> Result<(), StoreError> {
     policy.validate().map_err(StoreError::InvalidArgument)?;
     let key = store_key(id);
     let body = serde_json::to_vec_pretty(policy)
         .map_err(|e| StoreError::InvalidArgument(format!("encode policy: {e}")))?;
-    store
-        .put(&key, PutBody::from(body), PutMode::Overwrite.into())
-        .await?;
+    let mode = match expected {
+        Expected::Any => PutMode::Overwrite,
+        Expected::Absent => PutMode::Create,
+        Expected::At(v) => PutMode::Update(v),
+    };
+    store.put(&key, PutBody::from(body), mode.into()).await?;
     Ok(())
 }
 
@@ -673,17 +757,28 @@ pub async fn http_get(
     route: &RepoRoute,
     headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
-    let _ = st.auth.require_read(headers).await.map_err(|e| auth_err(&e))?;
+    let _ = st
+        .auth
+        .require_read(headers)
+        .await
+        .map_err(|e| auth_err(&e))?;
     ensure_repo(st, route).await?;
-    let policy = load(&st.store, &route.id).await.map_err(store_err)?;
+    let (version, policy) = load_versioned(&st.store, &route.id)
+        .await
+        .map_err(store_err)?;
     let body = serde_json::to_vec_pretty(&policy)
         .map_err(|e| ApiError::Internal(format!("encode policy: {e}")))?;
+    let etag = policy_etag(version.as_ref());
     Ok((
         StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/json; charset=utf-8",
-        )],
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8".to_string(),
+            ),
+            (axum::http::header::ETAG, etag),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
         body,
     )
         .into_response())
@@ -695,14 +790,22 @@ pub async fn http_put(
     headers: &HeaderMap,
     body: axum::body::Body,
 ) -> Result<Response, ApiError> {
-    let _ = st.auth.require_admin(headers).await.map_err(|e| auth_err(&e))?;
+    let _ = st
+        .auth
+        .require_admin(headers)
+        .await
+        .map_err(|e| auth_err(&e))?;
     ensure_repo(st, route).await?;
     let bytes = crate::collect_body(body).await?;
     let policy = parse_bytes(&bytes).map_err(store_err)?;
-    save(&st.store, &route.id, &policy)
-        .await
-        .map_err(store_err)?;
-    Ok((StatusCode::NO_CONTENT, "").into_response())
+    // `If-Match` (the editor's ETag): a policy changed meanwhile is a 409.
+    match save_if(&st.store, &route.id, &policy, if_match(headers)).await {
+        Ok(()) => Ok((StatusCode::NO_CONTENT, "").into_response()),
+        Err(StoreError::PreconditionFailed { .. }) => Err(ApiError::Conflict(
+            "the policy changed since it was read; reload and apply your edit again".into(),
+        )),
+        Err(e) => Err(store_err(e)),
+    }
 }
 
 pub async fn http_delete(
@@ -710,7 +813,11 @@ pub async fn http_delete(
     route: &RepoRoute,
     headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
-    let _ = st.auth.require_admin(headers).await.map_err(|e| auth_err(&e))?;
+    let _ = st
+        .auth
+        .require_admin(headers)
+        .await
+        .map_err(|e| auth_err(&e))?;
     ensure_repo(st, route).await?;
     clear(&st.store, &route.id).await.map_err(store_err)?;
     Ok((StatusCode::NO_CONTENT, "").into_response())
@@ -991,6 +1098,98 @@ mod tests {
           }]
         }"#;
         assert!(parse_bytes(json.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn archive_refs_are_immutable_by_default() {
+        let archive = "refs/archive/1791072000/refs/heads/main";
+        for p in [RepoPolicy::empty(), lock_main()] {
+            for (old, new) in [("", "aaa"), ("aaa", "bbb"), ("aaa", "")] {
+                let t = txn(
+                    vec![upd(archive, old, new), upd("refs/heads/dev", "", "aaa")],
+                    false,
+                );
+                let ev = evaluate(&p, "alice@example.com", &t, |_| false);
+                assert!(
+                    ev.per_ref[0]
+                        .1
+                        .as_ref()
+                        .unwrap_err()
+                        .contains("rejected by rule 'archive-immutable'"),
+                    "{old:?} -> {new:?} on {archive} must be refused: {:?}",
+                    ev.per_ref[0]
+                );
+                assert!(ev.per_ref[1].1.is_ok(), "other refs are unaffected");
+                assert_eq!(ev.publish.updates.len(), 1);
+            }
+        }
+        // A look-alike outside the namespace is an ordinary ref.
+        for name in [
+            "refs/heads/refs/archive/x",
+            "refs/archives",
+            "refs/archive-old",
+        ] {
+            let t = txn(vec![upd(name, "", "aaa")], false);
+            assert!(
+                evaluate(&RepoPolicy::empty(), "bob@example.com", &t, |_| false).per_ref[0]
+                    .1
+                    .is_ok(),
+                "{name}"
+            );
+        }
+    }
+
+    /// `refs/archive` itself would shadow the namespace (a file where git needs
+    /// a directory): creating it is refused like any archive ref.
+    #[test]
+    fn the_archive_namespace_itself_cannot_be_shadowed() {
+        for p in [RepoPolicy::empty(), lock_main()] {
+            for (old, new) in [("", "aaa"), ("aaa", "bbb"), ("aaa", "")] {
+                let t = txn(vec![upd("refs/archive", old, new)], false);
+                let ev = evaluate(&p, "alice@example.com", &t, |_| false);
+                assert!(
+                    ev.per_ref[0]
+                        .1
+                        .as_ref()
+                        .unwrap_err()
+                        .contains("archive-immutable"),
+                    "{old:?} -> {new:?}: {:?}",
+                    ev.per_ref[0]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn archive_rule_in_the_file_replaces_the_built_in() {
+        // The POLICY.md example: admins may clean archives up, nobody else.
+        let json = r#"{
+          "version": 1,
+          "groups": [{ "name": "admins", "members": ["alice@example.com"] }],
+          "rules": [{
+            "name": "archive-immutable",
+            "match": { "refs": ["refs/archive/**"] },
+            "effect": { "protect": { "restricts": ["create", "update", "delete"], "bypass": ["group:admins"] } }
+          }]
+        }"#;
+        let p = parse_bytes(json.as_bytes()).unwrap();
+        let t = txn(
+            vec![upd("refs/archive/1/refs/heads/main", "aaa", "")],
+            false,
+        );
+        assert!(
+            evaluate(&p, "alice@example.com", &t, |_| false).per_ref[0]
+                .1
+                .is_ok()
+        );
+        let ev = evaluate(&p, "bob@example.com", &t, |_| false);
+        assert!(
+            ev.per_ref[0]
+                .1
+                .as_ref()
+                .unwrap_err()
+                .contains("archive-immutable")
+        );
     }
 
     #[test]

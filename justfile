@@ -17,7 +17,7 @@ web-build:
     cd web && pnpm install --frozen-lockfile && pnpm run build
 
 # Local dev = standalone: the server with every role (serve, maintain, events) at
-# https://floe.localhost:$PORT (default 8080) against local rustfs. Self-contained: starts rustfs (+ bucket) if
+# http://floe.localhost:$PORT (default 8080) against local rustfs. Self-contained: starts rustfs (+ bucket) if
 # it is not answering on :9000 and builds the SPA if web/dist is missing, then runs the server.
 # `config` defaults to floe.standalone.toml; point it at a real bucket by editing [store] there. The rustfs
 # keys come from the environment (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY; compose.yaml fixes them).
@@ -36,7 +36,7 @@ dev-local config="floe.standalone.toml":
     fi
     cargo build --release --bin floe-server
     port="${PORT:-8080}"
-    echo "→ https://floe.localhost:${port}/  (PORT=${port}, config {{config}}, store rustfs :9000, cache /tmp/floe)"
+    echo "→ http://floe.localhost:${port}/  (PORT=${port}, config {{config}}, store rustfs :9000, cache /tmp/floe)"
     exec ./target/release/floe-server --config {{config}}
 
 # Start rustfs (S3-compatible) for local dev via podman compose (rootless, no daemon group needed;
@@ -82,12 +82,20 @@ dev-store-stop:
 # hung test blocks for the whole timeout. Use `just e2e` / `just ci` below.
 test:
     {{t5}} cargo test --workspace --lib --bins
-    {{t5}} cargo test -p floe-store -p floe-git -p floe-wal -p floe-bundle --tests
-    {{t5}} cargo test -p floe-server --test web_api --test web_ui --test api_v1 --test static_http --test maintain --test routing_prefix --test lfs_upstream --test drain --test github --test github_webhooks
+    {{t5}} cargo test -p floe-store -p floe-git -p floe-wal -p floe-bundle -p floe-tls -p floe-codeintel --tests
+    {{t5}} cargo test -p floe-server --test web_api --test web_ui --test api_v1 --test static_http --test maintain --test routing_prefix --test lfs_upstream --test drain --test github --test github_webhooks --test follow --test policy --test admin_config
 
 # Editor facade contracts: REST reads, GraphQL saves, PRs and durable webhook delivery.
 test-editor:
     {{t5}} cargo test -p floe-server --test github --test github_reads --test github_graphql --test github_prs --test github_webhooks --test events
+
+# Simulation suite (principle IV, AGENTS.md §3): fault links per instance over one truth store —
+# crash, partition, stale, lost response, orphan. Default seeds; FLOE_SIM_SEEDS=<n> runs n
+# deterministic seeds, FLOE_SIM_SEED=<s> exactly one (the nightly workflow picks random ones).
+# One test at a time: the scenarios share process globals (TEST_ABORT_AFTER) and some assert
+# wall-clock bounds, so they do not compete. Extra args go to the harness (`just sim --skip <name>`).
+sim *ARGS:
+    {{t15}} cargo test -p floe-server --test sim -- --test-threads=1 {{ARGS}}
 
 # Smart-HTTP end-to-end against real git (≈ 20 s) — run when touching smart.rs/receive/upload-pack/wal.
 e2e *ARGS:
@@ -117,14 +125,44 @@ warnings:
     fi
     echo "no rustc warnings"
 
+# Formatting gate: rustfmt (edition 2024, from Cargo.toml) over every workspace crate.
+fmt-check:
+    cargo fmt --all --check
+
 # Clippy, workspace-wide, all targets, warnings are errors. The lint set lives in
 # [workspace.lints] in Cargo.toml; test code is exempt from the panic-path restriction
 # lints via clippy.toml (allow-unwrap-in-tests etc.).
 clippy:
     {{t15}} cargo clippy --workspace --all-targets -- -D warnings
+    {{t15}} cargo clippy -p floe-codeintel --no-default-features --all-targets -- -D warnings
 
-# Everything that must be green before a merge (what CI runs).
-ci: warnings clippy test test-editor e2e
+# Code intelligence feature build (D52, docs/design/code-intelligence.md): the server and CLI
+# with `--features mcp` (implies codeintel; rmcp and the grammars), linted. Its own CI job: a
+# dependency graph the default build never compiles.
+clippy-codeintel:
+    {{t15}} cargo clippy -p floe-server -p floe-cli --features floe-cli/mcp --all-targets -- -D warnings
+
+# The feature build's tests: the rmcp stateless spike (docs/design/spikes/rmcp-request-parts.md)
+# and the extraction core without grammars (every file is text).
+test-codeintel:
+    {{t5}} cargo test -p floe-server --features mcp --test mcp_spike
+    {{t5}} cargo test -p floe-codeintel --no-default-features
+
+# Everything that must be green before a merge (what CI runs, one job per group of recipes).
+ci: fmt-check warnings clippy test test-editor e2e sim clippy-catalog test-catalog-lib clippy-codeintel test-codeintel
+
+# `cargo check` on the workspace's declared MSRV (`rust-version` in Cargo.toml, its one home).
+msrv:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    msrv="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)"
+    rustup toolchain install "$msrv" --profile minimal
+    {{t15}} cargo "+$msrv" check --workspace --all-targets --locked
+
+# Supply chain (deny.toml): advisories, licences, bans, sources. Needs cargo-deny
+# (`cargo install --locked cargo-deny`). On PRs that touch Cargo.lock/deny.toml, and nightly.
+deny:
+    cargo deny --locked check
 
 # Slow tier: #[ignore]d benches/soaks (20k-ref push, 466k-ref render, ...).
 test-slow:
@@ -148,6 +186,36 @@ store-test-s3:
     AWS_ACCESS_KEY_ID=floe-dev \
     AWS_SECRET_ACCESS_KEY=floe-dev-secret \
     cargo test -p floe-store --test contract -- --nocapture
+
+# Catalog (D50): the Iceberg writer against a live REST catalog, #[ignore]d tests only.
+# Needs `podman compose --profile catalog up -d`. Default: RustFS S3 Tables (table bucket
+# floe-catalog) with SigV4 (D63); FLOE_TEST_CATALOG_URI/_WAREHOUSE/_AUTH override the endpoint.
+# Not part of `just ci` (it needs a running catalog); `test-catalog-lib` + `clippy-catalog` are.
+test-catalog:
+    FLOE_TEST_CATALOG_URI="${FLOE_TEST_CATALOG_URI:-http://127.0.0.1:9000/iceberg}" \
+    FLOE_TEST_CATALOG_WAREHOUSE="${FLOE_TEST_CATALOG_WAREHOUSE:-floe-catalog}" \
+    FLOE_TEST_CATALOG_AUTH="${FLOE_TEST_CATALOG_AUTH:-sigv4}" \
+    FLOE_TEST_CATALOG_S3_ENDPOINT=http://127.0.0.1:9000 \
+    AWS_ACCESS_KEY_ID=floe-dev \
+    AWS_SECRET_ACCESS_KEY=floe-dev-secret \
+    cargo test -p floe-catalog --features iceberg --test live_catalog -- --ignored --nocapture
+
+# The same suite against the compose fallback (apache/iceberg-rest-fixture, no auth).
+test-catalog-fixture:
+    FLOE_TEST_CATALOG_URI=http://127.0.0.1:8181 \
+    FLOE_TEST_CATALOG_WAREHOUSE=s3://floe-test/warehouse \
+    FLOE_TEST_CATALOG_AUTH=none \
+    just test-catalog
+
+# Clippy over the catalog feature build (arrow/parquet/iceberg; slow, so its own recipe and its own
+# CI job rather than part of `just clippy`). Part of `just ci`.
+clippy-catalog:
+    {{t15}} cargo clippy -p floe-catalog -p floe-server -p floe-cli --all-targets --features floe-cli/catalog,floe-catalog/iceberg -- -D warnings
+
+# Hermetic tests of the catalog feature build (what the release image ships): the lib tests of
+# the crates the feature changes, compiled with the Iceberg writer. No catalog needed. Part of `just ci`.
+test-catalog-lib:
+    {{t10}} cargo test -p floe-catalog -p floe-server -p floe-cli --lib --features floe-cli/catalog,floe-catalog/iceberg
 
 # Run all floe-store tests (memory + S3 if env set).
 store-test-all:

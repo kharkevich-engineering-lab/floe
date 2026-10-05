@@ -36,17 +36,17 @@
 
 use crate::error::{RefError, WalError};
 use crate::handle::RepoHandle;
-use prost::Message;
-use std::collections::HashMap;
-use std::sync::{Arc, atomic::Ordering};
-use tokio::sync::{mpsc, oneshot};
-use tracing::Instrument;
 use floe_git::{IngestedPack, PackInfo};
 use floe_proto::keys;
 use floe_proto::v1::PackKind;
 use floe_proto::v1::{EntryKind, LogEntry, LogSegmentRef, Manifest, PackRef, RefTransaction};
 use floe_proto::{frame, time};
 use floe_store::{ObjectStore, Prefixed, PutBody, PutMode, PutOptions, StoreError};
+use prost::Message;
+use std::collections::HashMap;
+use std::sync::{Arc, atomic::Ordering};
+use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument;
 
 /// Per-ref result within a publish.
 pub struct PublishResult {
@@ -758,8 +758,7 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
             for req in valid_indices.iter().filter_map(|&idx| batch.get(idx)) {
                 if let Err(e) = handle.local.apply_ref_txn(&req.txn, false) {
                     tracing::warn!(repo = %handle.id, seq = last_seq, error = %e, "published (CAS ok), but applying the ref txn to the local copy failed; the next sync replays it");
-                    metrics::counter!("floe_publish_local_apply_failed_total")
-                        .increment(1);
+                    metrics::counter!("floe_publish_local_apply_failed_total").increment(1);
                     local_ok = false;
                     break;
                 }
@@ -789,10 +788,9 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                         state.packs_revision = committed.revision;
                     }
                 }
-                if let Err(e) = crate::state::save_state(
-                    handle.local.path(),
-                    &handle.state.lock().clone(),
-                ) {
+                if let Err(e) =
+                    crate::state::save_state(handle.local.path(), &handle.state.lock().clone())
+                {
                     tracing::warn!(repo = %handle.id, error = %e, "published (CAS ok), but saving local state failed; the next sync repairs it");
                 }
             } else {
@@ -1287,6 +1285,7 @@ pub(crate) async fn publish_settings_impl(
     toml_text: &str,
     author: &str,
     message: &str,
+    expected_revision: Option<u64>,
 ) -> Result<u64, WalError> {
     let writer = crate::handle::instance_id();
     let max_retries = handle.cfg.wal.cas_max_retries;
@@ -1295,7 +1294,16 @@ pub(crate) async fn publish_settings_impl(
         handle.sync_impl_level(crate::sync::SyncLevel::Refs).await?;
         let manifest = handle.manifest.read().clone();
         let known_version = handle.manifest_version.lock().clone();
-        let revision = manifest.settings.as_ref().map_or(0, |s| s.revision) + 1;
+        let current = manifest.settings.as_ref().map_or(0, |s| s.revision);
+        if let Some(expected) = expected_revision
+            && expected != current
+        {
+            return Err(WalError::SettingsConflict {
+                expected,
+                actual: current,
+            });
+        }
+        let revision = current + 1;
         let settings = floe_proto::v1::RepoSettings {
             toml: toml_text.to_string(),
             revision,

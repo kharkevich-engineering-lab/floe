@@ -97,14 +97,16 @@ mod tests {
     #[test]
     fn due_never_built() {
         let s = parse_schedule("@hourly").unwrap();
-        let now = SystemTime::now();
+        // Pinned: a wall-clock `now` within a second of a fire breaks `not_due_before_fire_time`.
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000); // 22:13:20 UTC
         assert!(is_due(&s, None, now));
     }
 
     #[test]
     fn due_after_fire_time() {
         let s = parse_schedule("@hourly").unwrap();
-        let now = SystemTime::now();
+        // Pinned: a wall-clock `now` within a second of a fire breaks `not_due_before_fire_time`.
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000); // 22:13:20 UTC
         // Last built 2 hours ago → next fire was 1 hour ago → due.
         let last = now - Duration::from_hours(2);
         assert!(is_due(&s, Some(last), now));
@@ -113,7 +115,8 @@ mod tests {
     #[test]
     fn not_due_before_fire_time() {
         let s = parse_schedule("@daily").unwrap();
-        let now = SystemTime::now();
+        // Pinned: a wall-clock `now` within a second of a fire breaks `not_due_before_fire_time`.
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000); // 22:13:20 UTC
         // Last built 1 second ago → next fire is ~24h away → not due.
         let last = now - Duration::from_secs(1);
         assert!(!is_due(&s, Some(last), now));

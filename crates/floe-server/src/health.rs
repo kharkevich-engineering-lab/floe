@@ -23,27 +23,41 @@ pub async fn healthz() -> Json<serde_json::Value> {
 }
 
 /// 200 once startup prewarm (`cache.prewarm`) finished or
-/// `cache.prewarm_ready_timeout` elapsed; 503 (with what is pending) before.
+/// `cache.prewarm_ready_timeout` elapsed **and**, when floe terminates TLS, a certificate is
+/// loaded (`acme` mode: until the first order or bucket read completes, D59); 503 (with what
+/// is pending) before.
 pub async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     let r = &state.readiness;
     let pending = r.pending.load(std::sync::atomic::Ordering::Acquire);
     // Draining after SIGTERM: tell the edge/LB to stop routing here at once
     // (in-flight work finishes; new object work is refused with Retry-After).
     if floe_wal::tasks::shutting_down() {
-        return (StatusCode::SERVICE_UNAVAILABLE, [(axum::http::header::RETRY_AFTER, "15")], Json(json!({"status": "draining", "version": BUILD_SHA, "running": state.registry.tasks().running_all().len(), "instance": crate::instance::info(&state.cfg)}))).into_response();
+        return (StatusCode::SERVICE_UNAVAILABLE, [(axum::http::header::RETRY_AFTER, "15")], Json(json!({"status": "draining", "version": BUILD_SHA, "running": state.registry.tasks().running_all().len(), "instance": crate::instance::info_for(&state)}))).into_response();
+    }
+    // TLS: `instance.tls` carries public facts only (mode, loaded, expiry, issuer); errors
+    // are admin-only (`/api/v1/tls`).
+    if let Some(t) = &state.tls
+        && !t.ready()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::RETRY_AFTER, "15")],
+            Json(json!({"status": "tls-pending", "version": BUILD_SHA, "instance": crate::instance::info_for(&state)})),
+        )
+            .into_response();
     }
     if r.ready(state.cfg.cache.prewarm_ready_timeout) {
         // Placement is a liveness fact: deployment verification should assert
         // that each important repository is served by at least one ready host.
         // Return rules, not repository lists; /readyz remains open for probes.
         let p = &state.cfg.placement;
-        return Json(json!({"status": "ready", "version": BUILD_SHA, "prewarm_pending": pending, "instance": crate::instance::info(&state.cfg),
+        return Json(json!({"status": "ready", "version": BUILD_SHA, "prewarm_pending": pending, "instance": crate::instance::info_for(&state),
             "placement": {"serve": p.serve, "serve_exclude": p.serve_exclude, "maintain": p.maintain, "maintain_exclude": p.maintain_exclude}})).into_response();
     }
     (
         StatusCode::SERVICE_UNAVAILABLE,
         // Unauthenticated (startup probe): counts only, no repo names.
-        Json(json!({"status": "warming", "version": BUILD_SHA, "prewarm_pending": pending, "running": state.registry.tasks().running_all().len(), "instance": crate::instance::info(&state.cfg)})),
+        Json(json!({"status": "warming", "version": BUILD_SHA, "prewarm_pending": pending, "running": state.registry.tasks().running_all().len(), "instance": crate::instance::info_for(&state)})),
     )
         .into_response()
 }

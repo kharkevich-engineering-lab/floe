@@ -1,0 +1,196 @@
+syntax = "proto3";
+
+package floe.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// ---------------------------------------------------------------------------
+// Code intelligence (docs/design/code-intelligence.md, D52–D58). Bucket objects:
+//
+//   repos/<o>/<r>/codeintel/head.pb                      IndexHead (CAS, D52): serving
+//                                                        pointer + the planner's done state
+//   repos/<o>/<r>/codeintel/commits/<commit>/<gen>.pb    CommitIndex (If-None-Match: *)
+//   codeintel/shards/<sha256>.fsh                         nav shard (META section = ShardMeta)
+//   codeintel/vec/<sha256>.fvec                           vector artifact
+//   codeintel/dir/<sha256>.fdir + codeintel/dir/head.pb   global directory + DirHead (CAS)
+//   codeintel/tasks/<uuid>.json                           MCP task records (JSON, McpTask's shape)
+//
+// Append-only like wal.proto (D4): never renumber or remove a field. Everything here is
+// derived and rebuildable from git, so a format bump is a rebuild, never a migration.
+// ---------------------------------------------------------------------------
+
+// An immutable, content-addressed serving artifact (shard part, delta, vectors, directory).
+message ArtifactRef {
+  // Object key. Normally "codeintel/shards/<sha256>.fsh"; "<sha256>~<generation>.<ext>" when
+  // the reuse rule (§3.1) re-PUT the bytes under a fresh key. Readers use only this key.
+  string key = 1;
+  // Hex sha256 of the bytes (the local cache file name; verified on download).
+  string sha256 = 2;
+  uint64 size = 3;
+  // Path range of a base part (inclusive); empty for a delta, vectors or a directory.
+  string first_path = 4;
+  string last_path = 5;
+}
+
+// What is served for one tracked ref.
+message RefIndex {
+  string commit = 1;
+  // The commits/<commit>/<generation>.pb record this state was published as.
+  uint64 generation = 2;
+  // Base shard parts, sorted by path range.
+  repeated ArtifactRef base = 3;
+  string base_commit = 4;
+  // The single cumulative delta base_commit → commit (absent when the base is at commit).
+  ArtifactRef delta = 5;
+  ArtifactRef vec = 6;
+  // The commit the vectors were built for (may lag `commit`; stale vectors are filtered).
+  string vec_commit = 7;
+  string model_id = 8;
+  // Extractor the lexical layers were built with ("ts-tags/1;cast/1;…").
+  string extractor = 9;
+  // Catalog mark: the (commit, extractor) whose rows and marker are committed in Iceberg.
+  string catalog_commit = 10;
+  string catalog_extractor = 11;
+}
+
+// A retired generation still reachable by `rev = <full sha>` (lookup aid, never liveness).
+message RecentSnapshot {
+  string commit = 1;
+  uint64 generation = 2;
+  google.protobuf.Timestamp retired_at = 3;
+}
+
+enum ReindexScope {
+  REINDEX_SCOPE_UNSPECIFIED = 0;
+  REINDEX_SCOPE_DELTA = 1;
+  REINDEX_SCOPE_FULL = 2;
+  REINDEX_SCOPE_REPAIR = 3;
+  REINDEX_SCOPE_COMMIT = 4;
+  // Owned by the embed unit (§5.4), not the lexical indexer.
+  REINDEX_SCOPE_SEMANTIC = 5;
+}
+
+// A queued request on head.pb (the queue entry of a `reindex` task, or a repair request
+// from a serving host whose download failed its sha256 check).
+message ReindexRequest {
+  // MCP task id (uuid); empty for a repair request with no task.
+  string task_id = 1;
+  ReindexScope scope = 2;
+  // The ref to rebuild (delta/full/semantic); empty for scope = commit.
+  string ref_name = 3;
+  // scope = commit: the commit to build an ad-hoc record for.
+  string commit = 4;
+  // scope = repair: the artifact key found missing or corrupt.
+  string artifact = 5;
+  google.protobuf.Timestamp requested_at = 6;
+}
+
+// repos/<o>/<r>/codeintel/head.pb — the code-intel commit point of one repository (D52).
+message IndexHead {
+  // Manifest head_seq the last publishing pass planned from (lag reporting only).
+  uint64 indexed_seq = 1;
+  // The current extractor of this host's build when the head was written.
+  string extractor = 2;
+  // Purged: nothing is answered or published for the repo until cleared (§5.8).
+  bool purged = 3;
+  uint64 purge_epoch = 4;
+  // Next generation number to allocate (strictly increasing per repo).
+  uint64 next_generation = 5;
+  repeated ReindexRequest requests = 6;
+  // Tracked ref name → what is served for it.
+  map<string, RefIndex> refs = 7;
+  // Newest first, at most codeintel.recent_max.
+  repeated RecentSnapshot recent = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// repos/<o>/<r>/codeintel/commits/<commit>/<generation>.pb — one published generation.
+// Never rewritten: every change of a RefIndex is a new generation.
+message CommitIndex {
+  string repo = 1;
+  // The tracked ref this generation was published for; empty for an ad-hoc commit build.
+  string ref_name = 2;
+  string commit = 3;
+  uint64 generation = 4;
+  // The generation this one replaced (also set on a tombstone, which names no artifacts).
+  optional uint64 supersedes = 5;
+  uint64 purge_epoch = 6;
+  repeated ArtifactRef base = 7;
+  string base_commit = 8;
+  ArtifactRef delta = 9;
+  ArtifactRef vec = 10;
+  string vec_commit = 11;
+  string model_id = 12;
+  string extractor = 13;
+  google.protobuf.Timestamp published_at = 14;
+}
+
+// The payload of a snapshot handle (`snap_` + base64url(claims) + "." + HMAC tag, D57).
+message SnapshotClaims {
+  uint32 v = 1;
+  string repo = 2;
+  string commit = 3;
+  uint64 generation = 4;
+  // Purge epoch the handle was minted under; a different head.pb epoch expires it.
+  uint64 epoch = 5;
+  // Expiry, unix seconds.
+  int64 exp = 6;
+}
+
+// codeintel/dir/head.pb — the global directory for all-repo tools (M9).
+message DirHead {
+  ArtifactRef current = 1;
+  // Kept live by GC so readers of the previous directory finish.
+  ArtifactRef previous = 2;
+  google.protobuf.Timestamp built_at = 3;
+  // repo → head.pb generation the directory was built from.
+  map<string, uint64> generations = 4;
+}
+
+enum McpTaskPhase {
+  MCP_TASK_PHASE_UNSPECIFIED = 0;
+  MCP_TASK_PHASE_QUEUED = 1;
+  MCP_TASK_PHASE_RUNNING = 2;
+  MCP_TASK_PHASE_DONE = 3;
+}
+
+// An MCP task record (§7.9). Stored as JSON at codeintel/tasks/<task_id>.json; this message
+// fixes its fields so the record and the proto evolve together.
+message McpTask {
+  string task_id = 1;
+  string principal_hash = 2;
+  string tool = 3;
+  string args_digest = 4;
+  // Spec status: working | completed | failed | cancelled.
+  string status = 5;
+  McpTaskPhase phase = 6;
+  string status_message = 7;
+  // Instance running it (phase = running).
+  string instance = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp last_updated_at = 10;
+  uint64 ttl_ms = 11;
+  uint64 poll_interval_ms = 12;
+  bool cancel_requested = 13;
+  // Inline result (≤ 1 MiB) or the key of an immutable <task_id>.result.json.
+  string result_json = 14;
+  string result_key = 15;
+  string error = 16;
+}
+
+// The META section of a nav shard (.fsh). No timestamps: the build is deterministic, so the
+// same inputs give the same bytes and the same sha256.
+message ShardMeta {
+  string repo = 1;
+  string commit = 2;
+  string base_commit = 3;
+  uint32 part = 4;
+  string first_path = 5;
+  string last_path = 6;
+  // The build's full extractor string and chunker string.
+  string extractor = 7;
+  string chunker = 8;
+  // Per-language extractor string each FILES row was built with ("rust" →
+  // "ts-tags/1;cast/1;rust=0.24.2@<sha8>"); reuse compares per file (§5.2 step 4(a)).
+  map<string, string> extractors = 9;
+}

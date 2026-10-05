@@ -10,3 +10,28 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: ci
+
+  # Rust dependencies, one grouped PR a week. `chore(deps)` is not a release type for
+  # semantic-release's commit-analyzer (only feat/fix/perf and breaking changes are), so a
+  # dependency bump never cuts a release on its own; a security fix that should ship gets a
+  # `fix:` commit by hand. Semver-major bumps come as their own PRs (they need code changes).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore(deps)
+
+  # The SPA and SDK (web/), same policy as cargo.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      web:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore(deps)

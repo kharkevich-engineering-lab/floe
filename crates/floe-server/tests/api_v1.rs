@@ -384,7 +384,10 @@ async fn no_cors_without_config() -> TestResult {
 /// admin/settings surface at `/{o}/{r}/api[/policy|/settings…]`, and the
 /// same under the browser lane `/{o}/{r}/api-browser/…`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::many_single_char_names, reason = "short request/response bindings in a linear test")]
+#[allow(
+    clippy::many_single_char_names,
+    reason = "short request/response bindings in a linear test"
+)]
 async fn d26_prefix_form_matches_v1_alias() -> TestResult {
     let server = Server::start().await?;
     let c = reqwest::Client::new();
@@ -549,5 +552,79 @@ async fn repository_delete_requires_admin() -> TestResult {
             .0,
         404
     );
+    Ok(())
+}
+
+/// `GET /api/v1/tls` (D59): the certificate status for the admin UI — admin only, and the
+/// whole `files`-mode picture (domains, validity, issuer, source) when floe terminates TLS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tls_status_is_admin_only_and_describes_the_certificate() -> TestResult {
+    let dir = tempfile::tempdir()?.keep();
+    let key = rcgen::KeyPair::generate()?;
+    let cert =
+        rcgen::CertificateParams::new(vec!["git.example.com".to_string()])?.self_signed(&key)?;
+    std::fs::write(dir.join("cert.pem"), cert.pem())?;
+    std::fs::write(dir.join("key.pem"), key.serialize_pem())?;
+    let (cert_path, key_path) = (dir.join("cert.pem"), dir.join("key.pem"));
+    let server = Server::start_with_tweak(move |cfg| {
+        cfg.server.tls.mode = floe_config::TlsMode::Files;
+        cfg.server.tls.cert = Some(cert_path.clone());
+        cfg.server.tls.key = Some(key_path.clone());
+        cfg.server.auth.mode = floe_config::AuthMode::Token;
+        cfg.server.auth.anonymous_read = false;
+        cfg.server.auth.tokens = vec![
+            floe_config::StaticToken {
+                principal: "writer".into(),
+                token: "writer-token".into(),
+                token_env: None,
+                write: true,
+                admin: false,
+            },
+            floe_config::StaticToken {
+                principal: "admin".into(),
+                token: "admin-token".into(),
+                token_env: None,
+                write: true,
+                admin: true,
+            },
+        ];
+    })
+    .await?;
+    let (st, _, _) = req(&server, reqwest::Method::GET, "/api/v1/tls", &[]).await?;
+    assert_eq!(st, 401);
+    let (st, _, _) = req(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/tls",
+        &[("Authorization", "Bearer writer-token")],
+    )
+    .await?;
+    assert_eq!(st, 403, "write is not admin");
+    let (st, body, headers) = req(
+        &server,
+        reqwest::Method::GET,
+        "/api/v1/tls",
+        &[("Authorization", "Bearer admin-token")],
+    )
+    .await?;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(hdr(&headers, "cache-control"), "no-store");
+    let v: Value = serde_json::from_str(&body)?;
+    assert_eq!(v["mode"], "files");
+    assert_eq!(v["loaded"], true);
+    assert_eq!(v["domains"], serde_json::json!(["git.example.com"]));
+    assert!(
+        v["not_after"].as_str().is_some_and(|s| s.ends_with('Z')),
+        "{v}"
+    );
+    assert!(v["issuer"].as_str().is_some(), "{v}");
+    assert!(v["source"].as_str().unwrap().starts_with("files:"), "{v}");
+    assert!(v["last_error"].is_null());
+    // /readyz shows the public facts only.
+    let (st, body, _) = req(&server, reqwest::Method::GET, "/readyz", &[]).await?;
+    assert_eq!(st, 200, "{body}");
+    let r: Value = serde_json::from_str(&body)?;
+    assert_eq!(r["instance"]["tls"]["mode"], "files");
+    assert!(r["instance"]["tls"].get("last_error").is_none());
     Ok(())
 }

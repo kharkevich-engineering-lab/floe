@@ -1,7 +1,7 @@
 //! Error types for the WAL crate.
 
-use thiserror::Error;
 use floe_store::StoreError;
+use thiserror::Error;
 
 /// Coordination-layer error. Re-exported from `floe_store::coord`.
 pub use floe_store::coord::CoordError;
@@ -19,6 +19,10 @@ pub enum WalError {
         expected: String,
         actual: String,
     },
+    /// `publish_settings_if`: the settings revision moved since the caller read it
+    /// (a concurrent `PUT …/api/settings`). Never retried by the WAL.
+    #[error("settings conflict: expected revision {expected}, found {actual}")]
+    SettingsConflict { expected: u64, actual: u64 },
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]

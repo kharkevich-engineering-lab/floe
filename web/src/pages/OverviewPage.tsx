@@ -42,6 +42,11 @@ export function OverviewPage() {
   const m = o.manifest;
   return (
     <div className="overview">
+      {o.description && (
+        <Box title="Description">
+          <div className="pad">{o.description}</div>
+        </Box>
+      )}
       <Box
         title={
           <>

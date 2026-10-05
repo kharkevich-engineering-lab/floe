@@ -55,6 +55,19 @@ Only `ref` events exist. Not events: push denials and auth failures (metrics + l
 
 **Dedup key (normative): `(repo, _floe.seq, ref_name)`.** **Order: by `seq` per repo.** Nothing else is promised.
 
+**Upstream rewrites (D48).** `refs/archive/` is reserved for upstream follow. When an upstream force-pushes, moves
+a tag or deletes a followed ref, follow (`on_rewrite = "archive"`) publishes one entry, so a consumer sees **two
+events with the same `_floe.seq`**: a `create` of `refs/archive/<unix-ts>/<ref>` at the old tip and the `update`
+(or `delete`) of `<ref>`, both with `pusher = "upstream"`. The entry's `meta["follow.archived"]` lists them
+(`<archive_ref> <original_ref> <old_oid> <new_oid|->` per line). No schema change (`schema_version` stays 1).
+
+**The catalog tail (D50).** With `--features catalog` and `[catalog] enabled`, the events host also runs a second WAL
+reader, `floe_server::catalog_tail`: the same `refs_from_entries` rows (plus provenance and one `force_push_log` row
+per archive line) go to Iceberg tables, from its own cursor `repos/<o>/<r>/catalog/cursor.json`. It is **not** a
+target of the webhook's catch-up: `POST /_events/notify` only wakes it (`try_send`, dropped when its queue is full;
+its own sweep on `events.sweep_interval` is the backstop) and never waits for it, so a catalog outage changes
+neither this endpoint's latency nor its status. Same dedup key, same at-least-once semantics.
+
 ## Delivery: the webhook
 
 Each catch-up `POST`s one JSON **array** of events (a batch: everything in `(cursor, head_seq]`) to

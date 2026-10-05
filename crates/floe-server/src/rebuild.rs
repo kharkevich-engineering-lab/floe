@@ -132,7 +132,10 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<u64> {
     Ok(bytes)
 }
 
-#[allow(unsafe_code, reason = "statvfs has no safe std wrapper; the two calls below are the whole unsafe surface")]
+#[allow(
+    unsafe_code,
+    reason = "statvfs has no safe std wrapper; the two calls below are the whole unsafe surface"
+)]
 #[allow(
     clippy::useless_conversion,
     reason = "statvfs field widths differ per platform (u32 on macOS, u64 on Linux)"

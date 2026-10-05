@@ -31,14 +31,17 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. |
 | `docs/EVENTS.md` | Anyone changing WAL-derived ref events, the webhook bridge, consumer semantics or event cursors. |
 | `docs/GITHUB.md` | Anyone touching `crates/floe-server/src/github/*`, or pointing a GitHub-integrated app at floe for local development. The facade's trust boundary (it has none), URL conventions, the write primitive, known limits. |
+| `docs/design/github-mirror.md` | Anyone touching upstream follow patterns/archive (D48), `floe-mirror` (D49), `floe-catalog` (D50, SigV4 D63) or the push-to-upstream seam (D51). Design of record; dated "as landed" notes where the code won. |
+| `docs/design/admin-ui.md` | Anyone touching the config store (`floe_server::config_store`), `/api/v1/admin/*`, the SPA's `/_admin` area, `floe config show|set|history|rollback|import`, or adding a runtime config section (D60–D62). |
 | `docs/CONTRACT.md` | When you touch a crate boundary. The cross-crate contract; *extend, don't rename*; code wins where they differ. |
 | `docs/reference/cursor-git-at-any-scale.md` | The source design, verbatim. Read once before touching WAL/publish/sync/placement. |
 | `docs/patches/README.md` | Git client patches (bundle filter matching) and the gate for advertising filtered bundle families together. |
 | `web/API.md` | UI/SDK authors and anyone changing `web/*.rs`. Wire contract, caching rules, SSE envelope, tasks, prefix-first lanes. |
+| `docs/design/code-intelligence.md` | Anyone touching `crates/floe-codeintel`, the `[codeintel]`/`[mcp]`/`[access]` config, `codeintel.proto` or the MCP endpoints. Design of record for D52–D58 until it moves to `docs/CODEINTEL.md` and `docs/MCP.md`; §13 is the milestone plan, `docs/design/spikes/` the M0 spike outcomes. |
 | `web/sdk/README.md` | Users of `repos.js`. |
 | `web/README.md` | Frontend engineers changing the React SPA, Vite build, SDK adapter, static assets, loading states. |
-| `floe.example.toml` | Every config key with its default and a comment. Change it with the code. |
-| `floe.standalone.toml` | The one-machine shape: `floe-server --config floe.standalone.toml` → `https://floe.localhost:8080/`. |
+| `floe.example.toml` | Every **bootstrap** config key with its default and a comment (runtime sections live in the config store, D60; their schema is `GET /api/v1/admin/config/schema`). Change it with the code. |
+| `floe.standalone.toml` | The one-machine shape: `floe-server --config floe.standalone.toml` → `http://floe.localhost:8080/` (loopback; TLS modes in D59). |
 | `deploy/nginx.conf.example` | An optional nginx in front; documents the `X-Accel-Redirect` byte-offload contract. |
 | `Containerfile`, `flake.nix` | An OCI image; a Nix package, image and devshell. |
 
@@ -86,7 +89,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
   issuer → `/_auth/callback`. Static `tokens` work in `oidc` mode too (robots). Every path ends in the same
   allowlist and `write_domains`.
 - Open at the application (no credential): `/healthz`, `/readyz`, `/repos.js`, `/repos.mjs`, `/_auth/*` (the
-  sign-in flow itself) and **`/services/public/*`** (data-free; today `install.sh` + `ca.pem`; everything else
+  sign-in flow itself) and **`/services/public/*`** (data-free; today only `install.sh`; everything else
   under it 404; never reads repo data or takes a bearer — test `public_lane_serves_only_the_installer_without_auth`).
 - **The server answers an invalid/expired credential with a real 401** — that is what makes git `erase` it from
   its helpers and ask again; the friendly 200 + in-band ERR is reserved for failures a retry cannot fix (account
@@ -95,8 +98,14 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
   (the client's bearer travels in `X-Floe-Authorization`; `Authorization` is the hop's own credential and is
   never read as the client's) and `accel-redirect` (static bytes by `X-Accel-Redirect`, honoured only when
   `server.accel_redirect = true` **and the TCP peer is loopback**). Hit directly, nothing is assumed.
-- **The installer** (`crates/floe-server/src/setup.rs`, POSIX sh, idempotent): git ≥ 2.46 + curl; pins a
-  self-signed host's CA; takes the token from `$FLOE_TOKEN`, an already stored one, or the terminal (no terminal:
+- **TLS (D59)**: `server.tls.mode = off | files | acme`. Whatever floe presents chains to a CA clients already
+  trust, or there is no TLS — **there is no self-signed mode and nothing for a client to pin**. `validate` fails
+  closed: `acme` needs `domains`, `email`, the Cloudflare token env var name and `storage_key_env`, takes only
+  `challenge = "dns-01"`; keys of another mode are refused; a missing token or storage key is a startup error.
+  Tokens, the account key and private keys are never logged; private keys are sealed (AES-256-GCM) in the
+  bucket. The certificate status (with the last renewal error) is admin-only at `GET /api/v1/tls`.
+- **The installer** (`crates/floe-server/src/setup.rs`, POSIX sh, idempotent): git ≥ 2.46 + curl, TLS always
+  verified (never `-k`, never `sslCAInfo`); takes the token from `$FLOE_TOKEN`, an already stored one, or the terminal (no terminal:
   exit 2 with the two things to do); writes `~/.config/git/<host>-token` (0600) and the credential helper
   `<host>-credential-helper` (`get` → `authtype=Bearer`; `store` keeps what git hands it; `erase` on a 401 deletes
   the token and names `/_auth/tokens`); sets exactly `credential.https://<host>.helper` = `""` then ours,
@@ -141,9 +150,14 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `bundles/list.pb`, `bundles/<strategy>/…` | bundle-uri artefacts + CAS'd list. |
 | `leases/<name>.pb` | CAS lease with TTL heartbeat: `compact`, `bundle:<strategy>`. The only cross-instance mutex. |
 | `cache/api/v1/<sha1>.json` | Shared render cache of immutable web API answers. |
-| `policy.json` | Per-repo push policy (rule language, not on the WAL). `docs/POLICY.md`. Missing = allow-all. |
+| `policy.json` | Per-repo push policy (rule language, not on the WAL). `docs/POLICY.md`. Missing = allow-all, except the built-in `archive-immutable` rule on `refs/archive/**` (D48). |
 | `fsck.pb` | Last connectivity audit (`FsckReport`), written by the maintainer's `fsck` unit, consumed by `repair` (`docs/INTEGRITY.md`). |
 | `events/cursor.json` | Durable acknowledged WAL sequence of the events bridge; advanced only after the webhook acknowledged (D32). |
+| `catalog/cursor.json` | The catalog tail's own cursor (D50): last seq whose rows the Iceberg catalog committed. Unrelated to the bucket-root `meta/repos.pb` catalog. |
+| `refs/archive/<unix-ts>/<ref>` (a ref, not an object) | Old tips that upstream follow kept when upstream rewrote or deleted a followed ref (D48); never overwritten, never followed, immutable to pushers (built-in policy rule `archive-immutable`). |
+| bucket root: `mirror/github/state.json`, `mirror/github/http-cache.json` | The GitHub mirror's state (CAS, generation-guarded) and its disposable ETag cache (`PutMode::Overwrite`), D49. |
+| bucket root: `catalog/epoch.json`, `catalog/inventory.json`, `leases/mirror-github.pb`, `leases/catalog-inventory.pb` | When the catalog was first enabled (create-once), the daily inventory snapshot's schedule (CAS), and the two fleet-wide leases (D49/D50). |
+| bucket root: `tls/acme/<dir>/account.json`, `tls/acme/<set>/cert.json`, `tls/acme/<set>/status.json`, `leases/tls-acme-<set>.pb` | `server.tls.mode = "acme"` (D59): the ACME account (key sealed), the chain + sealed private key every instance revalidates by conditional GET, the shared renewal backoff, and the order lease. `<dir>` = hash of the directory URL, `<set>` = hash of directory + sorted domains. Not WAL. |
 | `lfs/objects/<aa>/<bb>/<oid>` | LFS objects (sha256-addressed, immutable). Missing ones can be read through from `upstream.lfs` and persisted (`docs/LFS.md`). |
 Schema `crates/floe-proto/proto/floe/v1/wal.proto`; GCS over gRPC, S3 (AWS SDK) and in-memory stores share
 one contract suite (`crates/floe-store/tests/contract.rs`, incl. compose).
@@ -158,9 +172,11 @@ rejected push leaves nothing behind) → connectivity per config (`spawn_blockin
 Hosts that maintain nothing may forward receive-pack to a **push broker** (`wal.push_broker_url`) so one warm
 writer batches the CAS; fallback to the local path if the broker is down. Publish is CAS-safe, so disjoint writer
 sets are correct by construction; the broker is an optimization, never a dependency. Never ACK before the bucket
-ACKs. **Upstream follow** (`floe_server::follow`, D33) is the second writer shape: refs in a repo's `[upstream]
-follow` are brought up to `upstream.git`'s by the maintaining host every `maintenance.follow_interval` through the
-same ingest → connectivity → fast-forward → `publish_push` path, `principal = upstream`.
+ACKs. **Upstream follow** (`floe_server::follow`, D33/D48) is the second writer shape: refs matching a repo's
+`[upstream] follow` patterns are brought up to `upstream.git`'s by the maintaining host (a refs-level probe every
+`maintenance.follow_interval`; Serve-level work only when something moved) through the same ingest → classify →
+connectivity → `publish_push` path, `principal = upstream`; rewritten/deleted tips are kept under
+`refs/archive/<unix-ts>/<ref>` in the same entry.
 
 ### 2.3 Read path — sync levels (`RepoHandle::sync_*`, `floe-wal/src/handle.rs`, `sync.rs`)
 Every request: conditional GET of `manifest.pb` (skippable for `wal.freshness_ttl`) → 304 serve / 200 apply.
@@ -255,7 +271,7 @@ decision in §4 — or the PR is; never "fix later".
 | # | Principle | The tell in a PR | The question to answer |
 |---|---|---|---|
 | **I** | **No state outside the object store.** Disk and memory are caches. | A database, Redis, SQLite, a file that must survive a restart, an env var that encodes data. | "If every instance is wiped now, what is lost?" — must be "warmth". |
-| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, events/cursor, maintainer heartbeats, render cache). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
+| **II** | **The manifest CAS is the only commit point.** Immutable objects are never overwritten (`PutMode::Overwrite` only on the manifest, bundle list, leases, fsck.pb, events/cursor, maintainer heartbeats, render cache, the mirror's HTTP cache, the `tls/acme/*` objects written under the `tls-acme` lease, and the code-intel pointers of D52: `codeintel/head.pb`, `codeintel/dir/head.pb`, `codeintel/tasks/*.json`, `codeintel/tables.json`). | A second "commit" (a flag file, a list update that makes data visible), an ACK before the bucket's. | "What does a client on another instance see between the PUT and the CAS?" — nothing new. |
 | **III** | **Side effects are readers of the WAL, never steps of a write.** Events, mirrors, notifications tail the log from a durable cursor. | A webhook/HTTP call from `receive.rs`, `publish.rs`, `follow.rs`, `smart.rs`. | "If this side effect fails, does the push?" — no. "Is it replayable from the cursor?" — yes. |
 | **IV** | **Every read revalidates; there is no eventually.** | A cache that outlives the manifest's generation, a TTL invented for a repo-scoped answer, a read that skips `sync_*`. | "After `push` returns `ok`, can any instance serve the old state?" (`cargo test -p floe-server --test sim`). |
 | **V** | **Serve from the parts that fit; never a bigger box, never a hard-coded host.** | "Just download the pack", a path that assumes the full pack set is local, a hostname in `crates/` or `web/`. | "What happens to this code on a 20 GiB tmpfs with a 32 GB base pack? Which sync level does it need?" |
@@ -282,7 +298,7 @@ decision in §4 — or the PR is; never "fix later".
 - **D4** protobuf on the wire and in the bucket; schema versioned, append-only.
 - **D5** Repo identity `<owner>/<repo>[.git]`, prefix `repos/<o>/<r>/`, creation = CAS create of the manifest.
 - **D6** Manifest CAS is the only commit point. **D7** No node identity, no elections; leases for exclusivity.
-- **D8** `floe.toml` only (+ `FLOE__` env overrides). **D9** One binary, roles by config (`serve`,
+- **D8** `floe.toml` only (+ `FLOE__` env overrides) — for bootstrap keys since D60; runtime keys live in the config store. **D9** One binary, roles by config (`serve`,
   `maintain`, `events`; `maintain` includes compaction and bundles).
 - **D10** One static-serving code path for every immutable byte (ETag/304/If-Range/Range/416/HEAD/immutable;
   UI assets precompressed at build; store objects never compressed at request time).
@@ -346,7 +362,10 @@ decision in §4 — or the PR is; never "fix later".
   `…/history`; `floe repo settings show|set|clear|history`. Not in settings: auth, store, server, wal, cache,
   `upstream.token_env` (host-only). `GET …/effective` returns only those sections. PUT/DELETE of settings and of
   `policy.json` require an **admin** principal (`tokens[].admin`, or oidc `admin_emails`/`admin_domains`;
-  `mode = none` is admin on loopback). Write is push, not admin.
+  `mode = none` is admin on loopback). Write is push, not admin. *2026-10-04:* the document may also carry
+  `[repo]`, the repository's own metadata, never merged into the config (`floe_config::RepoMeta`): today
+  `description` (one line, ≤ 512 chars), shown as `description` by `GET …/api/overview` and the web UI; the GitHub
+  mirror writes `Mirror of <url>` there (D49).
 - **D25** **Two cache modes.** `cache.mode = "budget" | "disk" | "auto"` (auto = disk when `maintenance.disk =
   "ssd"`); in **disk** mode `cache_budget_bytes()` is 0 = unlimited — every repo fully local, never the
   too-large/remote/link path, eviction only under disk pressure (`cache.disk_high_watermark`, idle-oldest first).
@@ -387,9 +406,10 @@ decision in §4 — or the PR is; never "fix later".
   host without the repo local, pushing over HTTP.
 - **D39** **floe is a standalone program; any deployment is packaging.** `floe-server --config x.toml` (a thin
   bin = `floe serve`; `floe` with no subcommand serves too) works on one machine against one bucket with
-  nothing in front of it. (1) **TLS in-process** — `[server.tls] mode = off | self_signed | files`; self-signed
-  certs are generated once under `<cache.dir>/tls/`, published at `/services/public/ca.pem`, pinned for git by the
-  installer. (2) **Everything an upstream might take over is announced by the upstream, per request, in
+  nothing in front of it. (1) **TLS in-process** — `[server.tls]`; the modes are D59's (`off | files | acme`).
+  *(Superseded 2026-10-04 by D59: the original `self_signed` mode — a certificate generated under
+  `<cache.dir>/tls/`, published at `/services/public/ca.pem` and pinned for git by the installer — is gone.)*
+  (2) **Everything an upstream might take over is announced by the upstream, per request, in
   `X-Floe-Capabilities`** — never assumed. (3) `cache.dir` defaults to `/tmp/floe`. (4) A missing `--config`
   file is fatal (exit 2); `--config /dev/null` is the explicit defaults+env form. (5) The credential helper and
   token file are host-derived (`<host>-credential-helper`, `<host>-token`) so two floe hosts coexist on one machine.
@@ -467,6 +487,196 @@ and its preceding checkpoint. The bridge traverses that immutable index when its
 objects; unreferenced log objects are not evidence of a committed write. This adds no publish/checkpoint
 round trips and no object-store LIST.
 
+**D48 — Follow patterns and archive-on-rewrite (2026-10-04).** `[upstream] follow` takes git refspec patterns
+(one `*` crossing `/`, `^` negatives; `refs/archive/` and `refs/follow/` are never followed;
+`floe_config::refpattern`). With `on_rewrite = "archive"` (default), a non-fast-forward, a tag move, or a
+deletion upstream publishes **one** PUSH entry that creates `refs/archive/<unix-ts>/<original-ref>` at the old tip
+(`old_oid = ""`, never overwritten) and applies upstream's state, with `meta["follow.archived"]`. The round is one
+atomic transaction: any ref that moved under it rejects the whole round, which the next round re-plans. An upstream
+that advertises no refs at all never causes deletions. A round probes refs first and does Serve-level work only
+when something moved. `"refuse"` is D33's behaviour. Follow still bypasses policy. Upstream tokens resolve through
+`Config::upstream_token_env` (`upstream.token_env_by_host`, host-only, then `token_env`). Pushers cannot write
+`refs/archive/**` on any repository: policy has a built-in `archive-immutable` rule (create/update/delete, no
+bypass) that a policy file replaces only by defining a rule of that name (`docs/POLICY.md`). Supersedes D33's
+"fast-forward only" clause; the rest of D33 stands. Design: `docs/design/github-mirror.md` §A.
+
+**D49 — The GitHub mirror decides, follow moves bytes (2026-10-04).** `floe-mirror` runs on a `maintain` host
+(`[github_mirror] enabled`, its own loop next to follow) or as `floe github sync`, under
+`leases/mirror-github.pb`; it keeps `mirror/github/state.json` (CAS, generation-guarded) and a disposable
+`mirror/github/http-cache.json` (`PutMode::Overwrite`, a cache) in the bucket, maps `Owner/Name` to the plain
+`owner/name` (lowercased, no prefix; owner decision 2026-10-04, R1), creates repositories by the manifest CAS
+(after recording the name it is about to create, `RepoEntry.claiming`), publishes a read-only `policy.json`
+(create-only) and owns only the `[upstream]` table and `repo.description` (`Mirror of <url>`, the visible
+marker) of repositories marked `upstream.source = "github:<id>"`, written with `publish_settings_if` (a CAS on
+the settings revision). A repository that already holds the name and is not the mirror's (an own repository) is
+never adopted or overwritten: the entry is `conflict` (state, `floe github status`, an inventory row) and is
+retried every pass. A human edit of that table (settings author not `github-mirror`) detaches the repository. It
+never deletes a floe repository (gone/excluded repositories are frozen with `follow = []`), never stores a token
+(`token_env` + `upstream.token_env_by_host`), and never transfers git objects: a push seen at the forge nudges
+`ops::start(.., "follow")` on the maintaining host only. GitLab/Gitea implement `Source`. Design:
+`docs/design/github-mirror.md` §B.
+
+**D50 — Iceberg audit tables are a WAL reader, behind a feature (2026-10-04).** `floe-catalog` (`--features catalog`
+on `floe-cli`/`floe-server`, which turns on `floe-catalog/iceberg`) writes `ref_events`/`force_push_log` from the WAL
+in its own loop on the events host (`floe_server::catalog_tail`), outside the webhook's catch-up: a bucket
+notification only `try_send`s the repository to it, and its sweep runs on `events.sweep_interval`. It has its own
+cursor `repos/<o>/<r>/catalog/cursor.json` (at-least-once, dedup `(repo, seq, ref_name)`), takes
+`sync_runs`/`repo_inventory` changes from lossy telemetry (`AppState::recorder`, a `NoopRecorder` when off), and
+writes a durable daily `repo_inventory` snapshot under `leases/catalog-inventory.pb` (schedule in
+`catalog/inventory.json`). The catalog is never a source of truth and never holds git objects; its outage only adds
+catalog lag. Git, sync, follow and the mirror never await it. `catalog.enabled` in a binary built without the
+feature is a fatal startup error. Design: `docs/design/github-mirror.md` §C.
+
+**D51 (reserved, 2026-10-04) — Push to an upstream is a WAL reader on the maintaining host.** Not built. Reserved
+so the rules are on record first: a ref is either followed or pushed, never both (`validate` refuses an overlap of
+`upstream.follow` and `upstream.push`); entries with `principal = upstream` are never pushed; a push is idempotent
+(`ls-remote` first), never forced unless `push_force`, and `refs/archive/*` is never pushed. Seam:
+`floe_server::push_back`, a per-repo cursor `repos/<o>/<r>/push/<remote>.json`. Design:
+`docs/design/github-mirror.md` §E.
+
+**D59 — TLS: off, provided files, or ACME DNS-01; no self-signed (2026-10-04).** Supersedes D39 (1).
+`[server.tls] mode` is exactly one of: **`off`** (plain HTTP/1.1 + h2c: loopback development or behind an edge
+that terminates TLS, D23), **`files`** (operator chain + key; reloaded on mtime/size change, polled every 5 s, or
+`SIGHUP`; a bad pair keeps the old certificate), **`acme`** (RFC 8555 through **DNS-01 only** — HTTP-01 and
+TLS-ALPN-01 would need every instance behind the name to answer the token, DNS-01 needs one writer and covers
+wildcards; Cloudflare first, behind `floe_tls::dns::DnsProvider` for Route 53 / RFC 2136). The self-signed mode,
+`/services/public/ca.pem` and the installer's CA pinning are removed: a client either sees a certificate from a CA
+it trusts or plain HTTP. TLS stays **bootstrap config** (file + `FLOE__` env), never a bucket-stored config
+document — the listener needs it before anything else. **ACME state is in the bucket** (principle I; §2.1 rows):
+account and certificate under `tls/acme/`, private keys sealed with AES-256-GCM (`ring`, already in the tree;
+random 96-bit nonces are safe at a few seals per renewal and need no nonce state) under a 32-byte key from
+`storage_key_env`, bound to their object key as associated data. **One orderer**: the instance that wins
+`leases/tls-acme-<set>.pb` (the existing CAS lease, heartbeat while ordering) orders or renews; everyone
+revalidates `cert.json` by conditional GET every `poll_interval` (10 min; 10 s while nothing is loaded) and swaps
+the new certificate into a rustls `ResolvesServerCert` — new handshakes get it, established connections keep
+theirs, no restart. A `cert.json` whose recorded domains or directory differ from the config, or whose leaf SANs do
+not cover every configured name (wildcard-aware), is refused: the current certificate stays, the refusal is logged
+and counted as a failure. The Cloudflare token goes only to `https://`, or plain `http://` to exactly
+`127.0.0.1`/`::1`/`localhost` (a mock). An issued certificate whose `cert.json` write fails (bucket outage) is served from
+memory and only the write is retried with backoff — never a re-order, which would spend Let's Encrypt's
+5-duplicates-a-week budget. `email`, `domains` and the env var names are trimmed once at parse (`Config::normalize`). The first order is a `tls-acme` task (D13) and `/readyz` is 503 until a certificate is loaded.
+Propagation is checked against the zone's authoritative nameservers (or `resolvers`) with a timeout before the CA
+is asked; challenge records are always deleted. Renewal starts `renew_before` ahead of expiry but never before two thirds
+of the certificate's lifetime (a 60-day `renew_before` against a 6- or 45-day profile would otherwise make every
+fresh certificate due and re-order every poll), and no order starts within 12 h of a successful one while a
+certificate is loaded. Failures back off 5 min × 2ⁿ up to 6 h (≥ 1 h after
+`rateLimited`), recorded in `tls/acme/<set>/status.json`, which every instance revalidates with `cert.json`, so
+restarts and other instances honour it and show the same state; inside
+`renew_before` a failing renewal logs a warning every pass. Crates: `instant-acme` (maintained, RFC 8555, used
+over our reqwest), `hickory-resolver` (propagation), `x509-parser` (expiry/issuer). Surfaces: `GET /api/v1/tls`
+(admin: domains, expiry, issuer, last renewal and error — the admin UI's overview), `instance.tls` on `/readyz`
+and `/services/api/instance` (public facts only), `floe_tls_cert_not_after_seconds` and
+`floe_tls_acme_orders_total{ok}`. Tests: config validation, seal round trip, resolver swap (with a real
+handshake), file reload, a mocked Cloudflare API, and the whole flow against Pebble + pebble-challtestsrv in CI
+(`acme-pebble`, both arches). Not done: key rotation for `storage_key_env` (rotating it means deleting `tls/acme/`
+and ordering afresh), ARI (`renewalInfo`), EAB, providers other than Cloudflare.
+
+**D63 — The Iceberg catalog client signs SigV4 itself (2026-10-04).** `[catalog] auth = "none" | "bearer" |
+"sigv4"` (with `sigv4_service`, default `"s3"` = RustFS `/iceberg`, `"s3tables"` = AWS; `sigv4_region`, default
+`s3_region`), validated fail closed. Because `iceberg-catalog-rest` 0.10.1 has no request hook, `auth = "sigv4"`
+puts an in-process signing proxy (`floe_catalog::sigv4::SigningProxy`) between `RestCatalog` and the endpoint: an
+axum server on a Unix socket in a `0700` temp directory, reached only through the reqwest client handed to
+`RestCatalogBuilder::with_client`; it accepts only the configured host, signs with `aws-sigv4`
+(`x-amz-content-sha256`, `X-Amz-Date`, `X-Amz-Security-Token`) and forwards. No TCP listener, no state (the socket
+dies with the connection, so principle I holds). Credentials follow D43 (static env pair, else the AWS SDK chain,
+refreshed before expiry) and the same source is the data-file `FileIO`'s only credential provider. The module is
+self-contained for the shared Iceberg crate the code-intelligence design plans; when iceberg-rust's `AuthManager`
+(0.11) lands, it replaces the proxy behind the same config. Design: `docs/design/github-mirror.md` §C.9.
+
+**D60 — Bootstrap file, versioned config document (2026-10-04).** `floe.toml` + `FLOE__` env keep only what an
+instance needs to start and to reach the config store (store, `[config_store]`, server/auth/TLS, cache, wal, git,
+lfs, telemetry, maintenance, placement, compaction, bundles, upstream, the `[github]` facade). Runtime configuration —
+`github_mirror`, `catalog`, `events` (`floe_config::RuntimeConfig`) — is one JSON document at
+`<config_store.prefix>current.json` in `[config_store] bucket` (default: `config/` in the main bucket), written by CAS
+with a monotonic revision; `history/<rev>.json` records every revision (author, message, timestamp, diff) and points
+at the bucket's object version when the bucket is versioned (`history = auto|records|versions`). One home per key:
+the file refuses runtime sections and `FLOE__` overrides of them are ignored; the document cannot carry bootstrap
+keys. Publish validates with the same code as startup and fails closed (400, nothing written); rollback publishes
+an old revision as a new one. Every instance revalidates with a conditional GET every `config_store.ttl`, off every
+request path; the mirror applies changes live at its next pass boundary, `events`/`catalog`/`github_mirror.git_url`
+report *restart required*. A config store outage never blocks git: an instance starts with the built-in runtime
+defaults and keeps revalidating. Design: `docs/design/admin-ui.md`. Supersedes D49's "never stores a token" for
+sealed tokens (D61); the rest of D49 stands.
+
+**D61 — Secrets in the config document are write-only and sealed (2026-10-04).** A secret field is
+`{env = "NAME"}` (read on every instance; nothing in the bucket), or `{sealed = "v1.<kid>.<b64>"}` — AES-256-GCM
+(`ring`) under the 32-byte key in `FLOE_CONFIG_KEY` (`config_store.key_env`), the field path as associated data.
+`{value = …}` is input only (sealed before writing; 400 without a key), `{redacted = true}` is what reads return and
+means "keep" on write (D46's redaction rule). Resolution goes through one process-wide alias per secret field
+(`floe_config::secret::env_var`), refreshed on every apply and read at every use (a token entered later reaches
+follow/LFS without a restart; unresolved = anonymous). **Env names are host facts**: every `{env}` and `*_env` in the
+document must be allowed by the bootstrap `[config_store] allowed_env` (default `FLOE_SECRET_*` + the documented
+names; `key_env`, `FLOE__*`, `AWS_*` and the store/auth variables only when listed exactly; the catalog's SigV4
+signing-key fields may also name the AWS defaults, because SigV4 sends only the key id, a host-bound signature and
+a session token that is useless without the secret), checked in
+`Config::with_runtime`, i.e. at publish (400) and at every apply. Test endpoints never send a caller-named env var,
+send the stored credential only to the applied URL, follow no redirect and echo no body (`docs/design/admin-ui.md`
+§5.3).
+
+**D62 — The admin API and the SPA's admin area (2026-10-04).** `/api/v1/admin/*` (and `/api-browser/v1/admin/*`):
+config get/put/validate/schema/history/revisions/rollback, overview, mirror status/preview/test/sync/pause/resume,
+catalog status/test. Every route, reads included, needs an admin principal (D24's rule); `GET /api/v1/me` reports
+`admin`. Every publish is audited (history record + log line + a lossy `sync_runs` row `kind = "config"` with the
+catalog on). Per-repo pause is a config change (exact `owner/name` in `github_mirror.exclude`, the mirror's frozen
+state). `repos.js` maps it as `repos.admin.*` (dogfood rule); the bundled UI's admin area lives at `/_admin` and
+renders the runtime sections from `GET …/config/schema`. TLS is never editable there (D59): the overview shows
+`GET /api/v1/tls` read-only.
+
+**D52 — Code intelligence is a derived index, in scope as a feature-gated capability (2026-10-04).** Git is
+the content truth; the `code.*` Iceberg tables (append-only, keyed by blob sha / chunk hash, format v2) are the
+durable truth of extracted facts and embeddings; everything served is an immutable, content-addressed artifact
+(`codeintel/shards`, `codeintel/vec`, `codeintel/dir`) made visible by a per-repo CAS'd
+`repos/<o>/<r>/codeintel/head.pb`. `head.pb`, `codeintel/dir/head.pb`, `codeintel/tasks/*.json` and
+`codeintel/tables.json` join principle II's Overwrite list; per-generation `commits/<commit>/<generation>.pb`
+records are immutable, and artifact liveness follows generation retirement, never write time. GOAL §4 gains
+"agent-facing code navigation and search over hosted repositories, as derived, rebuildable artifacts". Everything
+is behind cargo features (`codeintel`, `mcp`), off by default; the default build is unchanged, and a
+`[codeintel]`/`[mcp]` key that needs a feature the binary lacks is a fatal config error naming the build flag.
+`[codeintel]` and `[mcp]` are runtime sections of the config document (D60, restart-only); `[access]` is a
+bootstrap host default overridable per repository (D24).
+The extraction core is the pure library `crates/floe-codeintel` (bytes in, records out: no store, no tokio, no
+axum). Design of record: `docs/design/code-intelligence.md`.
+
+**D53 — Indexing is a maintainer unit, not a write step (2026-10-04).** A reader of the WAL's ref state whose
+work set is the diff between the D22 desired state (tracked tips, current extractor, intact artifacts, empty
+requests, catalog caught up) and `head.pb`, the same function the planner uses; placed by D30, one lease per repo;
+no code in receive, publish or follow. Embedding is a separate unit with its own lease and rate limit.
+
+**D54 — Per-repo read authorization is one function (2026-10-04).** `[access] read` per-repo settings (a D24
+extension, with a per-repo subset of `[codeintel]`) evaluated by `policy::authorize_read`, shared by git, the web
+API and MCP; MCP is never more permissive than `git clone`; cross-repo retrieval applies the readable-repo mask
+inside postings and vector scans, never after top-k. Until `authorize_read` ships (M5), `Config::validate` accepts
+only the default `read = ["authenticated"]`: a rule nothing enforces is refused, not silently ignored.
+
+**D55 — `/api/v1/mcp` and `/{o}/{r}/mcp` are stateless MCP 2026-07-28 endpoints; floe is an OAuth resource
+server (2026-10-04).** The global endpoint lives under D15's non-repository prefix so it shadows no owner; both
+are exact routes of one service, and the per-repo route passes its validated repo to the handler as a request
+extension (rmcp hands the request's `http::request::Parts` to the handler in `RequestContext.extensions`; verified
+in the M0 spike, `docs/design/spikes/rmcp-request-parts.md`). rmcp pinned exactly; PRM at the well-known paths,
+the per-repo endpoint advertising and accepting its own resource; audience-bound IdP access tokens, `wgt_` tokens
+of the HMAC kind `mcp` (refused on git and web), and scoped static tokens; ID tokens refused. The edge may route
+`/api/v1/mcp` by `Mcp-Param-Repo` (from `x-mcp-header: "Repo"` on the root-level `repo` property) and by nothing
+else; routing is an optimisation, never a correctness dependency.
+
+**D56 — Freshness before durability, for deterministic facts only (2026-10-04).** A nav shard may be served
+before its Iceberg rows commit, because it is a pure function of git and the extractor version; the rows are then
+owed, tracked per ref as `catalog_commit`, and re-derived from the published shards until the marker commits;
+embeddings must commit to Iceberg before any artifact derived from them is published.
+
+**D57 — Agent state is explicit, signed and re-authorized (2026-10-04).** The snapshot handle pins (repo,
+commit, generation, purge epoch) with an HMAC under a key derived from `server.auth.mcp_handle_secret`
+(a bootstrap key, so never in the config document; default `server.auth.session_secret`; one of the two, ≥ 32
+bytes, is required when MCP is on), lives 24 h, and is
+re-checked against `authorize_read` on every call; continuation cursors are HMAC'd positions; there are no MCP
+sessions; MCP tasks live in the bucket and are durable before `CreateTaskResult` is returned (a `reindex` task is
+durable as a record and as a queued `head.pb` request; queued tasks are judged by their request, running ones by
+heartbeat).
+
+**D58 — SQL visibility is by marker rows (2026-10-04).** `code.blobs` then `code.commits_indexed` are committed
+last; the latter records each table's snapshot id, its generation and its purge epoch; purges hide earlier epochs
+only; `views.sql` (shipped, tested against DuckDB) gives exactly-once, commit-consistent reads; catalog
+credentials are an admin privilege, one table bucket per tenant.
+
 ## 5. Working rules
 
 - **No backwards compatibility (pre-1.0, banner at top):** change the shape and delete the old one in the same
@@ -497,13 +707,39 @@ round trips and no object-store LIST.
   old readers within the retention window.
 - Web: pnpm + Vite, `pnpm run build` must pass oxlint/tsc. Config: `floe.example.toml` documents every key;
   change it with the code.
-- Test tiers: `just test` (fast, < 1 min), `just e2e`, `just warnings`, `just clippy` (the
-  `[workspace.lints]` set, `-D warnings`), `just ci` = all four; the **simulation
-  suite** `cargo test -p floe-server --test sim` (fault links per instance over one truth store: crash,
+- Test tiers: `just test` (fast, < 1 min; includes D48 `--test follow` and `--test policy`), `just e2e`, `just fmt-check`, `just warnings`,
+  `just clippy` (the `[workspace.lints]` set, `-D warnings`), `just clippy-catalog` + `just test-catalog-lib`
+  (the `--features catalog` build the release ships), `just clippy-codeintel` + `just test-codeintel` (the `--features mcp` build, D52), `just ci` = all of
+  them, including the **simulation
+  suite** `just sim` = `cargo test -p floe-server --test sim` (fault links per instance over one truth store: crash,
   partition, stale, lost response, orphan scenarios + randomized seeds `FLOE_SIM_SEEDS`/`FLOE_SIM_SEED`);
   `just test-slow` (ignored benches); `tests/e2e.sh` against a running server (`FLOE_E2E_BASE_URL`,
   `FLOE_TOKEN`). Never `cargo test --workspace --no-fail-fast` in a session; wrap ad-hoc cargo in `timeout`.
 - Known flaky (find the cause, not the assertion): `fetch_from_front_that_serves_the_base_remotely` (~1 in 3
   under the full e2e suite: base published without `has_commit_graph`) and
-  `sim::base_rebuild_resumes_after_a_kill_between_any_two_phases` (~1 in 7, shared `TEST_ABORT_AFTER`). Both
-  pass alone.
+  `sim::base_rebuild_resumes_after_a_kill_between_any_two_phases` (~1 in 4–7; fails even with `just sim`'s
+  one-test-at-a-time, "copying the serving copy to the scratch dir: No such file", #14), and
+  `sim::sim_cache_pressure_keeps_pinned_repos_and_refuses_too_large` (a cold refs read > 1 s on CI runners, #12).
+  The PR gate skips the two sim tests; the nightly runs them.
+- **CI runs what a change needs** (`.github/workflows/ci.yml`; a `changes` job reads the PR's file list). Push
+  to `main` and a manual run run everything. On a pull request:
+
+  | Job | Runs when the PR changes |
+  |---|---|
+  | warnings + test, Git/editor contracts + `just sim` (both arches) | anything but docs (`docs/**`, `**/*.md`, `site/**`, `LICENSE`, `NOTICE`) |
+  | catalog feature (both arches), rustfmt, MSRV (`just msrv`, x86_64) | `crates/**`, `Cargo.*`, `rust-toolchain.toml`, `.cargo/**`, `clippy.toml`, `justfile`, `.github/workflows/**` |
+  | ACME against Pebble (both arches) | `crates/floe-{tls,store,config,proto}/**`, `Cargo.*`, `rust-toolchain.toml`, `.cargo/**`, `.github/workflows/**` |
+  | release container: amd64 | what the Containerfile copies: `crates/**`, `Cargo.*`, `rust-toolchain.toml`, `web/**` (not `*.md`), `deploy/**`, plus `Containerfile`, `.dockerignore`, `compose.yaml`, `scripts/**`, `.github/workflows/**` |
+  | release container: + arm64 | the build recipe: `Containerfile`, `.dockerignore`, `compose.yaml`, `deploy/**`, `Cargo.lock`, `rust-toolchain.toml`, `web/package.json`, `web/pnpm-lock.yaml`, `scripts/**`, `.github/workflows/**` |
+  | cargo-deny (`deny.toml`) | `Cargo.lock`, `deny.toml` |
+  | actionlint | `.github/**` |
+
+  `CI result` aggregates them: green when every job succeeded or was skipped by its filter, and is the one CI
+  check branch protection requires. **`main` is protected**: a merge needs `CI result` and `Conventional commit
+  title validation` green on a branch up to date with `main`; no review is required (the owner merges their own
+  PRs), admins can bypass, force pushes and deletion are refused. (`CI result` joins the required checks once
+  this workflow is on `main`: `echo '{"strict":true,"checks":[{"context":"CI result","app_id":15368},{"context":"Conventional commit title validation","app_id":15368}]}' | gh api -X PATCH repos/kharkevich-engineering-lab/floe/branches/main/protection/required_status_checks --input -`.) Rust and BuildKit
+  caches are written from `main` only (a PR push saving ~5 GB evicted the next run's cache from the 10 GB
+  budget). The **nightly** workflow (03:17 and 15:47 UTC) runs `just test-slow`, the sim with random seeds and
+  `just deny`, and opens or refreshes one `nightly` issue when it fails. The MSRV is `rust-version` in
+  `Cargo.toml` (1.94.1, the floor of the locked aws-sdk graph); the toolchain pin is `rust-toolchain.toml`.

@@ -1,0 +1,3 @@
+file docs/notes.md lang=text flags= size=81 lines=3
+extractor ts-tags/1;cast/2;text
+chunk lines=1-3 bytes=0-80 kind=window def=- symbol="" tokens=22 hash=a05ca1563d14af70c2962e4b80a8462cb57ba1cb1c8dfdaaa090f5a618a295b2

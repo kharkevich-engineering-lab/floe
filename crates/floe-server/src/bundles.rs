@@ -63,11 +63,10 @@ pub async fn list(
         filter.as_deref().unwrap_or(""),
         if fulls { "" } else { "&catchup" }
     );
-    let list_version =
-        floe_store::ObjectStore::head(handle.store(), floe_proto::keys::BUNDLE_LIST)
-            .await
-            .map_err(ApiError::from)?
-            .map(|m| m.version.to_string());
+    let list_version = floe_store::ObjectStore::head(handle.store(), floe_proto::keys::BUNDLE_LIST)
+        .await
+        .map_err(ApiError::from)?
+        .map(|m| m.version.to_string());
     let Some(list_version) = list_version else {
         return Err(ApiError::NotFound("no bundles".into()));
     };
@@ -175,9 +174,9 @@ pub async fn compose_full_from_base(
     cfg: &floe_config::Config,
     slot: u64,
 ) -> anyhow::Result<floe_proto::v1::BundleEntry> {
-    use tracing::info;
     use floe_proto::prost::Message;
     use floe_store::ObjectStoreExt;
+    use tracing::info;
     let handle = registry.open(id).await?;
     drop(handle.sync_refs().await?);
     let manifest = handle.manifest();

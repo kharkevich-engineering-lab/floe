@@ -1,0 +1,13 @@
+file web/src/App.tsx lang=tsx flags= size=295 lines=10
+extractor ts-tags/1;cast/2;tsx=0.23.2@7ea4efce
+def #0 type Props @3:6-3:11 body=3-3 parent=- in="" flags=0 sig="type Props = { title: string };" doc=""
+def #1 function App @5:17-5:20 body=5-8 parent=- in="" flags=1 sig="export function App({ title }: Props) {" doc=""
+def #2 function Header @10:14-10:20 body=10-10 parent=- in="" flags=1 sig="export const Header = (props: Props) => <h1>{props.title}</h1>;" doc=""
+ref type Props @5:32-37 in=1
+ref call useState @6:29-37 in=1
+ref call setCount @7:33-41 in=1
+ref type Props @10:31-36 in=2
+chunk lines=1-1 bytes=0-33 kind=block def=- symbol="" tokens=10 hash=1e5e8109c69757c900cad6f4edd701fec65e14cae27b1d7624644ed35eb27db6
+chunk lines=3-3 bytes=35-66 kind=type def=0 symbol="Props" tokens=9 hash=0e69a4286137bac8856e71a42a345397d6eed2ad24d36588d9e9e6f7ab11dd96
+chunk lines=5-8 bytes=68-229 kind=function def=1 symbol="App" tokens=46 hash=cbce1bb6436e24a3d02543044d58844e1099e3d042ed4461fdd05940d5203f69
+chunk lines=10-10 bytes=231-294 kind=function def=2 symbol="Header" tokens=19 hash=da527c9f0ba13625710f408b1cda3d88d1c9bd790a8a3e980bf696bf31ee1a87

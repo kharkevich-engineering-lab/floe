@@ -12,10 +12,10 @@ mod common;
 
 use std::path::Path;
 
+use floe_git::{IngestOptions, LocalRepo, ObjectFormat, RepoId, gix_hash};
 use std::fmt::Write as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
-use floe_git::{IngestOptions, LocalRepo, ObjectFormat, RepoId, gix_hash};
 
 mod cm {
     pub use super::common::*;

@@ -49,11 +49,10 @@ mode = "none"
 mode = "off"            # see below
 ```
 
-**TLS must be off.** `floe.standalone.toml` uses `mode = "self_signed"` (D39), and Node will not trust a
-self-signed CA without `NODE_EXTRA_CA_CERTS` pointing at `/services/public/ca.pem` — octokit's fetch fails
-with `SELF_SIGNED_CERT_IN_CHAIN` before any of this code runs. `mode = "off"` (the default) serves plain
-HTTP/1.1 + h2c, which is what the facade is documented and tested against. If you want TLS anyway, fetch
-`http(s)://<host>/services/public/ca.pem` and export `NODE_EXTRA_CA_CERTS`.
+**TLS off.** `mode = "off"` (the default, and what `floe.standalone.toml` uses) serves plain HTTP/1.1 +
+h2c on loopback, which is what the facade is documented and tested against. The facade is never deployed,
+so it has no use for `files` or `acme` (D59); if you put it behind a certificate anyway, it must be one Node
+already trusts (a public CA, or `NODE_EXTRA_CA_CERTS` for your own).
 
 `server.public_url` is what every URL in a response is built from (`html_url`, `clone_url`, `url`). Set it
 to the origin the application will actually use, or leave it unset and the request's `Host` is used.
@@ -206,7 +205,11 @@ is receive-pack's, minus the wire:
 3. `git pack-objects --revs --stdout` over `<new> ^<base>`: a self-contained pack of exactly the new
    objects.
 4. `LocalRepo::ingest_pack` indexes it into the serving copy, `check_connectivity_async` proves the tip.
-5. `RepoHandle::publish_push_synced` — pack PUT ∥ log PUT → manifest CAS.
+5. The repository's push policy (`docs/POLICY.md`: `policy.json` and the built-in `archive-immutable`
+   rule), evaluated as receive-pack does (`write::enforce_policy`, principal `USER_LOGIN`); a refused ref
+   is a 403 (GraphQL `FORBIDDEN`) and nothing is published. A GitHub mirror's read-only repository stays
+   read-only through the facade too.
+6. `RepoHandle::publish_push_synced` — pack PUT ∥ log PUT → manifest CAS.
 
 Ref create, fast-forward update, force update and delete are the same call with no pack.
 

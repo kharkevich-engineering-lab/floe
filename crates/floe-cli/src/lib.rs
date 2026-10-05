@@ -1,4 +1,4 @@
-//! `floe` (full CLI: serve | compact | bundle | repo | wal | synth | import | mirror | config)
+//! `floe` (full CLI: serve | compact | bundle | repo | wal | synth | import | mirror | github | config)
 //! and `floe-server` (`floe serve` under the name a standalone deployment expects, D39),
 //! both thin bins over this library.
 //!
@@ -16,6 +16,7 @@ mod synth;
 
 mod bundle_cmd;
 mod compact;
+mod github_cmd;
 mod import;
 mod import_direct;
 mod mirror;
@@ -39,12 +40,7 @@ use floe_server::telemetry::tracing_init;
 )]
 struct Cli {
     /// Path to the configuration file.
-    #[arg(
-        long,
-        global = true,
-        env = "FLOE_CONFIG",
-        default_value = "floe.toml"
-    )]
+    #[arg(long, global = true, env = "FLOE_CONFIG", default_value = "floe.toml")]
     config: PathBuf,
 
     /// No subcommand = `serve`.
@@ -57,12 +53,7 @@ struct Cli {
 #[command(name = "floe-server", version = floe_server::health::VERSION, about = "floe, standalone: git at any scale on an object-storage bucket")]
 struct ServerCli {
     /// Path to the configuration file.
-    #[arg(
-        long,
-        global = true,
-        env = "FLOE_CONFIG",
-        default_value = "floe.toml"
-    )]
+    #[arg(long, global = true, env = "FLOE_CONFIG", default_value = "floe.toml")]
     config: PathBuf,
 }
 
@@ -205,10 +196,35 @@ enum Command {
         #[arg(long, value_enum, default_value_t = mirror::Identity::Token)]
         identity: mirror::Identity,
     },
-    /// Validate or dump the configuration.
+    /// The GitHub mirror (`[github_mirror]`, D49): discover, create, keep `[upstream]` current.
+    Github {
+        #[command(subcommand)]
+        action: GithubAction,
+    },
+    /// Validate or dump the bootstrap file; show, set, validate, history,
+    /// rollback or import the runtime config document (D60).
     Config {
         #[command(subcommand)]
         action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum GithubAction {
+    /// Reconcile: in the foreground forever (the same lease as a server's loop), or once.
+    Sync {
+        /// One pass under the lease (waits up to `lease_ttl`; exit 3 when held elsewhere).
+        #[arg(long)]
+        once: bool,
+        /// Print the plan and change nothing (no lease, no writes).
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Counts per status, the last pass, and every entry that is not active.
+    Status {
+        /// The raw `mirror/github/state.json`.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -421,8 +437,45 @@ enum ConfigAction {
         #[arg(long)]
         strict: bool,
     },
-    /// Print the effective config as TOML.
+    /// Print the bootstrap config (file ⊕ env) as TOML.
     Dump,
+    /// Print the runtime config document (secrets redacted).
+    Show {
+        /// An older revision instead of the current one.
+        #[arg(long)]
+        revision: Option<u64>,
+        /// JSON instead of TOML.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Publish a whole document (TOML, or JSON when it starts with `{`; `-` = stdin).
+    Set {
+        file: PathBuf,
+        #[arg(long, short, default_value = "")]
+        message: String,
+        /// Refuse (409) unless the current revision is this one.
+        #[arg(long)]
+        base: Option<u64>,
+    },
+    /// Check a document against the current revision without publishing.
+    Validate { file: PathBuf },
+    /// Revisions, newest first.
+    History {
+        #[arg(short, default_value_t = 20)]
+        n: usize,
+    },
+    /// Publish an old revision's document as a new revision.
+    Rollback {
+        revision: u64,
+        #[arg(long, short, default_value = "")]
+        message: String,
+    },
+    /// One shot: publish a pre-D60 file's `github_mirror`, `catalog` and `events` sections.
+    Import {
+        file: PathBuf,
+        #[arg(long, short, default_value = "")]
+        message: String,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -440,10 +493,7 @@ fn load_config(path: &std::path::Path) -> Config {
         match Config::load(path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!(
-                    "floe: error loading config from {}: {e:#}",
-                    path.display()
-                );
+                eprintln!("floe: error loading config from {}: {e:#}", path.display());
                 std::process::exit(1);
             }
         }
@@ -456,6 +506,26 @@ fn load_config(path: &std::path::Path) -> Config {
             path.display()
         );
         std::process::exit(2);
+    }
+}
+
+/// [`load_config`] for `floe config import`: the file minus its runtime sections.
+fn load_config_without_runtime(path: &std::path::Path) -> Config {
+    let loaded = std::fs::read_to_string(path)
+        .map_err(anyhow::Error::from)
+        .and_then(|text| {
+            let mut table: toml::Table = text.parse()?;
+            for section in floe_config::runtime::RUNTIME_SECTIONS {
+                table.remove(*section);
+            }
+            Config::parse(&toml::to_string(&table)?)
+        });
+    match loaded {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("floe: error loading config from {}: {e:#}", path.display());
+            std::process::exit(1);
+        }
     }
 }
 
@@ -476,20 +546,32 @@ fn run(config: &std::path::Path, command: Command) -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("install rustls aws_lc_rs provider"))?;
 
-    let cfg = load_config(config);
+    // `floe config import` reads the runtime sections out of a pre-D60 file,
+    // which the bootstrap loader refuses: load the rest of it as the bootstrap.
+    let cfg = if matches!(
+        command,
+        Command::Config {
+            action: ConfigAction::Import { .. }
+        }
+    ) {
+        load_config_without_runtime(config)
+    } else {
+        load_config(config)
+    };
     tracing_init(&cfg);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
-    rt.block_on(async move { dispatch(command, cfg).await })
+    // Boxed: the future owns the whole Config (clippy::large_futures).
+    rt.block_on(Box::pin(dispatch(command, cfg)))
 }
 
 async fn dispatch(command: Command, cfg: Config) -> Result<()> {
     let cfg = std::sync::Arc::new(cfg);
     match command {
-        Command::Config { action } => config_cmd::run(action, &cfg),
+        Command::Config { action } => Box::pin(config_cmd::run(action, &cfg)).await,
         Command::Synth {
             out,
             size,
@@ -507,6 +589,7 @@ async fn dispatch(command: Command, cfg: Config) -> Result<()> {
         Command::Bundle { action } => bundle_cmd::run(action, &cfg).await,
         Command::Repo { action } => repo::run(action, &cfg).await,
         Command::Wal { action } => wal_cmd::run(action, &cfg).await,
+        Command::Github { action } => github_cmd::run(action, &cfg).await,
         Command::Mirror {
             from,
             to,

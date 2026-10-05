@@ -37,7 +37,7 @@
 //! objects (manifests, leases, bundle lists) are always small → single-shot
 //! PUT with conditional headers.
 //!
-//! ## rustfs compatibility (tested with rustfs/rustfs:latest)
+//! ## rustfs compatibility (tested with rustfs/rustfs:1.0.1, the tag compose.yaml pins)
 //!
 //! See the compatibility notes at the bottom of this file.
 
@@ -584,6 +584,70 @@ impl ObjectStore for S3Store {
         })
     }
 
+    async fn object_versioning(&self) -> Result<bool> {
+        let out = self
+            .client
+            .get_bucket_versioning()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .map_err(|e| classify_error("s3 get bucket versioning", &e))?;
+        Ok(matches!(
+            out.status(),
+            Some(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+        ))
+    }
+
+    /// A [`Version`] here is the object's `ETag`; the object version carrying it
+    /// is found with `ListObjectVersions` (paged), then read by version id.
+    async fn get_version(&self, key: &str, version: &Version) -> Result<Option<Bytes>> {
+        let mut key_marker: Option<String> = None;
+        let mut id_marker: Option<String> = None;
+        let found = loop {
+            let out = self
+                .client
+                .list_object_versions()
+                .bucket(&self.bucket)
+                .prefix(key)
+                .set_key_marker(key_marker.clone())
+                .set_version_id_marker(id_marker.clone())
+                .send()
+                .await
+                .map_err(|e| classify_error("s3 list object versions", &e))?;
+            let hit = out.versions().iter().find(|v| {
+                v.key() == Some(key)
+                    && v.e_tag().map(|t| t.trim_matches('"')) == Some(version.as_str())
+            });
+            if let Some(id) = hit.and_then(|v| v.version_id()) {
+                break Some(id.to_owned());
+            }
+            if !out.is_truncated().unwrap_or(false) {
+                break None;
+            }
+            key_marker = out.next_key_marker().map(str::to_owned);
+            id_marker = out.next_version_id_marker().map(str::to_owned);
+            if key_marker.is_none() {
+                break None;
+            }
+        };
+        let Some(id) = found else {
+            return Ok(None);
+        };
+        let out = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .version_id(id)
+            .send()
+            .await
+            .map_err(|e| classify_error("s3 get object version", &e))?;
+        let body = out.body.collect().await.map_err(|e| {
+            StoreError::retryable(anyhow::anyhow!("s3 read object version {key}: {e}"))
+        })?;
+        Ok(Some(body.into_bytes()))
+    }
+
     fn supports_compose(&self) -> bool {
         true
     }
@@ -682,11 +746,7 @@ impl ObjectStore for S3Store {
                         .key(dest)
                         .upload_id(&upload_id)
                         .part_number(part_number)
-                        .copy_source(format!(
-                            "{}/{}",
-                            self.bucket,
-                            crate::util::encode_path(src)
-                        ))
+                        .copy_source(format!("{}/{}", self.bucket, crate::util::encode_path(src)))
                         .copy_source_range(format!("bytes={from}-{}", from + len - 1))
                         .send()
                         .await

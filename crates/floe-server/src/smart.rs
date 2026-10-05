@@ -202,9 +202,7 @@ async fn upload_pack_v2(
     handle: &Arc<floe_wal::RepoHandle>,
     reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
 ) -> Result<Response, ApiError> {
-    let (cmd, reader) = floe_git::pkt::read_command(reader)
-        .await
-        .map_err(git_err)?;
+    let (cmd, reader) = floe_git::pkt::read_command(reader).await.map_err(git_err)?;
     match cmd.name.as_str() {
         "ls-refs" => {
             let _guard = handle.sync_refs().await.map_err(wal_err)?;
@@ -293,7 +291,8 @@ async fn upload_pack_v2(
                 // clone succeed through upload-pack, once per 6 h, loudly.
                 if let Some(who) = bundle_fallback_allowed(st, headers, route).await {
                     tracing::warn!(repo = %route.id, principal = %who, "bundles.require: one-shot upload-pack fallback for a client whose bundle download failed");
-                    metrics::counter!("floe_bundle_fallback_total", "repo" => route.id.to_string()).increment(1);
+                    metrics::counter!("floe_bundle_fallback_total", "repo" => route.id.to_string())
+                        .increment(1);
                     fallback_warning = Some(format!(
                         "floe: WARNING — your git fetched the bundle list but could not apply the bundles \
                          (a bundle download failed or was cut; see the warnings above). Serving this clone's \
@@ -1095,17 +1094,12 @@ pub async fn receive_pack(
     tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let t0 = std::time::Instant::now();
-        let _ = say(
-            &mut writer,
-            &format!("floe: {repo} — push by {}", who.name),
-        )
-        .await;
+        let _ = say(&mut writer, &format!("floe: {repo} — push by {}", who.name)).await;
         let guard = match sync_narrated(&handle, &mut writer, t0).await {
             Ok(g) => g,
             Err(e) => {
                 tracing::warn!(repo = %repo, error = %e, "receive-pack: sync failed");
-                let report =
-                    refusal_report(&caps, &txn, &format!("floe: sync failed: {e}")).await;
+                let report = refusal_report(&caps, &txn, &format!("floe: sync failed: {e}")).await;
                 let _ = writer.write_all(&report).await;
                 let _ = writer.flush().await;
                 return;
@@ -1158,7 +1152,10 @@ type PerRefResults = Vec<(String, Result<(), String>)>;
 
 /// Everything after the sync: unpack, connectivity, policy, publish → the
 /// report-status bytes (already sideband-framed when the client asked).
-#[allow(clippy::too_many_arguments, reason = "one call site per sideband mode; a params struct adds nothing")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one call site per sideband mode; a params struct adds nothing"
+)]
 async fn receive_pack_process(
     st: &AppState,
     handle: &Arc<floe_wal::RepoHandle>,
@@ -1729,8 +1726,7 @@ pub(crate) async fn not_served_here(
     let host = maintainer_of(st, id)
         .await
         .unwrap_or_else(|| "another host".into());
-    metrics::counter!("floe_not_served_here_total", "service" => service.to_string())
-        .increment(1);
+    metrics::counter!("floe_not_served_here_total", "service" => service.to_string()).increment(1);
     tracing::info!(repo = %id, %host, service, "refused: repository is not served by this host");
     Some(with_retry_after(
         git_err_response(
@@ -1776,7 +1772,10 @@ fn git_err_response(service: &str, msg: &str) -> Response {
     )
 }
 
-#[allow(clippy::needless_pass_by_value, reason = "map_err adapter: takes the error by value")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "map_err adapter: takes the error by value"
+)]
 fn auth_err(e: crate::auth::AuthError) -> ApiError {
     match e {
         crate::auth::AuthError::Invalid | crate::auth::AuthError::Unauthorized => {
@@ -1788,11 +1787,17 @@ fn auth_err(e: crate::auth::AuthError) -> ApiError {
         }
     }
 }
-#[allow(clippy::needless_pass_by_value, reason = "map_err adapter: takes the error by value")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "map_err adapter: takes the error by value"
+)]
 fn git_err(e: floe_git::GitError) -> ApiError {
     ApiError::Internal(format!("git: {e}"))
 }
-#[allow(clippy::needless_pass_by_value, reason = "map_err adapter: takes the error by value")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "map_err adapter: takes the error by value"
+)]
 pub(crate) fn wal_err(e: floe_wal::WalError) -> ApiError {
     match &e {
         floe_wal::WalError::NotFound => ApiError::NotFound(e.to_string()),
@@ -1805,7 +1810,10 @@ pub(crate) fn wal_err(e: floe_wal::WalError) -> ApiError {
         _ => ApiError::Internal(format!("wal: {e}")),
     }
 }
-#[allow(clippy::needless_pass_by_value, reason = "map_err adapter: takes the error by value")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "map_err adapter: takes the error by value"
+)]
 fn bundle_err(e: floe_bundle::BundleError) -> ApiError {
     ApiError::Internal(format!("bundle: {e}"))
 }

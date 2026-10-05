@@ -43,13 +43,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use prost::Message;
 use floe_git::{IngestOptions, ObjectFormat, RepoId};
 use floe_proto::v1::{EntryKind, Manifest, RefTransaction, RefUpdate};
 use floe_store::fault::{FaultPlan, FaultStore};
 use floe_store::memory::MemoryStore;
 use floe_store::{DynStore, ObjectStoreExt};
 use floe_wal::{Registry, RepoHandle, WalError};
+use prost::Message;
 
 // ---------------------------------------------------------------------------
 // Git work repo (a pusher's clone)
@@ -532,10 +532,7 @@ async fn check_truth(c: &Cluster, pushers: &[Pusher]) -> Result<()> {
     let cp_seq = manifest.checkpoint.as_ref().map_or(0, |cp| cp.seq);
     let mut folded: HashMap<String, String> = HashMap::new();
     if cp_seq > 0 {
-        let key = format!(
-            "{prefix}{}",
-            floe_proto::keys::checkpoint_refs_key(cp_seq)
-        );
+        let key = format!("{prefix}{}", floe_proto::keys::checkpoint_refs_key(cp_seq));
         let (_, b) = c
             .truth
             .get_bytes(&key)
@@ -1601,10 +1598,7 @@ async fn liveness_checkpoint_racing_compaction() -> Result<()> {
     );
     cp.context("checkpoint lost its CAS race")?;
     ensure!(
-        matches!(
-            compact?,
-            floe_server::ops::CompactOutcome::Published { .. }
-        ),
+        matches!(compact?, floe_server::ops::CompactOutcome::Published { .. }),
         "compaction did not publish"
     );
     check_truth(&c, std::slice::from_ref(&p)).await?;
@@ -1631,10 +1625,9 @@ async fn liveness_bundle_build_after_lease_holder_dies() -> Result<()> {
         cfg.bundles.main_only = false;
     });
     let h = c.instances[maint].open(&c.id).await?;
-    let dead =
-        floe_bundle::ops::try_acquire_lease(h.store(), "weekly", Duration::from_millis(100))
-            .await?
-            .expect("setup: weekly lease free");
+    let dead = floe_bundle::ops::try_acquire_lease(h.store(), "weekly", Duration::from_millis(100))
+        .await?
+        .expect("setup: weekly lease free");
     std::mem::forget(dead);
 
     let source = Arc::new(SimBundleSource(c.instances[maint].registry.clone()));
@@ -1765,10 +1758,8 @@ async fn check_bundle_list_truth(c: &Cluster, converged: bool) -> Result<()> {
     }
     if converged {
         let mut probe = list.clone();
-        let pruned = floe_bundle::slots::retain(
-            &sim_config(Path::new("/nonexistent")).bundles,
-            &mut probe,
-        );
+        let pruned =
+            floe_bundle::slots::retain(&sim_config(Path::new("/nonexistent")).bundles, &mut probe);
         ensure!(
             pruned.is_empty(),
             "list not at retention: would still prune {pruned:?}"

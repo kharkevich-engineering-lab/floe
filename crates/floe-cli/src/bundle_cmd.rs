@@ -279,9 +279,9 @@ pub async fn run(action: BundleAction, cfg: &Arc<Config>) -> Result<()> {
 pub async fn maintainers(
     store: &floe_store::DynStore,
 ) -> Result<Vec<floe_proto::v1::MaintainerHeartbeat>> {
-    use futures::StreamExt;
     use floe_proto::prost::Message;
     use floe_store::ObjectStoreExt;
+    use futures::StreamExt;
     let mut out = Vec::new();
     let mut keys = store.list(floe_proto::keys::MAINTAIN_DIR, None);
     while let Some(m) = keys.next().await {
@@ -321,8 +321,8 @@ pub async fn compose_full_from_base(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use floe_store::ObjectStoreExt;
+    use std::collections::HashMap;
 
     fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")

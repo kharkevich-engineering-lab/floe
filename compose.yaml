@@ -7,10 +7,24 @@
 #
 # rustfs exposes the S3 API on :9000 and the console on :9001.
 # Credentials are fixed for local dev — do not use in production.
+#
+# Catalog (D50, `[catalog]`, a floe built with --features catalog) — profile "catalog":
+#   podman compose --profile catalog up -d          # rustfs + table bucket + Iceberg REST fixture
+#   Primary: RustFS S3 Tables (1.0.1, no flag needed): Iceberg REST at http://127.0.0.1:9000/iceberg
+#     (the client adds /v1), warehouse = the table bucket's name ("floe-catalog"), SigV4 (signing name
+#     s3) on every call: [catalog] auth = "sigv4", sigv4_service = "s3", s3_endpoint =
+#     "http://127.0.0.1:9000", with AWS_ACCESS_KEY_ID=floe-dev AWS_SECRET_ACCESS_KEY=floe-dev-secret
+#     (floe signs through its in-process proxy, D63; `just test-catalog` runs against it).
+#   Fallback: apache/iceberg-rest-fixture at http://127.0.0.1:8181, warehouse s3://floe-test/warehouse
+#     on rustfs, auth = "none" (`just test-catalog-fixture`).
 
 services:
   rustfs:
-    image: rustfs/rustfs:latest
+    # Pinned (tag + index digest, amd64 + arm64): CI's container smoke job runs against this exact
+    # build, so a new upstream `latest` cannot break it unannounced. 1.0.1 (2026-10-03) contains
+    # commit 7e0c6711, the S3 Tables (Iceberg REST) endpoint (R6; `gh api
+    # repos/rustfs/rustfs/compare/7e0c6711...1.0.1` → ahead). Bump tag and digest together.
+    image: rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -45,6 +59,51 @@ services:
         aws --endpoint-url http://rustfs:9000 s3 ls
       "
     restart: "no"
+
+  # One-shot (profile catalog): the floe-catalog bucket, turned into an S3 Tables table bucket
+  # (RustFS: PUT /iceberg/v1/buckets/<name>, SigV4 signing name s3, docs.rustfs.com
+  # administration/data/s3-tables). A failure fails the service (no silent fallback).
+  create-table-bucket:
+    image: amazon/aws-cli:latest
+    profiles: ["catalog"]
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: floe-dev
+      AWS_SECRET_ACCESS_KEY: floe-dev-secret
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: []
+    command: >
+      sh -c "
+        aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket floe-catalog 2>/dev/null || true;
+        curl --fail-with-body --silent --show-error --request PUT
+          --aws-sigv4 'aws:amz:us-east-1:s3' --user floe-dev:floe-dev-secret
+          --header 'x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+          http://rustfs:9000/iceberg/v1/buckets/floe-catalog
+          && echo && echo 'table bucket floe-catalog ready'
+      "
+    restart: "no"
+
+  # Fallback Iceberg REST catalog (profile catalog): Iceberg's reference fixture, warehouse on rustfs.
+  # [catalog] uri = "http://127.0.0.1:8181", warehouse = "s3://floe-test/warehouse", auth = "none",
+  # s3_endpoint = "http://127.0.0.1:9000".
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:latest
+    profiles: ["catalog"]
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    ports:
+      - "8181:8181"
+    environment:
+      AWS_ACCESS_KEY_ID: floe-dev
+      AWS_SECRET_ACCESS_KEY: floe-dev-secret
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://floe-test/warehouse
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://rustfs:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
 
 volumes:
   rustfs-data:
