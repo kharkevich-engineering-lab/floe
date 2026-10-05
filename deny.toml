@@ -14,7 +14,7 @@ yanked = "deny"
 # What the first run found, each tracked in #10 with its fix. Delete an entry when it is fixed;
 # never add one without a reason and an issue.
 ignore = [
-    { id = "RUSTSEC-2026-0258", reason = "h2 0.4.15 (cargo update) and 0.3.27 (aws-smithy legacy stack), #10" },
+    { id = "RUSTSEC-2026-0258", reason = "h2 0.3.27 via the aws-smithy legacy hyper 0.14 stack (0.4.x is fixed), #10" },
     { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
     { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
@@ -22,8 +22,6 @@ ignore = [
     { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39 needs a dependent bump to >= 0.41, #10" },
     { id = "RUSTSEC-2023-0071", reason = "rsa: no fixed release exists, #10" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained, direct dependency of floe-server, #10" },
-    { crate = "bisync@0.3.0", reason = "yanked, fixed by cargo update, #10" },
-    { crate = "chacha20@0.10.1", reason = "yanked, fixed by cargo update, #10" },
 ]
 
 [licenses]
