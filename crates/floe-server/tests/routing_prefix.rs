@@ -47,6 +47,9 @@ fn allowed_route(path: &str) -> bool {
         "/services/api/owners",
         "/services/api/owners/{owner}",
         "/api",
+        // D62: the SPA's admin area (non-repo; reserved like `/api` and `/_ui`).
+        "/_admin",
+        "/_admin/{*rest}",
         "/{owner}",
     ];
     if allow.contains(&p) {
