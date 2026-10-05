@@ -970,7 +970,7 @@ mcp_handle_secret = "0123456789abcdef0123456789abcdef"
         assert_eq!(c.access.read, Config::default().access.read);
         // The commented document block: from `# [codeintel]` to the end, uncommented.
         let start = text.find("\n# [codeintel]").unwrap() + 1;
-        let doc: String = text
+        let doc = text
             .get(start..)
             .unwrap()
             .lines()
@@ -979,8 +979,8 @@ mcp_handle_secret = "0123456789abcdef0123456789abcdef"
                     .or_else(|| l.strip_prefix('#'))
                     .unwrap_or(l)
             })
-            .map(|l| format!("{l}\n"))
-            .collect();
+            .collect::<Vec<_>>()
+            .join("\n");
         let rt = crate::RuntimeConfig::from_toml(&doc).unwrap();
         let d = crate::RuntimeConfig::default();
         assert_eq!(
