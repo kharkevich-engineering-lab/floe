@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
+/// gix's error tree (gix 0.88+): fallible gix calls such as `ObjectId::from_hex` return an
+/// `Exn<_>`, which is not a `std::error::Error`; `.map_err(Exn::into_error)` makes it one
+/// without each dependent crate pinning its own gix-error.
+pub use gix::error::Exn;
 pub use gix_hash::{self, ObjectId};
 use gix_object::{FindExt, FindHeader, Kind as ObjKind};
 use gix_traverse::tree::Visit as TreeVisit;
@@ -59,8 +63,10 @@ pub enum GitError {
     Protocol(String),
 }
 
-fn ge<E: std::error::Error + Send + Sync + 'static>(e: E) -> GitError {
-    GitError::Gix(Box::new(e))
+/// Wrap a gix failure: a plain `std::error::Error`, or since gix 0.88 an `Exn<E>` (which is not
+/// an `Error` itself but converts into the boxed one, keeping its cause tree).
+fn ge(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> GitError {
+    GitError::Gix(e.into())
 }
 
 /// Reject ref names that would inject `git update-ref --stdin` commands or
@@ -1523,16 +1529,10 @@ impl LocalRepo {
         if path.exists() {
             return Ok(());
         }
-        let store = gix_odb::loose::Store::at(
-            self.inner.path.join("objects"),
-            gix_odb::loose::Options {
-                object_hash: oid.kind(),
-                ..Default::default()
-            },
-        );
+        let store = gix_odb::loose::Store::at(self.inner.path.join("objects"), oid.kind());
         store
             .write_buf_with_known_id(kind, data, oid.to_owned())
-            .map_err(GitError::Gix)?;
+            .map_err(ge)?;
         Ok(())
     }
 
@@ -1582,10 +1582,7 @@ impl LocalRepo {
                 (gix_object::Kind::Commit, id) => commit_tips.push(id),
                 (gix_object::Kind::Tree, id) => {
                     if seen.insert(id) {
-                        let tree_iter = repo
-                            .objects
-                            .find_tree_iter(&id, &mut buf)
-                            .map_err(|e| GitError::Gix(Box::new(e)))?;
+                        let tree_iter = repo.objects.find_tree_iter(&id, &mut buf).map_err(ge)?;
                         let mut visitor = ConnectivityVisitor {
                             seen: &mut seen,
                             repo: &repo,
@@ -1601,7 +1598,7 @@ impl LocalRepo {
                                 Some(oid) => GitError::MissingObject {
                                     oid: oid.to_hex().to_string(),
                                 },
-                                None => GitError::Gix(Box::new(e)),
+                                None => ge(e),
                             });
                         }
                     }
@@ -1654,10 +1651,10 @@ impl LocalRepo {
             .rev_walk(commit_tips)
             .with_hidden(hidden.iter().copied())
             .all()
-            .map_err(|e| GitError::Gix(Box::new(e)))?;
+            .map_err(ge)?;
 
         for item in walk {
-            let info = item.map_err(|e| GitError::Gix(Box::new(e)))?;
+            let info = item.map_err(ge)?;
             let cid = info.id;
             if !seen.insert(cid) {
                 continue;
@@ -1668,10 +1665,7 @@ impl LocalRepo {
                 });
             }
             // Get the commit's tree id.
-            let mut commit = repo
-                .objects
-                .find_commit_iter(&cid, &mut buf)
-                .map_err(|e| GitError::Gix(Box::new(e)))?;
+            let mut commit = repo.objects.find_commit_iter(&cid, &mut buf).map_err(ge)?;
             let tree_id = commit.tree_id().map_err(ge)?;
             if seen.insert(tree_id) {
                 if !repo.has_object(tree_id) {
@@ -1682,7 +1676,7 @@ impl LocalRepo {
                 let tree_iter = repo
                     .objects
                     .find_tree_iter(&tree_id, &mut buf)
-                    .map_err(|e| GitError::Gix(Box::new(e)))?;
+                    .map_err(ge)?;
                 let mut visitor = ConnectivityVisitor {
                     seen: &mut seen,
                     repo: &repo,
@@ -1698,7 +1692,7 @@ impl LocalRepo {
                         Some(oid) => GitError::MissingObject {
                             oid: oid.to_hex().to_string(),
                         },
-                        None => GitError::Gix(Box::new(e)),
+                        None => ge(e),
                     });
                 }
             }
@@ -3271,7 +3265,7 @@ fn peel_tip(
         let data = repo
             .objects
             .try_find(&id, buf)
-            .map_err(GitError::Gix)?
+            .map_err(ge)?
             .ok_or_else(|| GitError::MissingObject {
                 oid: id.to_hex().to_string(),
             })?;
@@ -3280,7 +3274,7 @@ fn peel_tip(
         }
         seen.insert(id);
         let tag = gix_object::TagRefIter::from_bytes(data.data, repo.object_hash());
-        let target = tag.target_id().map_err(|e| GitError::Gix(Box::new(e)))?;
+        let target = tag.target_id().map_err(ge)?;
         id = target;
     }
     Err(GitError::InvalidInput(format!(
@@ -3638,8 +3632,7 @@ pub fn write_rev_from_idx(
     rev_path: &Path,
     kind: gix_hash::Kind,
 ) -> Result<(), GitError> {
-    let index =
-        gix_pack::index::File::at(idx_path, kind).map_err(|e| GitError::Gix(Box::new(e)))?;
+    let index = gix_pack::index::File::at(idx_path, kind).map_err(ge)?;
     let n = index.num_objects();
     let mut by_offset: Vec<(u64, u32)> = index
         .iter()

@@ -315,7 +315,8 @@ pub async fn materialize_at(
     let tmp = out.join(".floe-tmp");
     std::fs::create_dir_all(&tmp)?;
     for p in &pack_set {
-        let checksum = gix_hash::ObjectId::from_hex(p.checksum.as_bytes())?;
+        let checksum = gix_hash::ObjectId::from_hex(p.checksum.as_bytes())
+            .map_err(floe_git::Exn::into_error)?;
         let src = handle.local().pack_path(&checksum);
         if src.is_file() && !src.is_symlink() {
             for ext in ["pack", "idx", "rev", "bitmap", "commit-graph"] {

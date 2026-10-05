@@ -788,7 +788,7 @@ async fn test_commit_graph_travels_with_base_and_grows_on_push() {
     let pr = m
         .packs
         .iter()
-        .find(|p| p.checksum == base.checksum.to_string())
+        .find(|p| p.checksum == base.checksum)
         .unwrap();
     assert!(
         pr.has_commit_graph,
@@ -1863,11 +1863,7 @@ async fn test_history_pack_keeps_tree_walks_local() {
         .unwrap();
     assert!(seq > 0);
     let m = handle.manifest();
-    let hp_ref = m
-        .packs
-        .iter()
-        .find(|p| p.checksum == hp.checksum.to_string())
-        .unwrap();
+    let hp_ref = m.packs.iter().find(|p| p.checksum == hp.checksum).unwrap();
     assert_eq!(hp_ref.kind, floe_proto::v1::PackKind::History as i32);
     assert_eq!(hp_ref.derived_from, base.checksum.to_string());
     let base_tip = prev.clone();

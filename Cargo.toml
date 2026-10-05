@@ -112,27 +112,15 @@ tower-http = { version = "0.7", features = ["trace", "compression-gzip", "compre
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
-gix = { version = "0.86", default-features = false, features = ["sha1", "sha256", "max-performance-safe", "blocking-network-client", "parallel", "revision", "interrupt", "worktree-mutation", "index"] }
-gix-pack = { version = "0.73", features = ["streaming-input", "object-cache-dynamic", "generate"] }
-gix-hash = { version = "0.26", features = ["sha1", "sha256"] }
-gix-object = "0.63"
+gix = { version = "0.88", default-features = false, features = ["sha1", "sha256", "max-performance-safe", "blocking-network-client", "parallel", "revision", "interrupt", "worktree-mutation", "index"] }
+gix-pack = { version = "0.75", features = ["streaming-input", "object-cache-dynamic", "generate"] }
+gix-hash = { version = "0.27", features = ["sha1", "sha256"] }
+gix-object = "0.65"
 gix-features = { version = "0.50", features = ["parallel", "walkdir", "progress"] }
-gix-packetline = { version = "0.22", features = ["blocking-io"] }
-gix-packetline-blocking = "0.22"
-gix-protocol = { version = "0.64", features = ["blocking-client"] }
-gix-transport = { version = "0.58", features = ["blocking-client"] }
-gix-ref = "0.66"
-gix-odb = "0.83"
-gix-traverse = "0.60"
-gix-revwalk = "0.34"
-gix-negotiate = "0.34"
-gix-commitgraph = "0.38"
-gix-tempfile = "25"
-gix-lock = "25"
+gix-odb = "0.85"
+gix-traverse = "0.62"
 gix-date = "0.17"
 gix-actor = "0.43"
-gix-hashtable = "0.17"
-gix-validate = "0.12"
 google-cloud-storage = "1"
 google-cloud-gax = "1"
 google-cloud-auth = "1"
@@ -178,7 +166,7 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false, feat
 iceberg = "=0.10.1"
 iceberg-catalog-rest = "=0.10.1"
 iceberg-storage-opendal = { version = "=0.10.1", default-features = false, features = ["opendal-s3"] }
-arrow-array = "60"
+arrow-array = "58"
 # The credential trait iceberg-storage-opendal's custom S3 loader takes (D63).
 reqsign-core = "3"
 # MCP server (D55; floe-server's `mcp` feature only, never in the default build). Pinned exactly:

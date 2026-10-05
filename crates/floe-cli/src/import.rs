@@ -434,6 +434,7 @@ async fn import_reusing_packs(
         let stem = pack_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let hex = stem.strip_prefix("pack-").unwrap_or(stem);
         let checksum = floe_git::gix_hash::ObjectId::from_hex(hex.as_bytes())
+            .map_err(floe_git::Exn::into_error)
             .with_context(|| format!("pack name is not a checksum: {stem}"))?;
         let pack_size = std::fs::metadata(pack_path)?.len();
         let idx_size = std::fs::metadata(&idx_path)?.len();
