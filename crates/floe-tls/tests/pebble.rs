@@ -111,7 +111,7 @@ fn manager(
         directory: e.directory.clone(),
         renew_before,
         resolvers: vec![e.dns.clone()],
-        propagation_timeout: Duration::from_secs(60),
+        propagation_timeout: Duration::from_mins(1),
         poll_interval: Duration::from_secs(1),
         ..AcmeConfig::default()
     };
@@ -184,7 +184,7 @@ async fn pebble_dns01_order_share_and_renew() {
 
     // Instance A orders the first certificate.
     let ra = CertResolver::new();
-    let a = manager(&e, &store, ra.clone(), &http, Duration::from_secs(86_400));
+    let a = manager(&e, &store, ra.clone(), &http, Duration::from_hours(24));
     assert!(a.due(), "nothing loaded yet");
     assert!(!a.status().loaded);
     let t = a.tick(&LogNarrator).await.unwrap();
@@ -242,7 +242,7 @@ async fn pebble_dns01_order_share_and_renew() {
 
     // Instance B (same bucket) picks it up by conditional GET; it does not order.
     let rb = CertResolver::new();
-    let b = manager(&e, &store, rb.clone(), &http, Duration::from_secs(86_400));
+    let b = manager(&e, &store, rb.clone(), &http, Duration::from_hours(24));
     assert_eq!(b.tick(&LogNarrator).await.unwrap(), Tick::Fresh);
     assert_eq!(rb.current().unwrap().info.fingerprint, la.info.fingerprint);
     assert!(!b.refresh().await.unwrap(), "unchanged object: 304, nothing installed");
@@ -250,7 +250,7 @@ async fn pebble_dns01_order_share_and_renew() {
     // Instance C considers everything due (renew_before > validity) and renews; A and B swap
     // the new certificate in on their next revalidation — no restart.
     let rc = CertResolver::new();
-    let c = manager(&e, &store, rc.clone(), &http, Duration::from_secs(365 * 86_400));
+    let c = manager(&e, &store, rc.clone(), &http, Duration::from_hours(8760));
     assert_eq!(c.tick(&LogNarrator).await.unwrap(), Tick::Issued);
     let renewed = rc.current().unwrap().info.fingerprint.clone();
     assert_ne!(renewed, la.info.fingerprint);

@@ -46,10 +46,10 @@ const LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
 /// certificate another instance just ordered within seconds).
 const COLD_POLL: Duration = Duration::from_secs(10);
 /// First retry after a failure; doubles per consecutive failure up to [`BACKOFF_MAX`].
-const BACKOFF_BASE: Duration = Duration::from_secs(5 * 60);
-const BACKOFF_MAX: Duration = Duration::from_secs(6 * 3600);
+const BACKOFF_BASE: Duration = Duration::from_mins(5);
+const BACKOFF_MAX: Duration = Duration::from_hours(6);
 /// A CA that says "rate limited" is not asked again for at least this long.
-const RATE_LIMITED_MIN: Duration = Duration::from_secs(3600);
+const RATE_LIMITED_MIN: Duration = Duration::from_hours(1);
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredAccount {
@@ -174,7 +174,7 @@ impl AcmeManager {
         let seal = SealKey::from_env(&cfg.storage_key_env)?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("floe/", env!("CARGO_PKG_VERSION"), " (acme)"))
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_mins(1))
             .build()
             .context("HTTP client")?;
         let dns: Arc<dyn DnsProvider> = match cfg.dns_provider {
@@ -530,7 +530,7 @@ impl AcmeManager {
         task.notice("order ready; finalizing (new key + CSR)");
         let key_pem = order.finalize().await.context("finalizing the order")?;
         let chain = order
-            .poll_certificate(&RetryPolicy::new().timeout(Duration::from_secs(120)))
+            .poll_certificate(&RetryPolicy::new().timeout(Duration::from_mins(2)))
             .await
             .context("downloading the certificate")?;
         let loaded = load_pem(&chain, &key_pem).context("the issued certificate")?;
@@ -613,7 +613,7 @@ impl AcmeManager {
             .poll_ready(
                 &RetryPolicy::new()
                     .initial_delay(Duration::from_secs(1))
-                    .timeout(Duration::from_secs(180)),
+                    .timeout(Duration::from_mins(3)),
             )
             .await
             .context("waiting for validation")?;
@@ -712,9 +712,9 @@ mod tests {
 
     #[test]
     fn backoff_doubles_and_caps() {
-        assert_eq!(backoff(1, false), Duration::from_secs(300));
-        assert_eq!(backoff(2, false), Duration::from_secs(600));
-        assert_eq!(backoff(3, false), Duration::from_secs(1200));
+        assert_eq!(backoff(1, false), Duration::from_mins(5));
+        assert_eq!(backoff(2, false), Duration::from_mins(10));
+        assert_eq!(backoff(3, false), Duration::from_mins(20));
         assert_eq!(backoff(40, false), BACKOFF_MAX);
         assert_eq!(backoff(1, true), RATE_LIMITED_MIN);
     }
