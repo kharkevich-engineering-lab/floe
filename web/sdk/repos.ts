@@ -1018,7 +1018,8 @@ export interface CatalogStatus {
   uri: string | null;
   warehouse: string | null;
   namespace: string;
-  auth: "bearer" | "oauth2" | "none";
+  /** `[catalog] auth` (D63). */
+  auth: "none" | "bearer" | "sigv4";
   restart_required?: boolean;
 }
 export interface AdminOverview {
