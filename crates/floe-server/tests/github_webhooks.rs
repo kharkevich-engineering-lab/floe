@@ -41,8 +41,8 @@ type Captured = Arc<Mutex<Vec<Delivery>>>;
 
 /// `sha256=<hex>` the way `@octokit/webhooks-methods` computes it.
 fn sign(secret: &[u8], body: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(secret).expect("hmac key");
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut mac = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(secret).expect("hmac key");
     mac.update(body);
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
