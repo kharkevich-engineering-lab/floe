@@ -106,6 +106,11 @@ pub fn env_var(name: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[derive(Deserialize)]
+    struct Holder {
+        token: Secret,
+    }
+
     #[test]
     fn serde_shapes() {
         let s: Secret = serde_json::from_str(r#"{"env":"X"}"#).unwrap();
@@ -116,11 +121,7 @@ mod tests {
             serde_json::to_string(&Secret::Sealed("v1.a.b".into())).unwrap(),
             r#"{"sealed":"v1.a.b"}"#
         );
-        #[derive(Deserialize)]
-        struct T {
-            token: Secret,
-        }
-        let t: T = toml::from_str("token = { value = \"v\" }").unwrap();
+        let t: Holder = toml::from_str("token = { value = \"v\" }").unwrap();
         assert_eq!(t.token, Secret::Value("v".into()));
         assert!(serde_json::from_str::<Secret>(r#"{"bogus":"x"}"#).is_err());
         assert_eq!(format!("{:?}", Secret::Value("hunter2".into())), "Secret::Value(***)");
