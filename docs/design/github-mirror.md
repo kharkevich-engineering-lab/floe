@@ -432,9 +432,11 @@ Where the code differs from §A.1–§A.6 (the code wins):
   upstream's own `host[:port]`.
 - Archive protection (2026-10-04): an example rule left every repository without a policy file open to
   forged, moved or deleted archive refs. `floe_server::policy` now has a built-in `archive-immutable` rule
-  (`refs/archive/**`; `create`, `update`, `delete`; no bypass), evaluated after the file's rules on every
+  (`refs/archive/**` and the ref `refs/archive` itself, which would shadow the namespace; `create`, `update`,
+  `delete`; no bypass), evaluated after the file's rules on every
   push. A policy file that defines a rule with that name replaces it (for example to give admins a bypass).
-  Follow does not go through policy, so it still writes archives. Tests: `policy::tests::archive_*` and
+  Follow does not go through policy, so it still writes archives. Follow's own git subprocesses reset `credential.helper` before adding floe's one-shot
+  helper, so no helper from the host's git config can store or supply the upstream token. Tests: `policy::tests::archive_*` and
   `tests/policy.rs` `archive_refs_are_immutable_without_a_policy`.
 
 ---

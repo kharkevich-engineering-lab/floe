@@ -46,6 +46,13 @@ pub const ARCHIVE_RULE: &str = "archive-immutable";
 /// The namespace [`ARCHIVE_RULE`] protects.
 pub const ARCHIVE_REFS: &str = "refs/archive/";
 
+/// Under [`ARCHIVE_REFS`], or the ref `refs/archive` itself: a ref of that
+/// exact name would shadow the namespace (git cannot hold `refs/archive` and
+/// `refs/archive/<ts>/…` at once), so follow could never archive again.
+fn in_archive_namespace(name: &str) -> bool {
+    name.starts_with(ARCHIVE_REFS) || Some(name) == ARCHIVE_REFS.strip_suffix('/')
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Group {
@@ -594,7 +601,7 @@ fn deny_reason(
     }
     // Built-in: every op is restricted and nobody bypasses, so no ancestry
     // check (`is_force`) is needed for it.
-    if u.name.starts_with(ARCHIVE_REFS) && !policy.rules.iter().any(|r| r.name == ARCHIVE_RULE) {
+    if in_archive_namespace(&u.name) && !policy.rules.iter().any(|r| r.name == ARCHIVE_RULE) {
         return Some(format!(
             "rejected by rule '{ARCHIVE_RULE}' (built-in: {ARCHIVE_REFS}* holds tips upstream follow archived)"
         ));
@@ -1029,8 +1036,27 @@ mod tests {
             }
         }
         // A look-alike outside the namespace is an ordinary ref.
-        let t = txn(vec![upd("refs/heads/refs/archive/x", "", "aaa")], false);
-        assert!(evaluate(&RepoPolicy::empty(), "bob@example.com", &t, |_| false).per_ref[0].1.is_ok());
+        for name in ["refs/heads/refs/archive/x", "refs/archives", "refs/archive-old"] {
+            let t = txn(vec![upd(name, "", "aaa")], false);
+            assert!(evaluate(&RepoPolicy::empty(), "bob@example.com", &t, |_| false).per_ref[0].1.is_ok(), "{name}");
+        }
+    }
+
+    /// `refs/archive` itself would shadow the namespace (a file where git needs
+    /// a directory): creating it is refused like any archive ref.
+    #[test]
+    fn the_archive_namespace_itself_cannot_be_shadowed() {
+        for p in [RepoPolicy::empty(), lock_main()] {
+            for (old, new) in [("", "aaa"), ("aaa", "bbb"), ("aaa", "")] {
+                let t = txn(vec![upd("refs/archive", old, new)], false);
+                let ev = evaluate(&p, "alice@example.com", &t, |_| false);
+                assert!(
+                    ev.per_ref[0].1.as_ref().unwrap_err().contains("archive-immutable"),
+                    "{old:?} -> {new:?}: {:?}",
+                    ev.per_ref[0]
+                );
+            }
+        }
     }
 
     #[test]

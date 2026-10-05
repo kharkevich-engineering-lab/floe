@@ -246,16 +246,25 @@ fn git_cmd(git_dir: Option<&Path>, upstream: &str, token: Option<&str>) -> tokio
         .env("GIT_TERMINAL_PROMPT", "0")
         // Abort an HTTP transfer slower than 1 KiB/s for a minute (a tarpit).
         .env("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
-        .env("GIT_HTTP_LOW_SPEED_TIME", "60");
+        .env("GIT_HTTP_LOW_SPEED_TIME", "60")
+        // An empty `credential.helper` resets the list: no helper from the host's
+        // system or global git config runs, so none can store the upstream token
+        // (`store`, `cache`, a keychain) or hand out the host's own credentials.
+        // The system/global files themselves stay in effect: proxies, CA
+        // bundles and `url.*.insteadOf` there are the operator's and follow needs them.
+        .env("GIT_CONFIG_KEY_0", "credential.helper")
+        .env("GIT_CONFIG_VALUE_0", "");
     if let Some(t) = token {
         c.env("FLOE_UPSTREAM_TOKEN", t)
             .env(
                 "FLOE_UPSTREAM_HOST",
                 floe_config::upstream_authority(upstream),
             )
-            .env("GIT_CONFIG_COUNT", "1")
-            .env("GIT_CONFIG_KEY_0", "credential.helper")
-            .env("GIT_CONFIG_VALUE_0", CREDENTIAL_HELPER);
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_1", "credential.helper")
+            .env("GIT_CONFIG_VALUE_1", CREDENTIAL_HELPER);
+    } else {
+        c.env("GIT_CONFIG_COUNT", "1");
     }
     c
 }
@@ -331,6 +340,61 @@ pub async fn read_scratch(scratch: &Path) -> Result<FetchedDelta, GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn envs(c: &tokio::process::Command) -> std::collections::BTreeMap<String, String> {
+        c.as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect()
+    }
+
+    /// Only floe's helper answers: an empty `credential.helper` first resets
+    /// whatever the host's system/global config lists (a `store` helper would
+    /// otherwise write the upstream token to disk after a fetch).
+    #[test]
+    fn git_cmd_resets_host_credential_helpers() {
+        let with = envs(&git_cmd(None, "https://github.com/acme/w.git", Some("tok")));
+        let get = |m: &std::collections::BTreeMap<String, String>, k: &str| m.get(k).cloned();
+        assert_eq!(get(&with, "GIT_CONFIG_COUNT").as_deref(), Some("2"));
+        assert_eq!(get(&with, "GIT_CONFIG_KEY_0").as_deref(), Some("credential.helper"));
+        assert_eq!(get(&with, "GIT_CONFIG_VALUE_0").as_deref(), Some(""));
+        assert_eq!(get(&with, "GIT_CONFIG_KEY_1").as_deref(), Some("credential.helper"));
+        assert_eq!(get(&with, "GIT_CONFIG_VALUE_1").as_deref(), Some(CREDENTIAL_HELPER));
+        assert_eq!(get(&with, "FLOE_UPSTREAM_HOST").as_deref(), Some("github.com"));
+        // Without a token no helper runs at all, not even the host's.
+        let without = envs(&git_cmd(None, "https://github.com/acme/w.git", None));
+        assert_eq!(get(&without, "GIT_CONFIG_COUNT").as_deref(), Some("1"));
+        assert_eq!(get(&without, "GIT_CONFIG_VALUE_0").as_deref(), Some(""));
+        assert!(!without.contains_key("FLOE_UPSTREAM_TOKEN"));
+        assert!(!without.contains_key("GIT_CONFIG_KEY_1"));
+    }
+
+    /// With a real git: a `store` helper from the global config comes first,
+    /// then the empty reset (git drops every helper listed before it), then
+    /// floe's, so the host's helper is never asked to answer or to store.
+    #[test]
+    fn the_reset_follows_host_helpers_and_precedes_ours() {
+        let home = tempfile::tempdir().unwrap();
+        let store = home.path().join("creds");
+        let global = home.path().join("gitconfig");
+        std::fs::write(
+            &global,
+            format!("[credential]\n\thelper = store --file={}\n", store.display()),
+        )
+        .unwrap();
+        let mut c = git_cmd(None, "https://example.invalid/r.git", Some("tok"));
+        c.env("GIT_CONFIG_GLOBAL", &global)
+            .args(["config", "--get-all", "credential.helper"]);
+        let out = c.as_std_mut().output().unwrap();
+        let helpers = String::from_utf8_lossy(&out.stdout);
+        // git lists the reset (empty) entry and floe's helper after the host's; the
+        // empty one makes git drop everything listed before it.
+        let lines: Vec<&str> = helpers.lines().collect();
+        assert_eq!(lines.len(), 3, "{helpers}");
+        assert!(lines[0].starts_with("store"), "{helpers}");
+        assert_eq!(lines[1], "", "{helpers}");
+        assert_eq!(lines[2], CREDENTIAL_HELPER, "{helpers}");
+    }
 
     fn run(dir: &Path, args: &[&str]) -> String {
         let o = std::process::Command::new("git")

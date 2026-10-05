@@ -31,7 +31,8 @@ file just lies.
 
 Missing file / empty `rules` = allow-all (anyone with write may move any
 ref), with **one built-in rule**: `archive-immutable` restricts `create`,
-`update` and `delete` on `refs/archive/**` with an empty bypass. That
+`update` and `delete` on `refs/archive/**`, and on the ref `refs/archive`
+itself (it would shadow the namespace), with an empty bypass. That
 namespace holds the tips upstream follow kept when upstream rewrote or deleted
 a followed ref (D48); follow writes there without going through policy, so
 the built-in only stops pushers from forging, moving or deleting archive
