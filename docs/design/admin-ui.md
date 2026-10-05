@@ -306,7 +306,7 @@ Both lanes: `/api/v1/admin/…` (bearer or same-origin session) and `/api-browse
 | `GET /api/v1/admin/config/revisions/{n}` | `admin.config.revision(n)` | one record, redacted document; 410 when expired |
 | `POST /api/v1/admin/config/rollback` | `admin.config.rollback(n, {base_revision, message})` | as PUT |
 | `GET /api/v1/admin/overview` | `admin.overview()` | revision, this instance, instances seen, mirror, catalog |
-| `GET /api/v1/tls` (owned by the TLS change, D59) | `tls()` | read-only certificate status; the overview treats 404 as "not available in this build" |
+| `GET /api/v1/tls` (the TLS change, D59) | `tls()` | read-only certificate status shown on the overview |
 | `GET /api/v1/admin/mirror` | `admin.mirror.status()` | state.json entries, lease holder, last pass, counts |
 | `POST /api/v1/admin/mirror/preview` | `admin.mirror.preview(section, {discover})` | selection of known repositories under candidate include/exclude; `discover: true` = a real dry-run pass against the forge |
 | `POST /api/v1/admin/mirror/test` | `admin.mirror.test(token?)` | `GET {api_url}/user` with the stored or candidate token: login, scopes, rate limit |
@@ -329,7 +329,7 @@ Same stack and styling as the rest of the SPA (React 19, react-router, `styles.c
    error), instances seen (stale ones greyed), mirror (enabled, lease holder, last pass, statuses), catalog (compiled,
    enabled, running), **TLS certificate status read-only** from the TLS change's admin-only `GET /api/v1/tls`
    (`mode, domains, not_before, not_after, issuer, fingerprint, source, last_renewal_at, last_error,
-   next_attempt_at`); a 404 (that change not merged or not in this build) renders a placeholder. No TLS form,
+   next_attempt_at`), shown as is; `mode = "off"` says so. No TLS form,
    ever: TLS is bootstrap (D59).
 2. **GitHub mirroring** — the `github_mirror` section as a form rendered from the JSON Schema; the token as a
    write-only field with **Test credential**; sources; include/exclude with a **live preview** (debounced
