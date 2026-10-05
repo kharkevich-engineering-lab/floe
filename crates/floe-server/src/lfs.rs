@@ -4,8 +4,8 @@ use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 use floe_proto::keys;
+use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -267,7 +267,10 @@ pub async fn get_object(
 /// is `put` into the store (never on a short or mismatching read). No Range on
 /// this path: the object is served whole once, then by `static_object`. `size`
 /// comes from the href's `?size=` (GitHub's batch rejects a wrong size).
-#[allow(clippy::too_many_arguments, reason = "one call site; the arguments are the resolved request")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one call site; the arguments are the resolved request"
+)]
 async fn read_through(
     st: &AppState,
     cfg: &floe_config::Config,

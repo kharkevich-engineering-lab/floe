@@ -206,8 +206,14 @@ mod tests {
 
     #[test]
     fn wildcard_and_base_share_the_challenge_name() {
-        assert_eq!(challenge_name("*.git.example.com"), "_acme-challenge.git.example.com");
-        assert_eq!(challenge_name("git.example.com"), "_acme-challenge.git.example.com");
+        assert_eq!(
+            challenge_name("*.git.example.com"),
+            "_acme-challenge.git.example.com"
+        );
+        assert_eq!(
+            challenge_name("git.example.com"),
+            "_acme-challenge.git.example.com"
+        );
     }
 
     #[test]

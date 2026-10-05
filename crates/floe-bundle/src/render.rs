@@ -56,7 +56,9 @@ fn warn_signing_once(owner: &str, repo: &str, e: &dyn std::fmt::Display) {
     let key = format!("{owner}/{repo}");
     if SIGNING_WARNED
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner).insert(key.clone()) {
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key.clone())
+    {
         tracing::warn!(repo = %key, error = %e, "signed bundle URL failed; serving proxy URIs instead (check the store signing permissions)");
     }
 }

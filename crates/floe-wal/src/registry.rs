@@ -5,13 +5,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use dashmap::DashMap;
-use futures::StreamExt;
-use prost::Message;
 use floe_git::{LocalRepo, ObjectFormat, RepoId};
 use floe_proto::WAL_FORMAT_VERSION;
 use floe_proto::keys;
 use floe_proto::v1::Manifest;
 use floe_store::{DynStore, ObjectStore, Prefixed, PutBody, PutMode, StoreError};
+use futures::StreamExt;
+use prost::Message;
 
 use crate::error::WalError;
 use crate::handle::RepoHandle;
@@ -485,7 +485,10 @@ fn dir_size(path: &std::path::Path) -> u64 {
 }
 
 /// (used, total) bytes of the filesystem holding `path` (statvfs).
-#[allow(unsafe_code, reason = "statvfs has no safe std wrapper; the two calls below are the whole unsafe surface")]
+#[allow(
+    unsafe_code,
+    reason = "statvfs has no safe std wrapper; the two calls below are the whole unsafe surface"
+)]
 fn disk_usage(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;

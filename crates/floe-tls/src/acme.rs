@@ -127,7 +127,8 @@ pub enum Tick {
 /// re-orders every poll until the CA's rate limits stop it.
 pub fn renew_at(not_before: i64, not_after: i64, renew_before: Duration) -> i64 {
     let lifetime = not_after.saturating_sub(not_before).max(0);
-    let window = not_after.saturating_sub(i64::try_from(renew_before.as_secs()).unwrap_or(i64::MAX));
+    let window =
+        not_after.saturating_sub(i64::try_from(renew_before.as_secs()).unwrap_or(i64::MAX));
     let floor = not_before.saturating_add(lifetime / LIFETIME_DEN * LIFETIME_NUM);
     window.max(floor)
 }
@@ -161,10 +162,12 @@ pub fn sans_cover(sans: &[String], domain: &str) -> bool {
 /// Retry delay after `failures` consecutive failures.
 pub fn backoff(failures: u32, rate_limited: bool) -> Duration {
     let exp = failures.saturating_sub(1).min(16);
-    let d = BACKOFF_BASE
-        .saturating_mul(1u32 << exp)
-        .min(BACKOFF_MAX);
-    if rate_limited { d.max(RATE_LIMITED_MIN) } else { d }
+    let d = BACKOFF_BASE.saturating_mul(1u32 << exp).min(BACKOFF_MAX);
+    if rate_limited {
+        d.max(RATE_LIMITED_MIN)
+    } else {
+        d
+    }
 }
 
 fn short_hash(parts: &[&str]) -> String {
@@ -395,7 +398,9 @@ impl AcmeManager {
     pub fn due(&self) -> bool {
         match self.resolver.current() {
             None => true,
-            Some(l) => now() >= renew_at(l.info.not_before, l.info.not_after, self.cfg.renew_before),
+            Some(l) => {
+                now() >= renew_at(l.info.not_before, l.info.not_after, self.cfg.renew_before)
+            }
         }
     }
 
@@ -510,7 +515,11 @@ impl AcmeManager {
             return Ok(Tick::LeaseHeld);
         };
         let guard = Arc::new(tokio::sync::Mutex::new(lease));
-        let hb = floe_store::coord::LeaseGuard::spawn_heartbeat(guard.clone(), LEASE_HEARTBEAT, LEASE_TTL);
+        let hb = floe_store::coord::LeaseGuard::spawn_heartbeat(
+            guard.clone(),
+            LEASE_HEARTBEAT,
+            LEASE_TTL,
+        );
         let out = self.under_lease(narrator, force).await;
         hb.abort();
         let _ = hb.await;
@@ -539,10 +548,18 @@ impl AcmeManager {
                 return Ok(Tick::BackingOff(until));
             }
         }
-        let what = if self.resolver.is_loaded() { "renewal" } else { "first order" };
+        let what = if self.resolver.is_loaded() {
+            "renewal"
+        } else {
+            "first order"
+        };
         let task = narrator.begin(
             "tls-acme",
-            &format!("ACME {what} for {} ({})", self.domains.join(", "), self.directory),
+            &format!(
+                "ACME {what} for {} ({})",
+                self.domains.join(", "),
+                self.directory
+            ),
         );
         status.last_attempt_at = Some(rfc3339(now()));
         let result = self.order(task.as_ref()).await;
@@ -556,7 +573,10 @@ impl AcmeManager {
                 status.last_success_unix = Some(issued);
                 self.write_status(&status).await;
                 metrics::counter!("floe_tls_acme_orders_total", "ok" => "true").increment(1);
-                task.finish(Ok(format!("certificate issued, valid until {}", rfc3339(not_after))));
+                task.finish(Ok(format!(
+                    "certificate issued, valid until {}",
+                    rfc3339(not_after)
+                )));
                 Ok(Tick::Issued)
             }
             Err(e) => {
@@ -607,12 +627,19 @@ impl AcmeManager {
                     ..stored
                 };
                 self.store
-                    .put_bytes(&key, serde_json::to_vec_pretty(&updated)?, PutMode::Overwrite)
+                    .put_bytes(
+                        &key,
+                        serde_json::to_vec_pretty(&updated)?,
+                        PutMode::Overwrite,
+                    )
                     .await?;
             }
             return Ok(account);
         }
-        task.notice(&format!("registering an ACME account with {}", self.directory));
+        task.notice(&format!(
+            "registering an ACME account with {}",
+            self.directory
+        ));
         let contact = format!("mailto:{}", self.cfg.email);
         let (account, creds) = self
             .account_builder()
@@ -714,7 +741,9 @@ impl AcmeManager {
             directory: self.directory.clone(),
             domains: self.domains.clone(),
             chain_pem: chain,
-            key_sealed: self.seal.seal(self.aad("key").as_bytes(), key_pem.as_bytes())?,
+            key_sealed: self
+                .seal
+                .seal(self.aad("key").as_bytes(), key_pem.as_bytes())?,
             not_after,
             issued_at: rfc3339(now()),
             issued_by: self.holder.clone(),
@@ -764,19 +793,25 @@ impl AcmeManager {
                 l.pending = None;
                 drop(l);
                 if attempt > 0 {
-                    tracing::info!(attempts = attempt + 1, "issued TLS certificate saved to the bucket");
+                    tracing::info!(
+                        attempts = attempt + 1,
+                        "issued TLS certificate saved to the bucket"
+                    );
                 }
                 true
             }
             Err(e) => {
                 let attempts = attempt.saturating_add(1);
                 let wait = backoff(attempts, false);
-                let error = format!("issued certificate not yet saved to the bucket (attempt {attempts}): {e}");
+                let error = format!(
+                    "issued certificate not yet saved to the bucket (attempt {attempts}): {e}"
+                );
                 tracing::warn!(retry_in = ?wait, "{error}; serving it from memory, not re-ordering");
                 let mut l = self.local();
                 if let Some(p) = l.pending.as_mut() {
                     p.attempts = attempts;
-                    p.next_at = now().saturating_add(i64::try_from(wait.as_secs()).unwrap_or(i64::MAX));
+                    p.next_at =
+                        now().saturating_add(i64::try_from(wait.as_secs()).unwrap_or(i64::MAX));
                     p.error = error;
                 }
                 false
@@ -869,7 +904,12 @@ impl AcmeManager {
         s.last_error = l
             .load_error
             .clone()
-            .or_else(|| l.pending.as_ref().map(|p| p.error.clone()).filter(|e| !e.is_empty()))
+            .or_else(|| {
+                l.pending
+                    .as_ref()
+                    .map(|p| p.error.clone())
+                    .filter(|e| !e.is_empty())
+            })
             .or_else(|| l.status.last_error.clone());
         s.failures = l
             .status
@@ -952,15 +992,30 @@ mod tests {
     fn renewal_point_is_clamped_to_two_thirds_of_the_lifetime() {
         let issued = 1_800_000_000;
         // 90 days, 30 days ahead: day 60 either way.
-        assert_eq!(renew_at(issued, issued + 90 * DAY, Duration::from_hours(30 * 24)), issued + 60 * DAY);
+        assert_eq!(
+            renew_at(issued, issued + 90 * DAY, Duration::from_hours(30 * 24)),
+            issued + 60 * DAY
+        );
         // 6-day profile with the maximum renew_before (60 days): day 4, not "already due".
-        assert_eq!(renew_at(issued, issued + 6 * DAY, Duration::from_hours(60 * 24)), issued + 4 * DAY);
+        assert_eq!(
+            renew_at(issued, issued + 6 * DAY, Duration::from_hours(60 * 24)),
+            issued + 4 * DAY
+        );
         // 45 days with 30 ahead: day 30 (the window would say day 15).
-        assert_eq!(renew_at(issued, issued + 45 * DAY, Duration::from_hours(30 * 24)), issued + 30 * DAY);
+        assert_eq!(
+            renew_at(issued, issued + 45 * DAY, Duration::from_hours(30 * 24)),
+            issued + 30 * DAY
+        );
         // 45 days with 60 ahead: still day 30.
-        assert_eq!(renew_at(issued, issued + 45 * DAY, Duration::from_hours(60 * 24)), issued + 30 * DAY);
+        assert_eq!(
+            renew_at(issued, issued + 45 * DAY, Duration::from_hours(60 * 24)),
+            issued + 30 * DAY
+        );
         // A short renew_before still wins when it is later than the floor.
-        assert_eq!(renew_at(issued, issued + 90 * DAY, Duration::from_hours(24)), issued + 89 * DAY);
+        assert_eq!(
+            renew_at(issued, issued + 90 * DAY, Duration::from_hours(24)),
+            issued + 89 * DAY
+        );
     }
 
     #[test]
@@ -971,7 +1026,10 @@ mod tests {
         };
         let until = spacing_until(&recent, true).expect("held");
         assert!(until > now() && until <= now() + 12 * 3600);
-        assert!(spacing_until(&recent, false).is_none(), "a missing certificate is always ordered");
+        assert!(
+            spacing_until(&recent, false).is_none(),
+            "a missing certificate is always ordered"
+        );
         let old = StoredStatus {
             last_success_unix: Some(now() - 13 * 3600),
             ..StoredStatus::default()
@@ -1023,9 +1081,10 @@ mod tests {
 
     fn pem_for(names: &[&str], from: i64, to: i64) -> (String, String) {
         let key = rcgen::KeyPair::generate().unwrap();
-        let mut params =
-            rcgen::CertificateParams::new(names.iter().map(ToString::to_string).collect::<Vec<_>>())
-                .unwrap();
+        let mut params = rcgen::CertificateParams::new(
+            names.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        )
+        .unwrap();
         let epoch = rcgen::date_time_ymd(1970, 1, 1);
         params.not_before = epoch + Duration::from_secs(u64::try_from(from).unwrap());
         params.not_after = epoch + Duration::from_secs(u64::try_from(to).unwrap());
@@ -1038,19 +1097,32 @@ mod tests {
     }
 
     /// Write `cert.json` recording `domains` / `directory` (which may not match the config).
-    async fn publish_as(mgr: &AcmeManager, chain: &str, key: &str, domains: &[String], directory: &str) {
+    async fn publish_as(
+        mgr: &AcmeManager,
+        chain: &str,
+        key: &str,
+        domains: &[String],
+        directory: &str,
+    ) {
         let stored = StoredCert {
             version: 1,
             directory: directory.to_string(),
             domains: domains.to_vec(),
             chain_pem: chain.to_string(),
-            key_sealed: mgr.seal.seal(mgr.aad("key").as_bytes(), key.as_bytes()).unwrap(),
+            key_sealed: mgr
+                .seal
+                .seal(mgr.aad("key").as_bytes(), key.as_bytes())
+                .unwrap(),
             not_after: 0,
             issued_at: String::new(),
             issued_by: "test".into(),
         };
         mgr.store
-            .put_bytes(&mgr.cert_key(), serde_json::to_vec(&stored).unwrap(), PutMode::Overwrite)
+            .put_bytes(
+                &mgr.cert_key(),
+                serde_json::to_vec(&stored).unwrap(),
+                PutMode::Overwrite,
+            )
             .await
             .unwrap();
     }
@@ -1063,7 +1135,10 @@ mod tests {
             let (chain, key) = pem(now() - 60, now() + days * DAY);
             publish(&mgr, &chain, &key).await;
             assert!(mgr.refresh().await.unwrap());
-            assert!(!mgr.due(), "a fresh {days}-day certificate with renew_before = 60d");
+            assert!(
+                !mgr.due(),
+                "a fresh {days}-day certificate with renew_before = 60d"
+            );
             assert_eq!(mgr.tick(&crate::LogNarrator).await.unwrap(), Tick::Fresh);
         }
         // Past two thirds of a 6-day lifetime it is due.
@@ -1077,14 +1152,26 @@ mod tests {
     fn sans_cover_is_wildcard_aware() {
         let sans = vec!["floe.test".to_string(), "*.floe.test".to_string()];
         assert!(sans_cover(&sans, "floe.test"));
-        assert!(sans_cover(&sans, "git.floe.test"), "one label under the wildcard");
+        assert!(
+            sans_cover(&sans, "git.floe.test"),
+            "one label under the wildcard"
+        );
         assert!(sans_cover(&sans, "*.floe.test"));
-        assert!(!sans_cover(&sans, "a.b.floe.test"), "a wildcard covers one label only");
+        assert!(
+            !sans_cover(&sans, "a.b.floe.test"),
+            "a wildcard covers one label only"
+        );
         assert!(!sans_cover(&sans, "other.test"));
         let only_wild = vec!["*.floe.test".to_string()];
-        assert!(!sans_cover(&only_wild, "floe.test"), "the apex is not under its wildcard");
+        assert!(
+            !sans_cover(&only_wild, "floe.test"),
+            "the apex is not under its wildcard"
+        );
         let only_host = vec!["git.floe.test".to_string()];
-        assert!(!sans_cover(&only_host, "*.floe.test"), "a configured wildcard needs that SAN");
+        assert!(
+            !sans_cover(&only_host, "*.floe.test"),
+            "a configured wildcard needs that SAN"
+        );
     }
 
     #[tokio::test]
@@ -1098,21 +1185,44 @@ mod tests {
         let other_dir = format!("{}-other", mgr.directory);
         let cases: Vec<(Vec<String>, String, (String, String))> = vec![
             // Recorded domains differ from the config.
-            (vec!["evil.test".to_string()], mgr.directory.clone(), pem(now() - 60, now() + 90 * DAY)),
+            (
+                vec!["evil.test".to_string()],
+                mgr.directory.clone(),
+                pem(now() - 60, now() + 90 * DAY),
+            ),
             // Another directory.
-            (mgr.domains.clone(), other_dir, pem(now() - 60, now() + 90 * DAY)),
+            (
+                mgr.domains.clone(),
+                other_dir,
+                pem(now() - 60, now() + 90 * DAY),
+            ),
             // Recorded domains match, but the leaf does not cover them.
-            (mgr.domains.clone(), mgr.directory.clone(), pem_for(&["evil.test"], now() - 60, now() + 90 * DAY)),
+            (
+                mgr.domains.clone(),
+                mgr.directory.clone(),
+                pem_for(&["evil.test"], now() - 60, now() + 90 * DAY),
+            ),
         ];
         for (domains, directory, (chain, key)) in cases {
             publish_as(&mgr, &chain, &key, &domains, &directory).await;
             let err = mgr.refresh().await.unwrap_err().to_string();
             assert!(err.contains("refusing"), "{err}");
-            assert_eq!(resolver.current().unwrap().info.fingerprint, good, "current certificate kept");
+            assert_eq!(
+                resolver.current().unwrap().info.fingerprint,
+                good,
+                "current certificate kept"
+            );
             let st = mgr.status();
             assert_eq!(st.failures, 1, "counted as a renewal failure: {st:?}");
-            assert!(st.last_error.as_deref().is_some_and(|e| e.contains("refusing")));
-            assert!(!st.last_error.unwrap().contains("PRIVATE"), "no secrets in the error");
+            assert!(
+                st.last_error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("refusing"))
+            );
+            assert!(
+                !st.last_error.unwrap().contains("PRIVATE"),
+                "no secrets in the error"
+            );
         }
         // A good object again clears it.
         let (chain, key) = pem(now() - 60, now() + 90 * DAY);
@@ -1141,15 +1251,26 @@ mod tests {
         // The one order: issued, then the write fails.
         let (chain, key) = pem(now() - 60, now() + 90 * DAY);
         mgr.store_issued(chain, &key).await.unwrap();
-        let served = resolver.current().expect("served from memory").info.fingerprint.clone();
+        let served = resolver
+            .current()
+            .expect("served from memory")
+            .info
+            .fingerprint
+            .clone();
         assert!(truth.get_bytes(&mgr.cert_key()).await.unwrap().is_none());
         assert!(mgr.status().last_error.unwrap().contains("not yet saved"));
         // N more failing retries (backoff skipped for the test), and a forced renewal: no order.
         for _ in 0..3 {
             mgr.local().pending.as_mut().unwrap().next_at = 0;
-            assert_eq!(mgr.tick(&crate::LogNarrator).await.unwrap(), Tick::PendingWrite);
+            assert_eq!(
+                mgr.tick(&crate::LogNarrator).await.unwrap(),
+                Tick::PendingWrite
+            );
         }
-        assert_eq!(mgr.renew_now(&crate::LogNarrator).await.unwrap(), Tick::PendingWrite);
+        assert_eq!(
+            mgr.renew_now(&crate::LogNarrator).await.unwrap(),
+            Tick::PendingWrite
+        );
         assert!(truth.get_bytes(&mgr.cert_key()).await.unwrap().is_none());
         // The bucket comes back: the next due retry saves exactly the served certificate.
         link.heal();
@@ -1178,10 +1299,17 @@ mod tests {
             ..StoredStatus::default()
         };
         store
-            .put_bytes(&a.status_key(), serde_json::to_vec(&failing).unwrap(), PutMode::Overwrite)
+            .put_bytes(
+                &a.status_key(),
+                serde_json::to_vec(&failing).unwrap(),
+                PutMode::Overwrite,
+            )
             .await
             .unwrap();
-        assert!(matches!(a.tick(&crate::LogNarrator).await.unwrap(), Tick::BackingOff(_)));
+        assert!(matches!(
+            a.tick(&crate::LogNarrator).await.unwrap(),
+            Tick::BackingOff(_)
+        ));
         let st = a.status();
         assert_eq!((st.failures, st.last_error.as_deref()), (3, Some("boom")));
 
@@ -1201,7 +1329,10 @@ mod tests {
         assert_eq!(a.tick(&crate::LogNarrator).await.unwrap(), Tick::Fresh);
         let st = a.status();
         assert_eq!(st.failures, 0, "{st:?}");
-        assert!(st.last_error.is_none() && st.next_attempt_at.is_none(), "{st:?}");
+        assert!(
+            st.last_error.is_none() && st.next_attempt_at.is_none(),
+            "{st:?}"
+        );
         assert!(st.last_renewal_at.is_some());
         assert!(!st.renewal_due);
     }
@@ -1220,6 +1351,9 @@ mod tests {
         let a = short_hash(&["https://d", "a.example.com", "b.example.com"]);
         assert_eq!(a.len(), 16);
         assert_ne!(a, short_hash(&["https://d", "a.example.com"]));
-        assert_ne!(a, short_hash(&["https://s", "a.example.com", "b.example.com"]));
+        assert_ne!(
+            a,
+            short_hash(&["https://s", "a.example.com", "b.example.com"])
+        );
     }
 }

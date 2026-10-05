@@ -53,7 +53,8 @@ async fn gql(s: &Server, query: &str, variables: Value) -> anyhow::Result<Value>
 /// `data` or a failure naming the error the server sent instead.
 fn data(body: &Value) -> anyhow::Result<&Value> {
     anyhow::ensure!(
-        body.get("errors").is_none_or(|e| e.as_array().is_none_or(Vec::is_empty)),
+        body.get("errors")
+            .is_none_or(|e| e.as_array().is_none_or(Vec::is_empty)),
         "graphql errors: {body}"
     );
     body.get("data")
@@ -80,7 +81,10 @@ fn fixture(s: &Server, owner: &str, name: &str) -> anyhow::Result<(tempfile::Tem
     std::fs::create_dir_all(dir.join("pages"))?;
     std::fs::write(dir.join("pages/index.mdx"), "hello\n")?;
     git_in(&dir, &["add", "."])?;
-    git_in(&dir, &["commit", "-q", "-m", "initial commit\n\nwith a body"])?;
+    git_in(
+        &dir,
+        &["commit", "-q", "-m", "initial commit\n\nwith a body"],
+    )?;
     std::fs::write(dir.join("pages/index.mdx"), "hello again\n")?;
     git_in(&dir, &["add", "."])?;
     git_in(&dir, &["commit", "-q", "-m", "edit the page"])?;
@@ -92,7 +96,8 @@ fn fixture(s: &Server, owner: &str, name: &str) -> anyhow::Result<(tempfile::Tem
 
 // The documents, copied out of the Mintlify server without an edit.
 
-const GET_LATEST_COMMIT: &str = "query getLatestCommit($owner: String!, $name: String!, $branch: String!) {
+const GET_LATEST_COMMIT: &str =
+    "query getLatestCommit($owner: String!, $name: String!, $branch: String!) {
   repository(name: $name, owner: $owner) {
     ref(qualifiedName: $branch) { target { ... on Commit { history(first: 1) { nodes { oid } } } } }
   }
@@ -102,7 +107,8 @@ const GET_FILE_SHA: &str = "query($owner: String!, $repo: String!, $expression: 
   repository(owner: $owner, name: $repo) { object(expression: $expression) { ... on Blob { oid } } }
 }";
 
-const GET_BRANCHES: &str = "query($owner: String!, $repo: String!, $cursor: String, $queryStr: String) {
+const GET_BRANCHES: &str =
+    "query($owner: String!, $repo: String!, $cursor: String, $queryStr: String) {
   repository(owner: $owner, name: $repo) {
     refs(refPrefix: \"refs/heads/\", first: 100, after: $cursor, query: $queryStr) {
       pageInfo { hasNextPage endCursor }
@@ -219,7 +225,10 @@ async fn reads_answer_the_documents_the_client_sends() -> TestResult {
         json!({"owner": "acme", "repo": "docs", "expression": "main:pages/index.mdx"}),
     )
     .await?;
-    assert_eq!(data(&body)?["repository"]["object"]["oid"], Value::from(sha));
+    assert_eq!(
+        data(&body)?["repository"]["object"]["oid"],
+        Value::from(sha)
+    );
     let body = gql(
         &s,
         GET_FILE_SHA,
@@ -397,7 +406,9 @@ async fn create_commit_on_branch_writes_a_commit_git_can_fetch() -> TestResult {
     let (kind, message) = first_error(&body);
     assert_eq!(kind, "UNPROCESSABLE", "{body}");
     assert!(
-        message.starts_with(&format!("Expected branch to point to \"{head}\" but it did not.")),
+        message.starts_with(&format!(
+            "Expected branch to point to \"{head}\" but it did not."
+        )),
         "{message}"
     );
 
@@ -532,7 +543,10 @@ async fn a_rest_review_is_the_node_graphql_hangs_a_thread_off() -> TestResult {
     )
     .await?;
     let thread = &data(&body)?["addPullRequestReviewThread"]["thread"];
-    assert!(thread["id"].as_str().is_some_and(|i| !i.is_empty()), "{body}");
+    assert!(
+        thread["id"].as_str().is_some_and(|i| !i.is_empty()),
+        "{body}"
+    );
 
     // And it landed on the same object the REST side reads.
     let (_, stored) = rest(

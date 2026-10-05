@@ -8,12 +8,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde::de::{self, Deserializer};
-use serde::{Deserialize, Serialize};
 use floe_git::RepoId;
 use floe_proto::keys;
 use floe_proto::v1::{RefTransaction, RefUpdate};
 use floe_store::{DynStore, GetOptions, PutBody, PutMode, StoreError};
+use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Document
@@ -665,7 +665,10 @@ pub async fn load_versioned(
 
 /// The `ETag` of a policy read: the object version, or `"none"` when there is no file.
 fn policy_etag(version: Option<&floe_store::Version>) -> String {
-    format!("\"{}\"", version.map_or("none", floe_store::Version::as_str))
+    format!(
+        "\"{}\"",
+        version.map_or("none", floe_store::Version::as_str)
+    )
 }
 
 /// The precondition of a policy write.
@@ -754,7 +757,11 @@ pub async fn http_get(
     route: &RepoRoute,
     headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
-    let _ = st.auth.require_read(headers).await.map_err(|e| auth_err(&e))?;
+    let _ = st
+        .auth
+        .require_read(headers)
+        .await
+        .map_err(|e| auth_err(&e))?;
     ensure_repo(st, route).await?;
     let (version, policy) = load_versioned(&st.store, &route.id)
         .await
@@ -783,7 +790,11 @@ pub async fn http_put(
     headers: &HeaderMap,
     body: axum::body::Body,
 ) -> Result<Response, ApiError> {
-    let _ = st.auth.require_admin(headers).await.map_err(|e| auth_err(&e))?;
+    let _ = st
+        .auth
+        .require_admin(headers)
+        .await
+        .map_err(|e| auth_err(&e))?;
     ensure_repo(st, route).await?;
     let bytes = crate::collect_body(body).await?;
     let policy = parse_bytes(&bytes).map_err(store_err)?;
@@ -802,7 +813,11 @@ pub async fn http_delete(
     route: &RepoRoute,
     headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
-    let _ = st.auth.require_admin(headers).await.map_err(|e| auth_err(&e))?;
+    let _ = st
+        .auth
+        .require_admin(headers)
+        .await
+        .map_err(|e| auth_err(&e))?;
     ensure_repo(st, route).await?;
     clear(&st.store, &route.id).await.map_err(store_err)?;
     Ok((StatusCode::NO_CONTENT, "").into_response())
@@ -1090,10 +1105,17 @@ mod tests {
         let archive = "refs/archive/1791072000/refs/heads/main";
         for p in [RepoPolicy::empty(), lock_main()] {
             for (old, new) in [("", "aaa"), ("aaa", "bbb"), ("aaa", "")] {
-                let t = txn(vec![upd(archive, old, new), upd("refs/heads/dev", "", "aaa")], false);
+                let t = txn(
+                    vec![upd(archive, old, new), upd("refs/heads/dev", "", "aaa")],
+                    false,
+                );
                 let ev = evaluate(&p, "alice@example.com", &t, |_| false);
                 assert!(
-                    ev.per_ref[0].1.as_ref().unwrap_err().contains("rejected by rule 'archive-immutable'"),
+                    ev.per_ref[0]
+                        .1
+                        .as_ref()
+                        .unwrap_err()
+                        .contains("rejected by rule 'archive-immutable'"),
                     "{old:?} -> {new:?} on {archive} must be refused: {:?}",
                     ev.per_ref[0]
                 );
@@ -1102,9 +1124,18 @@ mod tests {
             }
         }
         // A look-alike outside the namespace is an ordinary ref.
-        for name in ["refs/heads/refs/archive/x", "refs/archives", "refs/archive-old"] {
+        for name in [
+            "refs/heads/refs/archive/x",
+            "refs/archives",
+            "refs/archive-old",
+        ] {
             let t = txn(vec![upd(name, "", "aaa")], false);
-            assert!(evaluate(&RepoPolicy::empty(), "bob@example.com", &t, |_| false).per_ref[0].1.is_ok(), "{name}");
+            assert!(
+                evaluate(&RepoPolicy::empty(), "bob@example.com", &t, |_| false).per_ref[0]
+                    .1
+                    .is_ok(),
+                "{name}"
+            );
         }
     }
 
@@ -1117,7 +1148,11 @@ mod tests {
                 let t = txn(vec![upd("refs/archive", old, new)], false);
                 let ev = evaluate(&p, "alice@example.com", &t, |_| false);
                 assert!(
-                    ev.per_ref[0].1.as_ref().unwrap_err().contains("archive-immutable"),
+                    ev.per_ref[0]
+                        .1
+                        .as_ref()
+                        .unwrap_err()
+                        .contains("archive-immutable"),
                     "{old:?} -> {new:?}: {:?}",
                     ev.per_ref[0]
                 );
@@ -1138,10 +1173,23 @@ mod tests {
           }]
         }"#;
         let p = parse_bytes(json.as_bytes()).unwrap();
-        let t = txn(vec![upd("refs/archive/1/refs/heads/main", "aaa", "")], false);
-        assert!(evaluate(&p, "alice@example.com", &t, |_| false).per_ref[0].1.is_ok());
+        let t = txn(
+            vec![upd("refs/archive/1/refs/heads/main", "aaa", "")],
+            false,
+        );
+        assert!(
+            evaluate(&p, "alice@example.com", &t, |_| false).per_ref[0]
+                .1
+                .is_ok()
+        );
         let ev = evaluate(&p, "bob@example.com", &t, |_| false);
-        assert!(ev.per_ref[0].1.as_ref().unwrap_err().contains("archive-immutable"));
+        assert!(
+            ev.per_ref[0]
+                .1
+                .as_ref()
+                .unwrap_err()
+                .contains("archive-immutable")
+        );
     }
 
     #[test]

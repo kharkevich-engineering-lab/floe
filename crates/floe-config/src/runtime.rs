@@ -93,7 +93,10 @@ impl RuntimeConfig {
             out.push(("events.webhook_secret", n.clone()));
         }
         let c = &self.catalog;
-        for (path, v) in [("catalog.token_env", &c.token_env), ("catalog.credential_env", &c.credential_env)] {
+        for (path, v) in [
+            ("catalog.token_env", &c.token_env),
+            ("catalog.credential_env", &c.credential_env),
+        ] {
             if let Some(n) = v.as_deref().filter(|n| !n.trim().is_empty()) {
                 out.push((path, n.to_string()));
             }
@@ -188,7 +191,8 @@ pub fn restart_required(started: &RuntimeConfig, now: &RuntimeConfig) -> Vec<Str
         return Vec::new();
     };
     let a = flatten(&a);
-    let b: std::collections::BTreeMap<String, serde_json::Value> = flatten(&b).into_iter().collect();
+    let b: std::collections::BTreeMap<String, serde_json::Value> =
+        flatten(&b).into_iter().collect();
     let mut out: Vec<String> = a
         .into_iter()
         .filter(|(p, v)| {
@@ -212,12 +216,19 @@ mod tests {
         let rt = RuntimeConfig::default();
         let v = rt.to_json().unwrap();
         assert_eq!(v["github_mirror"]["token"]["env"], "FLOE_GITHUB_TOKEN");
-        assert!(v["github_mirror"].get("token_env").is_none(), "token_env is derived, never stored");
+        assert!(
+            v["github_mirror"].get("token_env").is_none(),
+            "token_env is derived, never stored"
+        );
         let back = RuntimeConfig::from_json(&v).unwrap();
         assert_eq!(back.to_json().unwrap(), v);
-        let err = RuntimeConfig::from_json(&serde_json::json!({"server": {"listen": "0.0.0.0:1"}})).unwrap_err();
+        let err = RuntimeConfig::from_json(&serde_json::json!({"server": {"listen": "0.0.0.0:1"}}))
+            .unwrap_err();
         assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
-        let t = RuntimeConfig::from_toml("[events]\nwebhook_url = \"https://h.example/x\"\nwebhook_secret = { env = \"S\" }\n").unwrap();
+        let t = RuntimeConfig::from_toml(
+            "[events]\nwebhook_url = \"https://h.example/x\"\nwebhook_secret = { env = \"S\" }\n",
+        )
+        .unwrap();
         assert_eq!(t.events.webhook_secret, Some(Secret::Env("S".into())));
         t.validate().unwrap();
     }
@@ -238,7 +249,12 @@ mod tests {
         assert!(rt.validate().is_err());
         let mut rt = RuntimeConfig::default();
         rt.events.webhook_url = Some("ftp://x".into());
-        assert!(rt.validate().unwrap_err().to_string().contains("webhook_url"));
+        assert!(
+            rt.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("webhook_url")
+        );
     }
 
     #[test]
@@ -246,7 +262,13 @@ mod tests {
         let host = Config::default();
         let mut rt = RuntimeConfig::default();
         host.with_runtime(&rt).unwrap();
-        for bad in ["FLOE_CONFIG_KEY", "FLOE__SERVER__AUTH__SESSION_SECRET", "AWS_SECRET_ACCESS_KEY", "HOME", "FLOE_SECRETX"] {
+        for bad in [
+            "FLOE_CONFIG_KEY",
+            "FLOE__SERVER__AUTH__SESSION_SECRET",
+            "AWS_SECRET_ACCESS_KEY",
+            "HOME",
+            "FLOE_SECRETX",
+        ] {
             rt.github_mirror.token = Secret::Env(bad.into());
             let err = host.with_runtime(&rt).unwrap_err().to_string();
             assert!(err.starts_with("github_mirror.token:"), "{bad}: {err}");
@@ -255,7 +277,12 @@ mod tests {
         host.with_runtime(&rt).unwrap();
         // Bearer-style catalog keys follow the same list; AWS names only as signing keys.
         rt.catalog.token_env = Some("AWS_SECRET_ACCESS_KEY".into());
-        assert!(host.with_runtime(&rt).unwrap_err().to_string().starts_with("catalog.token_env:"));
+        assert!(
+            host.with_runtime(&rt)
+                .unwrap_err()
+                .to_string()
+                .starts_with("catalog.token_env:")
+        );
         rt.catalog.token_env = None;
         rt.catalog.s3_secret_key_env = "FLOE_CONFIG_KEY".into();
         assert!(host.with_runtime(&rt).is_err());
@@ -264,22 +291,35 @@ mod tests {
         // Empty names are no references: fine unless the catalog signs (validate's rule).
         rt.catalog.s3_access_key_env = String::new();
         rt.catalog.s3_secret_key_env = "  ".into();
-        assert!(rt.env_refs().iter().all(|(p, _)| !p.starts_with("catalog.s3_")));
+        assert!(
+            rt.env_refs()
+                .iter()
+                .all(|(p, _)| !p.starts_with("catalog.s3_"))
+        );
         host.with_runtime(&rt).unwrap();
         rt.catalog.s3_access_key_env = "AWS_ACCESS_KEY_ID".into();
         rt.catalog.s3_secret_key_env = "AWS_SECRET_ACCESS_KEY".into();
         // Only an exact host entry opens a host-only name.
         let mut open = Config::default();
-        open.config_store.allowed_env = vec!["AWS_*".into(), "MY_TOKEN".into(), "FLOE_SECRET_*".into()];
+        open.config_store.allowed_env =
+            vec!["AWS_*".into(), "MY_TOKEN".into(), "FLOE_SECRET_*".into()];
         rt.events.webhook_secret = Some(Secret::Env("AWS_SESSION_TOKEN".into()));
-        assert!(open.with_runtime(&rt).is_err(), "a glob never reaches AWS_*");
+        assert!(
+            open.with_runtime(&rt).is_err(),
+            "a glob never reaches AWS_*"
+        );
         rt.events.webhook_secret = Some(Secret::Env("MY_TOKEN".into()));
         open.with_runtime(&rt).unwrap();
     }
 
     #[test]
     fn service_urls_are_https_or_loopback() {
-        for ok in ["https://api.github.com", "https://ghe.example.com/api/v3", "http://127.0.0.1:8080", "http://localhost"] {
+        for ok in [
+            "https://api.github.com",
+            "https://ghe.example.com/api/v3",
+            "http://127.0.0.1:8080",
+            "http://localhost",
+        ] {
             crate::check_service_url("k", ok).unwrap();
         }
         for bad in [

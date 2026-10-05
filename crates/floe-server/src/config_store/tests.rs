@@ -45,7 +45,11 @@ fn mirror_doc(token: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-async fn put(c: &ConfigStore, doc: &serde_json::Value, base: Option<u64>) -> Result<Published, PublishError> {
+async fn put(
+    c: &ConfigStore,
+    doc: &serde_json::Value,
+    base: Option<u64>,
+) -> Result<Published, PublishError> {
     c.publish(
         &PublishRequest {
             document: doc,
@@ -66,10 +70,20 @@ async fn publish_is_cas_with_monotonic_revisions() {
     assert!(c.current().await.unwrap().is_none());
     let p1 = put(&c, &json!({}), Some(0)).await.unwrap();
     assert_eq!(p1.record.revision, 1);
-    let p2 = put(&c, &json!({"events": {"sweep_interval": "1m"}}), Some(1)).await.unwrap();
+    let p2 = put(&c, &json!({"events": {"sweep_interval": "1m"}}), Some(1))
+        .await
+        .unwrap();
     assert_eq!(p2.record.revision, 2);
-    assert!(p2.record.diff.iter().any(|d| d.path == "events.sweep_interval" && d.op == DiffOp::Changed));
-    assert_eq!(p2.restart_required, vec!["events.sweep_interval".to_string()]);
+    assert!(
+        p2.record
+            .diff
+            .iter()
+            .any(|d| d.path == "events.sweep_interval" && d.op == DiffOp::Changed)
+    );
+    assert_eq!(
+        p2.restart_required,
+        vec!["events.sweep_interval".to_string()]
+    );
     // A stale editor: 409, nothing written.
     match put(&c, &json!({}), Some(1)).await {
         Err(PublishError::Conflict { current: 2 }) => {}
@@ -104,7 +118,11 @@ async fn invalid_documents_write_nothing() {
     else {
         panic!("expected invalid")
     };
-    assert_eq!(errors[0].path.as_deref(), Some("github_mirror.include"), "{errors:?}");
+    assert_eq!(
+        errors[0].path.as_deref(),
+        Some("github_mirror.include"),
+        "{errors:?}"
+    );
 }
 
 #[tokio::test]
@@ -112,32 +130,73 @@ async fn secrets_are_sealed_redacted_and_kept() {
     let (m, s) = store(false);
     // Without a key a plain value is refused; an env reference is fine.
     let nokey = cs(&s, HistoryMode::Records, false);
-    let Err(PublishError::Invalid(errors)) = put(&nokey, &mirror_doc(&json!({"value": "ghp_x"})), None).await else {
+    let Err(PublishError::Invalid(errors)) =
+        put(&nokey, &mirror_doc(&json!({"value": "ghp_x"})), None).await
+    else {
         panic!("a value without a key must be refused")
     };
     assert_eq!(errors[0].path.as_deref(), Some("github_mirror.token"));
-    put(&nokey, &mirror_doc(&json!({"env": "FLOE_SECRET_MY_TOKEN"})), None).await.unwrap();
+    put(
+        &nokey,
+        &mirror_doc(&json!({"env": "FLOE_SECRET_MY_TOKEN"})),
+        None,
+    )
+    .await
+    .unwrap();
 
     let c = cs(&s, HistoryMode::Records, true);
-    let p = put(&c, &mirror_doc(&json!({"value": "ghp_secret"})), None).await.unwrap();
-    let raw = String::from_utf8(m.get_bytes("current.json").await.unwrap().unwrap().1.to_vec()).unwrap();
+    let p = put(&c, &mirror_doc(&json!({"value": "ghp_secret"})), None)
+        .await
+        .unwrap();
+    let raw = String::from_utf8(
+        m.get_bytes("current.json")
+            .await
+            .unwrap()
+            .unwrap()
+            .1
+            .to_vec(),
+    )
+    .unwrap();
     assert!(!raw.contains("ghp_secret"), "plain text at rest: {raw}");
     assert!(raw.contains("\"sealed\""));
-    let token_change = p.record.diff.iter().find(|d| d.path == "github_mirror.token").unwrap();
+    let token_change = p
+        .record
+        .diff
+        .iter()
+        .find(|d| d.path == "github_mirror.token")
+        .unwrap();
     assert_eq!(token_change.new, Some(json!("(secret)")));
-    assert_eq!(token_change.old, Some(json!({"env": "FLOE_SECRET_MY_TOKEN"})));
+    assert_eq!(
+        token_change.old,
+        Some(json!({"env": "FLOE_SECRET_MY_TOKEN"}))
+    );
     // Reads are redacted.
     let red = redact(&p.record.document);
     assert_eq!(red["github_mirror"]["token"], json!({"redacted": true}));
     // Keep: a redacted placeholder carries the stored value; no diff.
-    let p2 = put(&c, &mirror_doc(&json!({"redacted": true})), None).await.unwrap();
-    assert_eq!(p2.record.document["github_mirror"]["token"], p.record.document["github_mirror"]["token"]);
-    assert!(p2.record.diff.iter().all(|d| d.path != "github_mirror.token"));
+    let p2 = put(&c, &mirror_doc(&json!({"redacted": true})), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        p2.record.document["github_mirror"]["token"],
+        p.record.document["github_mirror"]["token"]
+    );
+    assert!(
+        p2.record
+            .diff
+            .iter()
+            .all(|d| d.path != "github_mirror.token")
+    );
     let opened = c.open_document(&p2.record.document).unwrap();
-    assert_eq!(opened.github_mirror.token, Secret::Value("ghp_secret".into()));
+    assert_eq!(
+        opened.github_mirror.token,
+        Secret::Value("ghp_secret".into())
+    );
     // Another instance without the key cannot keep or apply it.
     assert!(nokey.open_document(&p2.record.document).is_err());
-    let Err(PublishError::Invalid(errors)) = put(&nokey, &mirror_doc(&json!({"redacted": true})), None).await else {
+    let Err(PublishError::Invalid(errors)) =
+        put(&nokey, &mirror_doc(&json!({"redacted": true})), None).await
+    else {
         panic!("keeping a sealed value needs the key")
     };
     assert!(errors[0].message.contains("FLOE_CONFIG_KEY"), "{errors:?}");
@@ -147,7 +206,9 @@ async fn secrets_are_sealed_redacted_and_kept() {
 async fn redacted_with_nothing_stored_is_refused() {
     let (_, s) = store(false);
     let c = cs(&s, HistoryMode::Records, true);
-    let Err(PublishError::Invalid(errors)) = put(&c, &mirror_doc(&json!({"redacted": true})), None).await else {
+    let Err(PublishError::Invalid(errors)) =
+        put(&c, &mirror_doc(&json!({"redacted": true})), None).await
+    else {
         panic!("nothing to keep")
     };
     assert_eq!(errors[0].path.as_deref(), Some("github_mirror.token"));
@@ -157,27 +218,51 @@ async fn history_and_rollback(versioned: bool, mode: HistoryMode) {
     let (m, s) = store(versioned);
     let c = cs(&s, mode, false);
     for i in 1..=3 {
-        put(&c, &json!({"events": {"sweep_interval": format!("{i}m")}}), None).await.unwrap();
+        put(
+            &c,
+            &json!({"events": {"sweep_interval": format!("{i}m")}}),
+            None,
+        )
+        .await
+        .unwrap();
     }
     let h = c.history(None, 10).await.unwrap();
-    assert_eq!(h.iter().map(|e| e.revision).collect::<Vec<_>>(), vec![3, 2, 1]);
-    assert!(h.iter().all(|e| e.document.is_none()), "list form has no documents");
+    assert_eq!(
+        h.iter().map(|e| e.revision).collect::<Vec<_>>(),
+        vec![3, 2, 1]
+    );
+    assert!(
+        h.iter().all(|e| e.document.is_none()),
+        "list form has no documents"
+    );
     let page = c.history(Some(3), 1).await.unwrap();
     assert_eq!(page[0].revision, 2);
     let r1 = c.revision(1).await.unwrap();
     assert_eq!(r1.document["events"]["sweep_interval"], "1m");
-    let rb = c.rollback(1, "bob", "", Some(3), &bootstrap()).await.unwrap();
+    let rb = c
+        .rollback(1, "bob", "", Some(3), &bootstrap())
+        .await
+        .unwrap();
     assert_eq!(rb.record.revision, 4);
     assert_eq!(rb.record.rolled_back_from, Some(1));
     assert_eq!(rb.record.document["events"]["sweep_interval"], "1m");
-    assert!(matches!(c.revision(9).await, Err(PublishError::NotFound(9))));
+    assert!(matches!(
+        c.revision(9).await,
+        Err(PublishError::NotFound(9))
+    ));
     let h1 = m.get_bytes(&history_key(1)).await.unwrap().unwrap().1;
     let entry: HistoryEntry = serde_json::from_slice(&h1).unwrap();
     match mode {
         HistoryMode::Versions => {
-            assert!(entry.document.is_none() && entry.object_version.is_some(), "{entry:?}");
+            assert!(
+                entry.document.is_none() && entry.object_version.is_some(),
+                "{entry:?}"
+            );
         }
-        _ => assert!(entry.document.is_some() && entry.object_version.is_none(), "{entry:?}"),
+        _ => assert!(
+            entry.document.is_some() && entry.object_version.is_none(),
+            "{entry:?}"
+        ),
     }
 }
 
@@ -196,13 +281,23 @@ async fn auto_history_follows_the_bucket() {
     for versioned in [false, true] {
         let (_, s) = store(versioned);
         let (mode, again) = resolve_history(HistoryMode::Auto, &s).await;
-        assert_eq!(mode, if versioned { HistoryMode::Versions } else { HistoryMode::Records });
+        assert_eq!(
+            mode,
+            if versioned {
+                HistoryMode::Versions
+            } else {
+                HistoryMode::Records
+            }
+        );
         assert!(!again);
     }
     // `versions` on a bucket without versioning: records now, probed again
     // later — never a startup failure.
     let (m, s) = store(false);
-    assert_eq!(resolve_history(HistoryMode::Versions, &s).await, (HistoryMode::Records, true));
+    assert_eq!(
+        resolve_history(HistoryMode::Versions, &s).await,
+        (HistoryMode::Records, true)
+    );
     let c = ConfigStore {
         history: parking_lot::Mutex::new(HistoryMode::Records),
         wanted: HistoryMode::Versions,
@@ -210,14 +305,28 @@ async fn auto_history_follows_the_bucket() {
         ..cs(&s, HistoryMode::Records, false)
     };
     put(&c, &json!({}), None).await.unwrap();
-    let h1: HistoryEntry = serde_json::from_slice(&m.get_bytes(&history_key(1)).await.unwrap().unwrap().1).unwrap();
-    assert!(h1.document.is_some(), "records while the bucket keeps no versions");
-    m.versioning.store(true, std::sync::atomic::Ordering::Relaxed);
+    let h1: HistoryEntry =
+        serde_json::from_slice(&m.get_bytes(&history_key(1)).await.unwrap().unwrap().1).unwrap();
+    assert!(
+        h1.document.is_some(),
+        "records while the bucket keeps no versions"
+    );
+    m.versioning
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     put(&c, &json!({}), None).await.unwrap();
-    assert_eq!(c.history_mode(), HistoryMode::Versions, "the next publish probed again");
-    let h2: HistoryEntry = serde_json::from_slice(&m.get_bytes(&history_key(2)).await.unwrap().unwrap().1).unwrap();
+    assert_eq!(
+        c.history_mode(),
+        HistoryMode::Versions,
+        "the next publish probed again"
+    );
+    let h2: HistoryEntry =
+        serde_json::from_slice(&m.get_bytes(&history_key(2)).await.unwrap().unwrap().1).unwrap();
     assert!(h2.object_version.is_some());
-    assert_eq!(c.revision(1).await.unwrap().revision, 1, "mixed history still reads");
+    assert_eq!(
+        c.revision(1).await.unwrap().revision,
+        1,
+        "mixed history still reads"
+    );
 }
 
 #[tokio::test]
@@ -231,7 +340,9 @@ async fn an_expired_object_version_is_gone() {
     let (_, s2) = store(true);
     let h1 = m.get_bytes(&history_key(1)).await.unwrap().unwrap().1;
     let cur = m.get_bytes(CURRENT).await.unwrap().unwrap().1;
-    s2.put_bytes(&history_key(1), h1, PutMode::Create).await.unwrap();
+    s2.put_bytes(&history_key(1), h1, PutMode::Create)
+        .await
+        .unwrap();
     s2.put_bytes(CURRENT, cur, PutMode::Create).await.unwrap();
     let c2 = cs(&s2, HistoryMode::Versions, false);
     assert!(matches!(c2.revision(1).await, Err(PublishError::Gone(1))));
@@ -256,21 +367,42 @@ async fn live_applies_new_revisions_and_reports_restarts() {
     assert_eq!(live.current().revision, 0);
     assert!(!live.current().cfg.github_mirror.enabled);
     let mut rx = live.subscribe();
-    put(&c, &mirror_doc(&json!({"env": "FLOE_SECRET_TEST_LIVE_TOKEN"})), None).await.unwrap();
+    put(
+        &c,
+        &mirror_doc(&json!({"env": "FLOE_SECRET_TEST_LIVE_TOKEN"})),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(live.revalidate().await, 1);
     assert!(rx.has_changed().unwrap());
     let applied = rx.borrow_and_update().clone();
-    assert!(applied.cfg.github_mirror.enabled, "the mirror section applies live");
+    assert!(
+        applied.cfg.github_mirror.enabled,
+        "the mirror section applies live"
+    );
     assert!(live.status().restart_required.is_empty());
-    put(&c, &json!({"events": {"webhook_url": "https://hooks.example/x"}}), None).await.unwrap();
+    put(
+        &c,
+        &json!({"events": {"webhook_url": "https://hooks.example/x"}}),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(live.revalidate().await, 2);
-    assert_eq!(live.status().restart_required, vec!["events.webhook_url".to_string()]);
+    assert_eq!(
+        live.status().restart_required,
+        vec!["events.webhook_url".to_string()]
+    );
     // Unchanged: a conditional GET, nothing applied.
     assert_eq!(live.revalidate().await, 2);
     // A second instance starts on the current revision.
     let other = live::Live::start(Arc::new(bootstrap()), c.clone()).await;
     assert_eq!(other.current().revision, 2);
-    assert_eq!(other.current().cfg.events.webhook_url.as_deref(), Some("https://hooks.example/x"));
+    assert_eq!(
+        other.current().cfg.events.webhook_url.as_deref(),
+        Some("https://hooks.example/x")
+    );
 }
 
 #[tokio::test]
@@ -279,8 +411,14 @@ async fn a_document_this_instance_cannot_open_is_not_applied() {
     let with_key = Arc::new(cs(&s, HistoryMode::Records, true));
     let without = Arc::new(cs(&s, HistoryMode::Records, false));
     let live = live::Live::start(Arc::new(bootstrap()), without.clone()).await;
-    put(&with_key, &mirror_doc(&json!({"value": "ghp_x"})), None).await.unwrap();
-    assert_eq!(live.revalidate().await, 0, "kept the previous (no) revision");
+    put(&with_key, &mirror_doc(&json!({"value": "ghp_x"})), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        live.revalidate().await,
+        0,
+        "kept the previous (no) revision"
+    );
     let err = live.status().apply_error.unwrap();
     assert!(err.contains("FLOE_CONFIG_KEY"), "{err}");
 }
@@ -306,14 +444,27 @@ async fn heartbeats_list_instances() {
     let got = c.instances().await.unwrap();
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].instance, "host/1");
-    assert_eq!(c.instances().await.unwrap().len(), 1, "the stale one was deleted");
+    assert_eq!(
+        c.instances().await.unwrap().len(),
+        1,
+        "the stale one was deleted"
+    );
 }
 
 #[test]
 fn error_paths_are_extracted() {
-    assert_eq!(error_path("github_mirror.include entry \"x\" must"), Some("github_mirror.include".into()));
-    assert_eq!(error_path("catalog.max_buffer_rows (5) must be"), Some("catalog.max_buffer_rows".into()));
-    assert_eq!(error_path("events.webhook_url must be"), Some("events.webhook_url".into()));
+    assert_eq!(
+        error_path("github_mirror.include entry \"x\" must"),
+        Some("github_mirror.include".into())
+    );
+    assert_eq!(
+        error_path("catalog.max_buffer_rows (5) must be"),
+        Some("catalog.max_buffer_rows".into())
+    );
+    assert_eq!(
+        error_path("events.webhook_url must be"),
+        Some("events.webhook_url".into())
+    );
     assert_eq!(error_path("server.listen is bad"), None);
     assert_eq!(error_path("unknown field `x`"), None);
 }
@@ -325,19 +476,41 @@ fn error_paths_are_extracted() {
 async fn env_references_outside_the_allowlist_are_refused() {
     let (m, s) = store(false);
     let c = Arc::new(cs(&s, HistoryMode::Records, false));
-    for name in ["FLOE_CONFIG_KEY", "AWS_SECRET_ACCESS_KEY", "FLOE__SERVER__AUTH__SESSION_SECRET", "HOME"] {
-        let Err(PublishError::Invalid(errors)) = put(&c, &mirror_doc(&json!({ "env": name })), None).await else {
+    for name in [
+        "FLOE_CONFIG_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "FLOE__SERVER__AUTH__SESSION_SECRET",
+        "HOME",
+    ] {
+        let Err(PublishError::Invalid(errors)) =
+            put(&c, &mirror_doc(&json!({ "env": name })), None).await
+        else {
             panic!("{name} must be refused")
         };
-        assert_eq!(errors[0].path.as_deref(), Some("github_mirror.token"), "{errors:?}");
+        assert_eq!(
+            errors[0].path.as_deref(),
+            Some("github_mirror.token"),
+            "{errors:?}"
+        );
     }
-    let Err(PublishError::Invalid(errors)) =
-        put(&c, &json!({"catalog": {"token_env": "AWS_SECRET_ACCESS_KEY"}}), None).await
+    let Err(PublishError::Invalid(errors)) = put(
+        &c,
+        &json!({"catalog": {"token_env": "AWS_SECRET_ACCESS_KEY"}}),
+        None,
+    )
+    .await
     else {
         panic!("a bearer env must follow the list")
     };
-    assert_eq!(errors[0].path.as_deref(), Some("catalog.token_env"), "{errors:?}");
-    assert!(m.get_bytes(CURRENT).await.unwrap().is_none(), "nothing written");
+    assert_eq!(
+        errors[0].path.as_deref(),
+        Some("catalog.token_env"),
+        "{errors:?}"
+    );
+    assert!(
+        m.get_bytes(CURRENT).await.unwrap().is_none(),
+        "nothing written"
+    );
 
     // A document that bypassed publish (an older binary, a hand edit).
     let live = live::Live::start(Arc::new(bootstrap()), c.clone()).await;
@@ -350,7 +523,13 @@ async fn env_references_outside_the_allowlist_are_refused() {
         document: mirror_doc(&json!({"env": "FLOE_CONFIG_KEY"})),
         diff: vec![],
     };
-    s.put_bytes(CURRENT, serde_json::to_vec(&forged).unwrap(), PutMode::Create).await.unwrap();
+    s.put_bytes(
+        CURRENT,
+        serde_json::to_vec(&forged).unwrap(),
+        PutMode::Create,
+    )
+    .await
+    .unwrap();
     assert_eq!(live.revalidate().await, 0, "never applied");
     let err = live.status().apply_error.unwrap();
     assert!(err.contains("allowed_env"), "{err}");
@@ -363,13 +542,20 @@ async fn an_older_revision_is_never_applied_after_a_newer_one() {
     let (_, s) = store(false);
     let c = Arc::new(cs(&s, HistoryMode::Records, false));
     let live = live::Live::start(Arc::new(bootstrap()), c.clone()).await;
-    put(&c, &json!({"events": {"sweep_interval": "1m"}}), None).await.unwrap();
+    put(&c, &json!({"events": {"sweep_interval": "1m"}}), None)
+        .await
+        .unwrap();
     let r1 = c.revision(1).await.unwrap();
-    put(&c, &json!({"events": {"sweep_interval": "2m"}}), None).await.unwrap();
+    put(&c, &json!({"events": {"sweep_interval": "2m"}}), None)
+        .await
+        .unwrap();
     assert_eq!(live.revalidate().await, 2);
     live.apply(&r1, floe_store::Version::new("old"));
     assert_eq!(live.current().revision, 2);
-    assert_eq!(live.current().cfg.events.sweep_interval, std::time::Duration::from_mins(2));
+    assert_eq!(
+        live.current().cfg.events.sweep_interval,
+        std::time::Duration::from_mins(2)
+    );
     assert!(live.status().apply_error.is_none());
 }
 
@@ -383,10 +569,22 @@ async fn a_token_entered_later_reaches_the_startup_config() {
     let live = live::Live::start(Arc::new(bootstrap()), c.clone()).await;
     let startup = live.current().cfg;
     let alias = startup.github_mirror.token_env.clone();
-    assert!(alias.starts_with(floe_config::secret::GITHUB_MIRROR_TOKEN_ALIAS), "{alias}");
-    put(&c, &mirror_doc(&json!({"value": "ghp_entered_later"})), None).await.unwrap();
+    assert!(
+        alias.starts_with(floe_config::secret::GITHUB_MIRROR_TOKEN_ALIAS),
+        "{alias}"
+    );
+    put(
+        &c,
+        &mirror_doc(&json!({"value": "ghp_entered_later"})),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(live.revalidate().await, 1);
-    assert_eq!(floe_config::secret::env_var(&alias).as_deref(), Some("ghp_entered_later"));
+    assert_eq!(
+        floe_config::secret::env_var(&alias).as_deref(),
+        Some("ghp_entered_later")
+    );
     assert_eq!(live.current().cfg.github_mirror.token_env, alias);
     assert!(live.status().restart_required.is_empty());
 }
@@ -417,8 +615,14 @@ async fn unreadable_heartbeats_are_kept() {
         ..floe_store::fault::FaultPlan::default()
     });
     let seen = c.instances().await.unwrap();
-    assert_eq!(seen.iter().map(|i| i.instance.as_str()).collect::<Vec<_>>(), vec!["other"]);
+    assert_eq!(
+        seen.iter().map(|i| i.instance.as_str()).collect::<Vec<_>>(),
+        vec!["other"]
+    );
     fault.heal();
-    assert!(m.get_bytes("instances/live.json").await.unwrap().is_some(), "not deleted");
+    assert!(
+        m.get_bytes("instances/live.json").await.unwrap().is_some(),
+        "not deleted"
+    );
     assert_eq!(c.instances().await.unwrap().len(), 2);
 }

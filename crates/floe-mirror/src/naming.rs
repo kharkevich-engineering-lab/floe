@@ -48,7 +48,11 @@ mod tests {
             ("a-b", "x.y_z", "a-b/x.y_z"),
         ];
         for (o, n, want) in cases {
-            assert_eq!(floe_id(o, n).map(|id| id.to_string()).as_deref(), Some(*want), "{o}/{n}");
+            assert_eq!(
+                floe_id(o, n).map(|id| id.to_string()).as_deref(),
+                Some(*want),
+                "{o}/{n}"
+            );
         }
         assert_eq!(owner("Acme"), "acme");
         // The longest GitHub names (39-character owner, 100-character name) fit.

@@ -347,7 +347,8 @@ fn describe(m: &Mirror, p: &plan::Plan) -> Vec<String> {
         };
         let r = e.to_remote(&a.id);
         let floe = e.floe.clone().unwrap_or_else(|| {
-            naming::floe_id(&r.owner, &r.name).map_or_else(|| "(no valid floe name)".to_string(), |id| id.to_string())
+            naming::floe_id(&r.owner, &r.name)
+                .map_or_else(|| "(no valid floe name)".to_string(), |id| id.to_string())
         });
         for s in &a.steps {
             lines.push(match s {
@@ -498,7 +499,13 @@ pub async fn run_loop_until(
             let mut wait = jitter(interval);
             match &result {
                 Ok(r) => {
-                    tracing::info!(source = kind, elapsed_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX), complete = r.complete, "mirror pass {}", r.summary());
+                    tracing::info!(
+                        source = kind,
+                        elapsed_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        complete = r.complete,
+                        "mirror pass {}",
+                        r.summary()
+                    );
                     metrics::counter!("floe_mirror_pass_total", "source" => kind, "outcome" => r.outcome).increment(1);
                     if let Some(until) = r.api.rate_limited_until {
                         let d = until
@@ -567,7 +574,12 @@ async fn sleep_or_drain(d: Duration, lost: Option<&AtomicBool>, stop: &AtomicBoo
         if now >= deadline {
             return true;
         }
-        tokio::time::sleep(deadline.saturating_duration_since(now).min(Duration::from_secs(1))).await;
+        tokio::time::sleep(
+            deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_secs(1)),
+        )
+        .await;
     }
 }
 

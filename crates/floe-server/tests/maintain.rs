@@ -46,10 +46,7 @@ async fn pass_checkpoints_due_repos_refs_level_and_reports_tasks() -> anyhow::Re
     }
     let m = step!(
         "open on front",
-        front
-            .state
-            .registry
-            .open(&floe_git::RepoId::new("o", "r")?)
+        front.state.registry.open(&floe_git::RepoId::new("o", "r")?)
     )?
     .manifest();
     assert_eq!(m.head_seq, 3);
@@ -82,10 +79,7 @@ async fn pass_checkpoints_due_repos_refs_level_and_reports_tasks() -> anyhow::Re
     // Manifest folded; the task is discoverable on the maintainer.
     let h = step!(
         "open on maintainer",
-        maint
-            .state
-            .registry
-            .open(&floe_git::RepoId::new("o", "r")?)
+        maint.state.registry.open(&floe_git::RepoId::new("o", "r")?)
     )?;
     let m = h.manifest();
     assert_eq!(m.checkpoint.as_ref().map(|c| c.seq), Some(3));
@@ -743,11 +737,7 @@ async fn bundle_list_shows_a_bundle_right_after_this_host_builds_it() -> anyhow:
         .await
         .map_err(|_| anyhow::anyhow!("op start failed"))?;
     assert!(t.wait_done(std::time::Duration::from_secs(30)).await);
-    assert!(
-        t.outcome().is_some_and(|o| o.is_ok()),
-        "{:?}",
-        t.outcome()
-    );
+    assert!(t.outcome().is_some_and(|o| o.is_ok()), "{:?}", t.outcome());
     let list2 = step!("list 2", server.get_text("/o/r.git/bundles/list", &[]))?;
     assert!(
         list2.contains("[bundle \"daily-"),
@@ -886,9 +876,7 @@ async fn one_pass_settles_all_closed_empty_slots() -> anyhow::Result<()> {
         .await
         .map_err(|_| anyhow::anyhow!("op start"))?;
     assert!(t.wait_done(std::time::Duration::from_secs(30)).await);
-    let list = floe_bundle::ops::read_list(h.store())
-        .await?
-        .expect("list");
+    let list = floe_bundle::ops::read_list(h.store()).await?.expect("list");
     assert_eq!(list.bundles.len(), 1, "{list:?}");
     drop(c1);
 
@@ -923,9 +911,7 @@ async fn one_pass_settles_all_closed_empty_slots() -> anyhow::Result<()> {
 
     // ONE pass.
     let report = step!("pass", floe_server::maintain::run_pass(&server.state))?;
-    let list = floe_bundle::ops::read_list(h.store())
-        .await?
-        .expect("list");
+    let list = floe_bundle::ops::read_list(h.store()).await?.expect("list");
     let hourlies: Vec<_> = list
         .bundles
         .iter()
@@ -1131,9 +1117,7 @@ async fn weekly_slot_rebuilds_the_base_then_composes_it_on_an_ssd_maintainer() -
         "compose unit: {report:?}\ntasks: {}",
         server.get_text("/o/r/api/tasks", &[]).await?
     );
-    let list = floe_bundle::ops::read_list(h.store())
-        .await?
-        .expect("list");
+    let list = floe_bundle::ops::read_list(h.store()).await?.expect("list");
     let weekly = list
         .bundles
         .iter()
@@ -1520,9 +1504,7 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
             break;
         }
     }
-    let list = floe_bundle::ops::read_list(h.store())
-        .await?
-        .expect("list");
+    let list = floe_bundle::ops::read_list(h.store()).await?.expect("list");
     let hourlies: Vec<_> = list
         .bundles
         .iter()
@@ -1588,9 +1570,8 @@ async fn identical_incremental_slots_are_skipped_as_unchanged() -> anyhow::Resul
         .filter(|r| r.strategy == "hourly" && r.slot != hourlies[0].slot)
         .map(|r| r.slot)
         .max();
-    let other_closed = other_slot.is_some_and(|s| {
-        floe_bundle::slots::slot_closed(&hourly, s, std::time::SystemTime::now())
-    });
+    let other_closed = other_slot
+        .is_some_and(|s| floe_bundle::slots::slot_closed(&hourly, s, std::time::SystemTime::now()));
     assert!(
         !other_closed || !unchanged.is_empty(),
         "the closed hour after it is skipped as unchanged: {:?}",
@@ -1751,9 +1732,7 @@ async fn blobless_bundle_family_is_composed_from_the_history_pack_and_served_on_
         })
         .expect("history pack")
         .clone();
-    let list = floe_bundle::ops::read_list(h.store())
-        .await?
-        .expect("list");
+    let list = floe_bundle::ops::read_list(h.store()).await?.expect("list");
     let weekly = list
         .bundles
         .iter()
@@ -1930,8 +1909,8 @@ async fn blobless_bundle_family_is_composed_from_the_history_pack_and_served_on_
 /// per fresh clone).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn maintainer_pass_brings_an_overgrown_bundle_list_to_retention() -> anyhow::Result<()> {
-    use prost::Message;
     use floe_store::{ObjectStore, ObjectStoreExt, PutMode};
+    use prost::Message;
     let server = step!(
         "start",
         Server::start_with_tweak(|c| {
@@ -1945,8 +1924,7 @@ async fn maintainer_pass_brings_an_overgrown_bundle_list_to_retention() -> anyho
     )?;
     step!("put repo", server.put_repo("o", "r"))?;
     let id = floe_git::RepoId::new("o", "r")?;
-    let store =
-        floe_store::Prefixed::new(server.state.registry.store().clone(), id.store_prefix());
+    let store = floe_store::Prefixed::new(server.state.registry.store().clone(), id.store_prefix());
     // Seed: one weekly, three dailies on it, 13 hourlies on each daily (objects = dummy bytes).
     let mut list = floe_proto::v1::BundleList {
         mode: "all".into(),

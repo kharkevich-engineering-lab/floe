@@ -25,9 +25,9 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use anyhow::Context;
 use chrono::Utc;
-use futures::StreamExt;
 use floe_git::RepoId;
 use floe_store::{ObjectStoreExt, PutMode, StoreError};
+use futures::StreamExt;
 
 use crate::events::{self, RefEvent, Sink};
 
@@ -567,17 +567,26 @@ mod tests {
     fn an_unresolvable_webhook_secret_refuses_to_deliver() {
         let mut cfg = floe_config::Config::default();
         cfg.events.webhook_url = Some("https://hooks.example/x".into());
-        assert_eq!(webhook_secret(&cfg.events).unwrap(), None, "no secret = unsigned, as configured");
+        assert_eq!(
+            webhook_secret(&cfg.events).unwrap(),
+            None,
+            "no secret = unsigned, as configured"
+        );
         cfg.events.webhook_secret = Some(floe_config::Secret::Value("s".into()));
         assert_eq!(webhook_secret(&cfg.events).unwrap().as_deref(), Some("s"));
-        cfg.events.webhook_secret = Some(floe_config::Secret::Env("FLOE_SECRET_TEST_BRIDGE_UNSET".into()));
+        cfg.events.webhook_secret = Some(floe_config::Secret::Env(
+            "FLOE_SECRET_TEST_BRIDGE_UNSET".into(),
+        ));
         let err = webhook_secret(&cfg.events).unwrap_err().to_string();
         assert!(err.contains("FLOE_SECRET_TEST_BRIDGE_UNSET"), "{err}");
         let registry = floe_wal::Registry::new(
             Arc::new(floe_store::memory::MemoryStore::new()),
             Arc::new(cfg.clone()),
         );
-        assert!(Bridge::new(&cfg, registry).is_none(), "no sink, no unsigned deliveries");
+        assert!(
+            Bridge::new(&cfg, registry).is_none(),
+            "no sink, no unsigned deliveries"
+        );
     }
 
     #[test]

@@ -71,7 +71,9 @@ fn next_alias() -> String {
 
 impl std::fmt::Debug for Live {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Live").field("status", &*self.status.lock()).finish_non_exhaustive()
+        f.debug_struct("Live")
+            .field("status", &*self.status.lock())
+            .finish_non_exhaustive()
     }
 }
 
@@ -208,7 +210,8 @@ impl Live {
             }
             Err(e) => {
                 tracing::error!(revision = record.revision, error = %e, "config revision not applied; keeping the previous one");
-                self.status.lock().apply_error = Some(format!("revision {}: {e:#}", record.revision));
+                self.status.lock().apply_error =
+                    Some(format!("revision {}: {e:#}", record.revision));
             }
         }
     }
@@ -288,9 +291,14 @@ fn open_and_merge(
 /// The effective config for a one-shot command (`floe github sync`): the
 /// current document applied over `bootstrap`, or `bootstrap` as is when there
 /// is none. Fails when the document cannot be opened (a CLI should say so).
-pub async fn effective_once(bootstrap: &Arc<Config>, store: &ConfigStore) -> anyhow::Result<Arc<Config>> {
+pub async fn effective_once(
+    bootstrap: &Arc<Config>,
+    store: &ConfigStore,
+) -> anyhow::Result<Arc<Config>> {
     match store.current().await? {
-        Some((_, record)) => Ok(open_and_merge(bootstrap, store, &record, GITHUB_MIRROR_TOKEN_ALIAS)?.0),
+        Some((_, record)) => {
+            Ok(open_and_merge(bootstrap, store, &record, GITHUB_MIRROR_TOKEN_ALIAS)?.0)
+        }
         None => Ok(bootstrap.clone()),
     }
 }

@@ -11,9 +11,9 @@
 //! path). `DashMap` remains the right choice for unbounded lookup tables
 //! (e.g. `RepoSemaphores`); bounded LRU is moka's domain.
 
-use moka::sync::Cache;
 use floe_git::LsRefsLine;
 use floe_store::Version;
+use moka::sync::Cache;
 
 // ---------------------------------------------------------------------------
 // Ref advertisement cache
@@ -548,9 +548,9 @@ mod tests {
     #[ignore = "requires git binary and takes ~10s"]
     #[allow(clippy::cast_precision_loss, reason = "benchmark display ratio")]
     fn bench_ref_advert_50k_refs() {
+        use floe_git::{LocalRepo, ObjectFormat, RepoId, Service};
         use std::process::Command;
         use std::time::Instant;
-        use floe_git::{LocalRepo, ObjectFormat, RepoId, Service};
 
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();

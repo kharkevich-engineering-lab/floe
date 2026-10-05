@@ -20,9 +20,9 @@
 use std::str::FromStr;
 
 use base64::Engine;
-use serde::{Deserialize, Serialize};
 use floe_git::RepoId;
 use floe_store::{ObjectStoreExt, Prefixed, PutMode, Version};
+use serde::{Deserialize, Serialize};
 
 use super::error::{GhError, GhResult};
 
@@ -372,7 +372,11 @@ fn encode<T: Serialize>(value: &T) -> GhResult<Vec<u8>> {
 
 /// The index and the version it was read at; `None` when it does not exist yet.
 pub async fn read_index(store: &Prefixed) -> GhResult<(Index, Option<Version>)> {
-    match store.get_bytes(INDEX_KEY).await.map_err(|e| store_err(&e))? {
+    match store
+        .get_bytes(INDEX_KEY)
+        .await
+        .map_err(|e| store_err(&e))?
+    {
         Some((meta, bytes)) => Ok((parse(INDEX_KEY, &bytes)?, Some(meta.version))),
         None => Ok((Index::default(), None)),
     }

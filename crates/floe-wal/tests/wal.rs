@@ -2159,7 +2159,10 @@ async fn test_publish_at_explicit_monotonic_created_at() {
     let t = |s: &str| {
         std::time::UNIX_EPOCH
             + Duration::from_secs(
-                chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp().cast_unsigned()
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .unwrap()
+                    .timestamp()
+                    .cast_unsigned(),
             )
     };
     // Slot 1: main = c1 at Aug 10.
@@ -2337,7 +2340,10 @@ async fn test_checkpoint_carries_first_state_and_as_of() {
     let t = |s: &str| {
         std::time::UNIX_EPOCH
             + Duration::from_secs(
-                chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp().cast_unsigned()
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .unwrap()
+                    .timestamp()
+                    .cast_unsigned(),
             )
     };
     let ingested = ingest_pack_data(&handle, work.create_pack()).await.unwrap();
@@ -2439,7 +2445,10 @@ async fn test_first_state_time_uses_the_checkpoint_when_early_entries_are_untime
     let t = |s: &str| {
         std::time::UNIX_EPOCH
             + Duration::from_secs(
-                chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp().cast_unsigned()
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .unwrap()
+                    .timestamp()
+                    .cast_unsigned(),
             )
     };
     let ingested = ingest_pack_data(&handle, work.create_pack()).await.unwrap();
@@ -2544,7 +2553,10 @@ async fn test_checkpoint_times_come_from_the_object_when_the_ref_has_none() {
     let t = |s: &str| {
         std::time::UNIX_EPOCH
             + Duration::from_secs(
-                chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp().cast_unsigned()
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .unwrap()
+                    .timestamp()
+                    .cast_unsigned(),
             )
     };
     let ingested = ingest_pack_data(&handle, work.create_pack()).await.unwrap();
@@ -2587,11 +2599,7 @@ async fn test_checkpoint_times_come_from_the_object_when_the_ref_has_none() {
     let mut cpo = floe_proto::v1::Checkpoint::decode(bytes.as_ref()).unwrap();
     cpo.created_at = Some(floe_proto::time::from_system(t("2026-08-19T21:33:00Z")));
     store
-        .put_bytes(
-            &cp_key,
-            cpo.encode_to_vec(),
-            floe_store::PutMode::Overwrite,
-        )
+        .put_bytes(&cp_key, cpo.encode_to_vec(), floe_store::PutMode::Overwrite)
         .await
         .unwrap();
 
@@ -2715,8 +2723,8 @@ async fn a_landed_cas_is_ok_even_when_the_local_apply_fails_and_the_next_sync_re
 /// cursor starts at that boundary; an existing cursor behind it must error.
 #[tokio::test]
 async fn retained_log_starts_at_unindexed_checkpoint_boundary() {
-    use prost::Message;
     use floe_store::{ObjectStoreExt, PutMode};
+    use prost::Message;
     let cache = tempfile::tempdir().unwrap();
     let store = MemoryStore::shared();
     let registry = Registry::new(store, Arc::new(make_config(cache.path(), 0)));
@@ -2765,7 +2773,10 @@ async fn retained_log_starts_at_unindexed_checkpoint_boundary() {
 #[tokio::test]
 async fn create_on_a_cached_handle_is_already_exists() {
     let cache = tempfile::tempdir().unwrap();
-    let registry = Registry::new(MemoryStore::shared(), Arc::new(make_config(cache.path(), 0)));
+    let registry = Registry::new(
+        MemoryStore::shared(),
+        Arc::new(make_config(cache.path(), 0)),
+    );
     let id = repo_id("mirror", "cached");
     registry.create(&id, ObjectFormat::Sha1).await.unwrap();
     // The handle is cached on this instance: still AlreadyExists, not Ok.
@@ -2774,27 +2785,53 @@ async fn create_on_a_cached_handle_is_already_exists() {
         Err(floe_wal::WalError::AlreadyExists)
     ));
     // open_or_create keeps working on an existing repository.
-    registry.open_or_create(&id, ObjectFormat::Sha1).await.unwrap();
+    registry
+        .open_or_create(&id, ObjectFormat::Sha1)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn publish_settings_if_is_a_cas_on_the_revision() {
     let cache = tempfile::tempdir().unwrap();
-    let registry = Registry::new(MemoryStore::shared(), Arc::new(make_config(cache.path(), 0)));
+    let registry = Registry::new(
+        MemoryStore::shared(),
+        Arc::new(make_config(cache.path(), 0)),
+    );
     let id = repo_id("mirror", "settings");
     let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
     let doc = "[upstream]\nsource = \"github:1\"\n";
-    assert_eq!(handle.publish_settings_if(doc, "github-mirror", "m", 0).await.unwrap(), 1);
+    assert_eq!(
+        handle
+            .publish_settings_if(doc, "github-mirror", "m", 0)
+            .await
+            .unwrap(),
+        1
+    );
     // A stale expectation is a conflict, and nothing is published.
-    match handle.publish_settings_if(doc, "github-mirror", "m", 0).await {
-        Err(floe_wal::WalError::SettingsConflict { expected: 0, actual: 1 }) => {}
+    match handle
+        .publish_settings_if(doc, "github-mirror", "m", 0)
+        .await
+    {
+        Err(floe_wal::WalError::SettingsConflict {
+            expected: 0,
+            actual: 1,
+        }) => {}
         other => panic!("{other:?}"),
     }
     assert_eq!(handle.settings().unwrap().revision, 1);
-    assert_eq!(handle.publish_settings_if(doc, "github-mirror", "m", 1).await.unwrap(), 2);
+    assert_eq!(
+        handle
+            .publish_settings_if(doc, "github-mirror", "m", 1)
+            .await
+            .unwrap(),
+        2
+    );
     // Invalid settings are refused before any CAS.
     assert!(matches!(
-        handle.publish_settings_if("[server]\nx = 1\n", "a", "m", 2).await,
+        handle
+            .publish_settings_if("[server]\nx = 1\n", "a", "m", 2)
+            .await,
         Err(floe_wal::WalError::Invalid(_))
     ));
 }

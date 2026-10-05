@@ -426,7 +426,8 @@ impl ConfigStore {
                 message: format!("the document is {size} bytes; the limit is {MAX_DOCUMENT_BYTES}"),
             }]);
         }
-        let mut doc = RuntimeConfig::from_json(submitted).map_err(|e| vec![FieldError::from_error(&e)])?;
+        let mut doc =
+            RuntimeConfig::from_json(submitted).map_err(|e| vec![FieldError::from_error(&e)])?;
         let current_doc = current.and_then(|r| RuntimeConfig::from_json(&r.document).ok());
         let mut opened = doc.clone();
         let mut errors = Vec::new();
@@ -488,7 +489,9 @@ impl ConfigStore {
         if !errors.is_empty() {
             return Err(errors);
         }
-        let stored = doc.to_json().map_err(|e| vec![FieldError::from_error(&e)])?;
+        let stored = doc
+            .to_json()
+            .map_err(|e| vec![FieldError::from_error(&e)])?;
         // The first revision is diffed against the built-in defaults it replaces.
         let defaults = RuntimeConfig::default().to_json().unwrap_or_default();
         let diff = diff(Some(current.map_or(&defaults, |r| &r.document)), &stored);
@@ -649,8 +652,8 @@ impl ConfigStore {
         else {
             return Err(PublishError::Gone(n));
         };
-        let entry: HistoryEntry =
-            serde_json::from_slice(&body).with_context(|| format!("decoding {}", history_key(n)))?;
+        let entry: HistoryEntry = serde_json::from_slice(&body)
+            .with_context(|| format!("decoding {}", history_key(n)))?;
         if let Some(document) = entry.document.clone() {
             return Ok(Record {
                 revision: entry.revision,
@@ -667,7 +670,8 @@ impl ConfigStore {
         };
         match self.store.get_version(CURRENT, &Version::new(ov)).await {
             Ok(Some(body)) => {
-                let r: Record = serde_json::from_slice(&body).context("decoding a config object version")?;
+                let r: Record =
+                    serde_json::from_slice(&body).context("decoding a config object version")?;
                 Ok(r)
             }
             Ok(None) => Err(PublishError::Gone(n)),
@@ -723,7 +727,9 @@ impl ConfigStore {
                 break;
             }
         }
-        let reads = keys.iter().map(|k| async move { (k.clone(), self.store.get_bytes(k).await) });
+        let reads = keys
+            .iter()
+            .map(|k| async move { (k.clone(), self.store.get_bytes(k).await) });
         let now = Utc::now();
         let mut out = Vec::new();
         for (key, got) in futures::future::join_all(reads).await {
@@ -736,11 +742,15 @@ impl ConfigStore {
                             tracing::debug!(key, error = %e, "expired instance heartbeat not deleted");
                         }
                     }
-                    Err(e) => tracing::debug!(key, error = %e, "unreadable instance heartbeat skipped"),
+                    Err(e) => {
+                        tracing::debug!(key, error = %e, "unreadable instance heartbeat skipped");
+                    }
                 },
                 // Gone meanwhile, or a transient read error: skip, never delete.
                 Ok(None) => {}
-                Err(e) => tracing::debug!(key, error = %e, "instance heartbeat read failed; skipped"),
+                Err(e) => {
+                    tracing::debug!(key, error = %e, "instance heartbeat read failed; skipped");
+                }
             }
         }
         out.sort_by_key(|s| std::cmp::Reverse(s.seen_at));
@@ -761,7 +771,13 @@ fn normalize_prefix(p: &str) -> String {
 fn instance_key(instance: &str) -> String {
     let safe: String = instance
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("{INSTANCES}{safe}.json")
 }
@@ -775,7 +791,9 @@ async fn resolve_history(mode: HistoryMode, store: &DynStore) -> (HistoryMode, b
         match tokio::time::timeout(VERSIONING_PROBE, store.object_versioning()).await {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(e)) => Err(anyhow::Error::from(e)),
-            Err(_) => Err(anyhow::anyhow!("the store did not answer within {VERSIONING_PROBE:?}")),
+            Err(_) => Err(anyhow::anyhow!(
+                "the store did not answer within {VERSIONING_PROBE:?}"
+            )),
         }
     };
     if mode == HistoryMode::Records {
@@ -785,7 +803,9 @@ async fn resolve_history(mode: HistoryMode, store: &DynStore) -> (HistoryMode, b
         (_, Ok(true)) => (HistoryMode::Versions, false),
         (HistoryMode::Auto, Ok(false)) => (HistoryMode::Records, false),
         (_, Ok(false)) => {
-            tracing::error!("config_store.history = \"versions\", but the config bucket keeps no object versions; writing history records until it does (enable bucket versioning, or use \"auto\"/\"records\")");
+            tracing::error!(
+                "config_store.history = \"versions\", but the config bucket keeps no object versions; writing history records until it does (enable bucket versioning, or use \"auto\"/\"records\")"
+            );
             (HistoryMode::Records, true)
         }
         (_, Err(e)) => {

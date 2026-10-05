@@ -111,7 +111,10 @@ pub mod frame {
         let len = e.encoded_len();
         prost::encoding::encode_varint(len as u64, out);
         out.reserve(len);
-        #[allow(clippy::expect_used, reason = "BytesMut grows on demand and capacity was reserved above")]
+        #[allow(
+            clippy::expect_used,
+            reason = "BytesMut grows on demand and capacity was reserved above"
+        )]
         e.encode(out).expect("BytesMut has capacity");
     }
 

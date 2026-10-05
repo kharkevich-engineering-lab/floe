@@ -105,7 +105,10 @@ fn gce_machine_type() -> Option<String> {
     })
     .clone()
 }
-#[allow(clippy::cast_precision_loss, reason = "display value; precision loss above 2^52 is irrelevant")]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "display value; precision loss above 2^52 is irrelevant"
+)]
 fn gib(b: u64) -> String {
     let g = b as f64 / (1u64 << 30) as f64;
     if g >= 10.0 {
@@ -163,9 +166,8 @@ pub fn info(cfg: &floe_config::Config) -> InstanceInfo {
             .map(|r| format!("{r:?}").to_lowercase())
             .collect()
     };
-    let cpus = cgroup_cpus().unwrap_or_else(|| {
-        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
-    });
+    let cpus = cgroup_cpus()
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
     let memory_bytes = cgroup_memory_max().or_else(meminfo_total).unwrap_or(0);
     let shape = match kind {
         "ssd" => gce_machine_type().map_or_else(

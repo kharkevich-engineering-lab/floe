@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
-use tracing::info;
 use floe_proto::prost::Message;
+use tracing::info;
 
 use floe_config::Config;
 use floe_proto::keys;
@@ -33,7 +33,10 @@ use floe_store::{
 
 use crate::cli::parse_repo_id;
 
-#[allow(clippy::struct_excessive_bools, reason = "CLI flag set, one bool per option")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "CLI flag set, one bool per option"
+)]
 pub struct DirectOptions {
     pub from: PathBuf,
     pub repo: String,
@@ -96,7 +99,10 @@ impl DirectOptions {
 
 /// What a run did — the resumability contract in numbers (`tests/import_resume.rs`).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools, reason = "report of independent per-phase outcomes")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "report of independent per-phase outcomes"
+)]
 pub struct ImportReport {
     /// Objects (packs + side-files) uploaded by this run.
     pub uploaded: usize,
@@ -521,10 +527,7 @@ pub async fn run_with_store(
             .first()
             .map(|p| p.checksum.clone())
             .context("no base pack")?;
-        let dir = pack_dir
-            .parent()
-            .unwrap_or(&pack_dir)
-            .join("floe-history");
+        let dir = pack_dir.parent().unwrap_or(&pack_dir).join("floe-history");
         let reuse = marker
             .history_pack
             .as_ref()
@@ -925,7 +928,8 @@ pub async fn run_with_store(
 // ---- helpers -------------------------------------------------------------------
 
 fn hostname() -> String {
-    std::fs::read_to_string("/etc/hostname").map_or_else(|_| "local".into(), |s| s.trim().to_string())
+    std::fs::read_to_string("/etc/hostname")
+        .map_or_else(|_| "local".into(), |s| s.trim().to_string())
 }
 
 fn count_loose(git_dir: &Path) -> u64 {
@@ -1031,7 +1035,11 @@ pub fn verify_refs_in_packs(
             .stderr(std::process::Stdio::piped())
             .spawn()
             .with_context(|| format!("git {}", args.join(" ")))?;
-        child.stdin.take().context("git stdin")?.write_all(stdin.as_bytes())?;
+        child
+            .stdin
+            .take()
+            .context("git stdin")?
+            .write_all(stdin.as_bytes())?;
         Ok(child.wait_with_output()?)
     };
     // Tips first (cheap, names the exact ref problem).
@@ -1126,7 +1134,11 @@ fn build_history_pack(git_dir: &Path, dir: &Path, base: &str) -> Result<LocalPac
         .stdout(std::process::Stdio::piped())
         .spawn()
         .context("git pack-objects --filter=blob:none")?;
-    child.stdin.take().context("git pack-objects stdin")?.write_all(&tips.stdout)?;
+    child
+        .stdin
+        .take()
+        .context("git pack-objects stdin")?
+        .write_all(&tips.stdout)?;
     let out = child.wait_with_output()?;
     anyhow::ensure!(
         out.status.success(),
@@ -1545,8 +1557,10 @@ mod resume_tests {
         .unwrap();
         let mut expected = 0usize;
         for p in &m.packs {
-            expected +=
-                2 + usize::from(p.has_rev) + usize::from(p.has_bitmap) + usize::from(p.has_commit_graph);
+            expected += 2
+                + usize::from(p.has_rev)
+                + usize::from(p.has_bitmap)
+                + usize::from(p.has_commit_graph);
         }
         assert_eq!(
             total_uploaded, expected,

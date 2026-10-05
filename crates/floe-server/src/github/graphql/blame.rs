@@ -135,7 +135,9 @@ fn parse(out: &str) -> (Vec<Range>, std::collections::HashMap<String, Meta>) {
             current = Some(oid);
             continue;
         }
-        let Some(oid) = current.as_ref() else { continue };
+        let Some(oid) = current.as_ref() else {
+            continue;
+        };
         let Some((key, rest)) = line.split_once(' ') else {
             continue;
         };

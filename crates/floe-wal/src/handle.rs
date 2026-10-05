@@ -7,12 +7,12 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use parking_lot::{Mutex as PLMutex, RwLock as PLRwLock};
-use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock, mpsc};
-use tracing::Instrument;
 use floe_git::{LocalRepo, RepoId};
 use floe_proto::v1::Manifest;
 use floe_store::{Prefixed, Version};
+use parking_lot::{Mutex as PLMutex, RwLock as PLRwLock};
+use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock, mpsc};
+use tracing::Instrument;
 
 use crate::error::WalError;
 use crate::progress::{ProgressRx, ProgressTx, Reporter};
@@ -898,11 +898,9 @@ impl RepoHandle {
         .await;
 
         // Read manifest fresh
-        let Some((meta, manifest)) = crate::store_proto::get_message::<Manifest>(
-            &self.store,
-            floe_proto::keys::MANIFEST,
-        )
-        .await?
+        let Some((meta, manifest)) =
+            crate::store_proto::get_message::<Manifest>(&self.store, floe_proto::keys::MANIFEST)
+                .await?
         else {
             return Err(WalError::NotFound);
         };
@@ -1227,10 +1225,7 @@ impl RepoHandle {
         let cp = m.checkpoint.as_ref()?;
         let from_ref = CheckpointTimes {
             created_at: cp.created_at.as_ref().map(floe_proto::time::to_system),
-            first_state_at: cp
-                .first_state_at
-                .as_ref()
-                .map(floe_proto::time::to_system),
+            first_state_at: cp.first_state_at.as_ref().map(floe_proto::time::to_system),
             as_of: cp.as_of.as_ref().map(floe_proto::time::to_system),
         };
         if from_ref.created_at.is_some() {

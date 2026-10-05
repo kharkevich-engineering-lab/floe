@@ -239,7 +239,10 @@ impl PassTelemetry {
         if let Some(w) = &self.writer
             && tokio::time::timeout(bound, w.shutdown()).await.is_err()
         {
-            tracing::warn!(?bound, "catalog: final flush did not finish; buffered telemetry dropped");
+            tracing::warn!(
+                ?bound,
+                "catalog: final flush did not finish; buffered telemetry dropped"
+            );
         }
     }
 }
@@ -330,13 +333,28 @@ mod tests {
         let runs = rec.runs.lock();
         assert_eq!(runs.len(), 1);
         let run = &runs[0];
-        assert_eq!((run.kind.as_str(), run.outcome.as_str()), ("discovery", "ok"));
+        assert_eq!(
+            (run.kind.as_str(), run.outcome.as_str()),
+            ("discovery", "ok")
+        );
         assert_eq!(run.source.as_deref(), Some("github"));
-        assert_eq!((run.api_requests, run.api_not_modified, run.rate_remaining), (Some(4), Some(3), Some(4990)));
+        assert_eq!(
+            (run.api_requests, run.api_not_modified, run.rate_remaining),
+            (Some(4), Some(3), Some(4990))
+        );
         assert!(run.repo.is_none());
         let inv = rec.inventory.lock();
-        let changes: Vec<_> = inv.iter().map(|r| (r.floe_repo.as_str(), r.change.as_str(), r.source.as_str())).collect();
-        assert_eq!(changes, [("acme/widgets", "created", "github"), ("acme/gadgets", "gone", "github")]);
+        let changes: Vec<_> = inv
+            .iter()
+            .map(|r| (r.floe_repo.as_str(), r.change.as_str(), r.source.as_str()))
+            .collect();
+        assert_eq!(
+            changes,
+            [
+                ("acme/widgets", "created", "github"),
+                ("acme/gadgets", "gone", "github")
+            ]
+        );
     }
 
     /// A failed pass (GitHub down, a bad token) is a `failed` run carrying
@@ -355,7 +373,10 @@ mod tests {
         let runs = rec.runs.lock();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].outcome, "failed");
-        assert_eq!(runs[0].detail.as_deref(), Some("github: 401 Bad credentials"));
+        assert_eq!(
+            runs[0].detail.as_deref(),
+            Some("github: 401 Bad credentials")
+        );
         assert!(rec.inventory.lock().is_empty());
     }
 
@@ -373,8 +394,13 @@ mod tests {
                 enabled: true,
                 ..floe_config::CatalogConfig::default()
             };
-            let err = super::PassTelemetry::start(&on).err().expect("featureless build must refuse");
-            assert!(err.to_string().contains("without the catalog feature"), "{err:#}");
+            let err = super::PassTelemetry::start(&on)
+                .err()
+                .expect("featureless build must refuse");
+            assert!(
+                err.to_string().contains("without the catalog feature"),
+                "{err:#}"
+            );
         }
     }
 
@@ -383,7 +409,8 @@ mod tests {
     fn read_only_policy_refuses_pushes() {
         use floe_proto::v1::{RefTransaction, RefUpdate};
         let policy =
-            crate::policy::parse_document(floe_mirror::target::READ_ONLY_POLICY.as_bytes()).unwrap();
+            crate::policy::parse_document(floe_mirror::target::READ_ONLY_POLICY.as_bytes())
+                .unwrap();
         let oid = "1".repeat(40);
         let txn = RefTransaction {
             updates: vec![
@@ -404,7 +431,13 @@ mod tests {
             atomic: false,
         };
         let eval = crate::policy::evaluate(&policy, "alice", &txn, |_| false);
-        assert!(eval.per_ref.iter().all(|(_, r)| r.as_ref().is_err_and(|e| e.contains("github-mirror-read-only"))), "{:?}", eval.per_ref);
+        assert!(
+            eval.per_ref.iter().all(|(_, r)| r
+                .as_ref()
+                .is_err_and(|e| e.contains("github-mirror-read-only"))),
+            "{:?}",
+            eval.per_ref
+        );
         assert!(!eval.any_allowed());
     }
 }

@@ -36,7 +36,10 @@ pub fn routes(mut r: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
             .route(&format!("{base}/config/validate"), post(config_validate))
             .route(&format!("{base}/config/schema"), get(config_schema))
             .route(&format!("{base}/config/history"), get(config_history))
-            .route(&format!("{base}/config/revisions/{{n}}"), get(config_revision))
+            .route(
+                &format!("{base}/config/revisions/{{n}}"),
+                get(config_revision),
+            )
             .route(&format!("{base}/config/rollback"), post(config_rollback))
             .route(&format!("{base}/overview"), get(overview))
             .route(&format!("{base}/mirror"), get(mirror_status))
@@ -261,7 +264,11 @@ struct ValidateBody {
     document: Value,
 }
 
-async fn config_validate(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn config_validate(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if let Err(r) = admin(&st, &headers).await {
         return *r;
     }
@@ -274,9 +281,17 @@ async fn config_validate(State(st): State<Arc<AppState>>, headers: HeaderMap, bo
         Ok(c) => c,
         Err(e) => return store_error(&e),
     };
-    match cs.prepare(&req.document, current.as_ref().map(|(_, r)| r), st.config.bootstrap()) {
-        Ok(p) => ok(&json!({"ok": true, "errors": [], "diff": p.diff, "restart_required": p.restart_required})),
-        Err(errors) => ok(&json!({"ok": false, "errors": errors, "diff": [], "restart_required": []})),
+    match cs.prepare(
+        &req.document,
+        current.as_ref().map(|(_, r)| r),
+        st.config.bootstrap(),
+    ) {
+        Ok(p) => ok(
+            &json!({"ok": true, "errors": [], "diff": p.diff, "restart_required": p.restart_required}),
+        ),
+        Err(errors) => {
+            ok(&json!({"ok": false, "errors": errors, "diff": [], "restart_required": []}))
+        }
     }
 }
 
@@ -301,12 +316,7 @@ async fn config_history(
     if let Err(r) = admin(&st, &headers).await {
         return *r;
     }
-    match st
-        .config
-        .store()
-        .history(q.before, q.n.unwrap_or(20))
-        .await
-    {
+    match st.config.store().history(q.before, q.n.unwrap_or(20)).await {
         Ok(entries) => ok(&json!({"entries": entries})),
         Err(e) => store_error(&e),
     }
@@ -334,7 +344,11 @@ struct RollbackBody {
     base_revision: Option<u64>,
 }
 
-async fn config_rollback(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn config_rollback(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let principal = match admin(&st, &headers).await {
         Ok(p) => p,
         Err(r) => return *r,
@@ -364,7 +378,8 @@ async fn overview(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respon
         return *r;
     }
     let cs = st.config.store();
-    let (current, instances, mirror) = tokio::join!(cs.current(), cs.instances(), mirror_summary(&st));
+    let (current, instances, mirror) =
+        tokio::join!(cs.current(), cs.instances(), mirror_summary(&st));
     let live = st.config.status();
     let applied = st.config.current();
     let config = match current {
@@ -372,7 +387,9 @@ async fn overview(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respon
             "revision": r.revision, "updated_at": r.updated_at, "author": r.author,
             "message": r.message, "error": null,
         }),
-        Ok(None) => json!({"revision": 0, "updated_at": null, "author": "", "message": "", "error": null}),
+        Ok(None) => {
+            json!({"revision": 0, "updated_at": null, "author": "", "message": "", "error": null})
+        }
         Err(e) => json!({"revision": null, "error": format!("{e:#}")}),
     };
     let me = st.config.instance_status();
@@ -410,7 +427,10 @@ async fn mirror_summary(st: &AppState) -> Value {
         Ok(s) => {
             let mut counts = serde_json::Map::new();
             for e in s.repos.values() {
-                let n = counts.get(e.status.as_str()).and_then(Value::as_u64).unwrap_or(0);
+                let n = counts
+                    .get(e.status.as_str())
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 counts.insert(e.status.as_str().to_string(), json!(n + 1));
             }
             json!({
@@ -495,15 +515,17 @@ pub(crate) fn token_for_test(
     requested: Option<&Secret>,
 ) -> Result<Option<String>, &'static str> {
     match requested {
-        Some(Secret::Env(_)) => Err(
-            "an env reference cannot be sent by a test: type the token, or test the stored one",
-        ),
+        Some(Secret::Env(_)) => {
+            Err("an env reference cannot be sent by a test: type the token, or test the stored one")
+        }
         Some(Secret::Value(v)) => Ok(Some(v.clone()).filter(|v| !v.trim().is_empty())),
         None | Some(Secret::Redacted(_) | Secret::Sealed(_)) => {
             if url.trim_end_matches('/') == applied_url.trim_end_matches('/') {
                 Ok(applied_token.reveal())
             } else {
-                Err("the stored token is only sent to the configured api_url: type it again to test another URL")
+                Err(
+                    "the stored token is only sent to the configured api_url: type it again to test another URL",
+                )
             }
         }
     }
@@ -539,7 +561,11 @@ fn candidate_section(
     if discover {
         gm.check().map_err(|e| refuse(&format!("{e:#}")))?;
         let same_host = gm.git_url == applied.git_url;
-        let url = if same_host { gm.api_url.clone() } else { String::new() };
+        let url = if same_host {
+            gm.api_url.clone()
+        } else {
+            String::new()
+        };
         let token = token_for_test(&applied.api_url, &applied.token, &url, Some(&gm.token))
             .map_err(|m| refuse(&format!("github_mirror.token: {m} (and git_url)")))?;
         gm.token = token.map_or(Secret::Redacted(true), Secret::Value);
@@ -551,7 +577,11 @@ fn candidate_section(
 }
 
 /// Why `select` decides what it decides (`floe_mirror::select`'s rule order).
-fn selection_reason(gm: &GithubMirrorConfig, r: &floe_mirror::RemoteRepo, explicit: bool) -> String {
+fn selection_reason(
+    gm: &GithubMirrorConfig,
+    r: &floe_mirror::RemoteRepo,
+    explicit: bool,
+) -> String {
     use floe_mirror::select::glob_match;
     let full = r.full_name();
     if let Some(g) = gm.exclude.iter().find(|g| glob_match(g, &full)) {
@@ -596,7 +626,11 @@ struct PreviewBody {
     discover: bool,
 }
 
-async fn mirror_preview(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn mirror_preview(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if let Err(r) = admin(&st, &headers).await {
         return *r;
     }
@@ -656,7 +690,10 @@ async fn mirror_preview(State(st): State<Arc<AppState>>, headers: HeaderMap, bod
 /// A real dry-run pass against the forge with a candidate section: no lease,
 /// no writes (`PassOptions::dry_run`).
 async fn discover(st: &Arc<AppState>, gm: GithubMirrorConfig) -> anyhow::Result<Value> {
-    let alias = format!("FLOE_CONFIG_PREVIEW_TOKEN_{}", uuid::Uuid::new_v4().simple());
+    let alias = format!(
+        "FLOE_CONFIG_PREVIEW_TOKEN_{}",
+        uuid::Uuid::new_v4().simple()
+    );
     floe_config::secret::set_alias(&alias, Some(gm.token.clone()));
     let result = async {
         let mut cfg = (*st.config.current().cfg).clone();
@@ -714,11 +751,18 @@ async fn mirror_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: 
         Err(m) => return bad_request(m),
     };
     let Some(token) = token else {
-        return ok(&json!({"ok": false, "error_class": "no_token", "message": "no token: the stored one is unset on this instance, or nothing was entered"}));
+        return ok(
+            &json!({"ok": false, "error_class": "no_token", "message": "no token: the stored one is unset on this instance, or nothing was entered"}),
+        );
     };
     let client = match test_client() {
         Ok(c) => c,
-        Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e.to_string()})),
+        Err(e) => {
+            return fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({"error": e.to_string()}),
+            );
+        }
     };
     let started = std::time::Instant::now();
     let resp = client
@@ -730,15 +774,25 @@ async fn mirror_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: 
         .await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     match resp {
-        Err(e) => ok(&json!({"ok": false, "latency_ms": latency_ms, "error_class": transport_class(&e)})),
+        Err(e) => {
+            ok(&json!({"ok": false, "latency_ms": latency_ms, "error_class": transport_class(&e)}))
+        }
         Ok(r) => {
             let status = r.status().as_u16();
-            let h = |k: &str| r.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
+            let h = |k: &str| {
+                r.headers()
+                    .get(k)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            };
             let scopes = h("x-oauth-scopes");
             let remaining = h("x-ratelimit-remaining").and_then(|v| v.parse::<u64>().ok());
             // Only the login is read from the body; nothing else is echoed.
             let body: Value = r.json().await.unwrap_or(Value::Null);
-            let login = body.get("login").and_then(Value::as_str).map(str::to_string);
+            let login = body
+                .get("login")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             ok(&json!({
                 "ok": (200..300).contains(&status),
                 "status": status,
@@ -789,7 +843,9 @@ async fn mirror_sync(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Res
         Err(r) => return *r,
     };
     match crate::mirror::request_sync(&st.store, &principal.name).await {
-        Ok(()) => ok(&json!({"ok": true, "message": "requested: the mirror loop runs a pass within about a minute"})),
+        Ok(()) => ok(
+            &json!({"ok": true, "message": "requested: the mirror loop runs a pass within about a minute"}),
+        ),
         Err(e) => store_error(&e),
     }
 }
@@ -799,17 +855,30 @@ struct PauseBody {
     full_name: String,
 }
 
-async fn mirror_pause(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn mirror_pause(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     pause_or_resume(st, headers, body, true).await
 }
 
-async fn mirror_resume(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn mirror_resume(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     pause_or_resume(st, headers, body, false).await
 }
 
 /// Pause = the exact `owner/name` in `github_mirror.exclude` (the mirror's
 /// frozen state: data kept, follow stopped); resume removes it. A config change.
-async fn pause_or_resume(st: Arc<AppState>, headers: HeaderMap, body: Bytes, pause: bool) -> Response {
+async fn pause_or_resume(
+    st: Arc<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+    pause: bool,
+) -> Response {
     let principal = match admin(&st, &headers).await {
         Ok(p) => p,
         Err(r) => return *r,
@@ -819,7 +888,11 @@ async fn pause_or_resume(st: Arc<AppState>, headers: HeaderMap, body: Bytes, pau
         Err(r) => return *r,
     };
     let name = req.full_name.trim().to_string();
-    if name.matches('/').count() != 1 || name.contains('*') || name.starts_with('/') || name.ends_with('/') {
+    if name.matches('/').count() != 1
+        || name.contains('*')
+        || name.starts_with('/')
+        || name.ends_with('/')
+    {
         return bad_request("full_name must be \"owner/name\"");
     }
     let cs = st.config.store();
@@ -837,7 +910,9 @@ async fn pause_or_resume(st: Arc<AppState>, headers: HeaderMap, body: Bytes, pau
     let ex = &mut doc.github_mirror.exclude;
     let had = ex.iter().any(|g| g.eq_ignore_ascii_case(&name));
     if pause == had {
-        return ok(&json!({"revision": base, "diff": [], "restart_required": [], "unchanged": true}));
+        return ok(
+            &json!({"revision": base, "diff": [], "restart_required": [], "unchanged": true}),
+        );
     }
     if pause {
         ex.push(name.clone());
@@ -877,12 +952,13 @@ async fn catalog_status(State(st): State<Arc<AppState>>, headers: HeaderMap) -> 
     if let Some(o) = v.as_object_mut() {
         o.insert(
             "restart_required".into(),
-            json!(st
-                .config
-                .status()
-                .restart_required
-                .iter()
-                .any(|p| p.starts_with("catalog"))),
+            json!(
+                st.config
+                    .status()
+                    .restart_required
+                    .iter()
+                    .any(|p| p.starts_with("catalog"))
+            ),
         );
     }
     ok(&v)
@@ -899,7 +975,11 @@ struct CatalogTestBody {
 /// and gets no stored bearer. `OAuth2` client credentials and `SigV4` (D63) are
 /// the writer's own seams, so those probes go unauthenticated. The answer is
 /// the status, the latency and a fixed error class — never the response body.
-async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn catalog_test(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if let Err(r) = admin(&st, &headers).await {
         return *r;
     }
@@ -929,7 +1009,12 @@ async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body:
     };
     let client = match test_client() {
         Ok(c) => c,
-        Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e.to_string()})),
+        Err(e) => {
+            return fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({"error": e.to_string()}),
+            );
+        }
     };
     let mut rq = client.get(&probe.url).header("Accept", "application/json");
     if let Some(var) = &probe.bearer_env {
@@ -944,7 +1029,9 @@ async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body:
     let resp = rq.send().await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     match resp {
-        Err(e) => ok(&json!({"ok": false, "auth": probe.auth, "latency_ms": latency_ms, "error_class": transport_class(&e)})),
+        Err(e) => ok(
+            &json!({"ok": false, "auth": probe.auth, "latency_ms": latency_ms, "error_class": transport_class(&e)}),
+        ),
         Ok(r) => {
             let status = r.status().as_u16();
             ok(&json!({
@@ -1038,15 +1125,62 @@ mod tests {
     fn tests_never_send_env_references_or_stored_tokens_elsewhere() {
         let stored = Secret::Value("ghp_stored".into());
         let api = "https://api.github.com";
-        assert!(token_for_test(api, &stored, api, Some(&Secret::Env("FLOE_CONFIG_KEY".into()))).is_err());
-        assert!(token_for_test(api, &stored, "https://evil.example", Some(&Secret::Env("FLOE_GITHUB_TOKEN".into()))).is_err());
+        assert!(
+            token_for_test(
+                api,
+                &stored,
+                api,
+                Some(&Secret::Env("FLOE_CONFIG_KEY".into()))
+            )
+            .is_err()
+        );
+        assert!(
+            token_for_test(
+                api,
+                &stored,
+                "https://evil.example",
+                Some(&Secret::Env("FLOE_GITHUB_TOKEN".into()))
+            )
+            .is_err()
+        );
         // Stored: only to the applied URL.
-        assert_eq!(token_for_test(api, &stored, api, None).unwrap().as_deref(), Some("ghp_stored"));
-        assert_eq!(token_for_test(api, &stored, "https://api.github.com/", Some(&Secret::Redacted(true))).unwrap().as_deref(), Some("ghp_stored"));
+        assert_eq!(
+            token_for_test(api, &stored, api, None).unwrap().as_deref(),
+            Some("ghp_stored")
+        );
+        assert_eq!(
+            token_for_test(
+                api,
+                &stored,
+                "https://api.github.com/",
+                Some(&Secret::Redacted(true))
+            )
+            .unwrap()
+            .as_deref(),
+            Some("ghp_stored")
+        );
         assert!(token_for_test(api, &stored, "https://evil.example", None).is_err());
-        assert!(token_for_test(api, &stored, "https://evil.example", Some(&Secret::Sealed("v1.x.y".into()))).is_err());
+        assert!(
+            token_for_test(
+                api,
+                &stored,
+                "https://evil.example",
+                Some(&Secret::Sealed("v1.x.y".into()))
+            )
+            .is_err()
+        );
         // A typed value goes where the admin says.
-        assert_eq!(token_for_test(api, &stored, "https://ghe.example/api/v3", Some(&Secret::Value("typed".into()))).unwrap().as_deref(), Some("typed"));
+        assert_eq!(
+            token_for_test(
+                api,
+                &stored,
+                "https://ghe.example/api/v3",
+                Some(&Secret::Value("typed".into()))
+            )
+            .unwrap()
+            .as_deref(),
+            Some("typed")
+        );
     }
 
     fn catalog(uri: &str) -> floe_config::CatalogConfig {
@@ -1079,12 +1213,22 @@ mod tests {
         let mut c = applied.clone();
         c.auth = floe_config::CatalogAuth::Bearer;
         c.token_env = Some("FLOE_CONFIG_KEY".into());
-        assert!(catalog_probe(&applied, &c).unwrap_err().contains("env names"));
+        assert!(
+            catalog_probe(&applied, &c)
+                .unwrap_err()
+                .contains("env names")
+        );
         // The stored bearer only to the applied URI.
         let mut bearer = catalog("https://catalog.example/iceberg");
         bearer.auth = floe_config::CatalogAuth::Bearer;
         bearer.token_env = Some("FLOE_CATALOG_TOKEN".into());
-        assert_eq!(catalog_probe(&bearer, &bearer).unwrap().bearer_env.as_deref(), Some("FLOE_CATALOG_TOKEN"));
+        assert_eq!(
+            catalog_probe(&bearer, &bearer)
+                .unwrap()
+                .bearer_env
+                .as_deref(),
+            Some("FLOE_CATALOG_TOKEN")
+        );
         let mut moved = bearer.clone();
         moved.uri = Some("https://evil.example/iceberg".into());
         assert!(catalog_probe(&bearer, &moved).is_err());

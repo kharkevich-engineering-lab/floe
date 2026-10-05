@@ -312,7 +312,10 @@ impl GcsStore {
                     "lock wait"
                 );
             }
-            #[allow(clippy::cast_precision_loss, reason = "metrics value; permit counts are small")]
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "metrics value; permit counts are small"
+            )]
             let inflight = (self.bulk_permits_total - self.bulk_permits.available_permits()) as f64;
             metrics::gauge!("floe_store_bulk_inflight").set(inflight);
             // `i` is reduced modulo `bulk.len()`; fall back to the control-path client regardless.
@@ -788,7 +791,12 @@ impl ObjectStore for GcsStore {
             PutBody::Stream { len, .. } => *len,
         };
         let deadline = put_deadline(size_hint);
-        match Box::pin(tokio::time::timeout(deadline, self.put_inner(key, body, opts))).await {
+        match Box::pin(tokio::time::timeout(
+            deadline,
+            self.put_inner(key, body, opts),
+        ))
+        .await
+        {
             Ok(r) => r,
             Err(_) => Err(deadline_error("put", key, deadline)),
         }

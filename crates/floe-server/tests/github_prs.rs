@@ -109,7 +109,10 @@ fn fixture(s: &Server) -> anyhow::Result<Fixture> {
     let feature = git_in(&dir, &["rev-parse", "HEAD"])?.trim().to_string();
 
     git_in(&dir, &["checkout", "-q", "main"])?;
-    git_in(&dir, &["remote", "add", "origin", &s.repo_url("acme", "docs")])?;
+    git_in(
+        &dir,
+        &["remote", "add", "origin", &s.repo_url("acme", "docs")],
+    )?;
     git_in(&dir, &["push", "-q", "origin", "main", "feature"])?;
     Ok(Fixture {
         _tmp: tmp,
@@ -144,9 +147,12 @@ fn fetched(s: &Server, branch: &str) -> anyhow::Result<(String, String)> {
     let sha = git_in(dst.path(), &["rev-parse", "FETCH_HEAD"])?
         .trim()
         .to_string();
-    let parents = git_in(dst.path(), &["rev-list", "--parents", "-n", "1", "FETCH_HEAD"])?
-        .trim()
-        .to_string();
+    let parents = git_in(
+        dst.path(),
+        &["rev-list", "--parents", "-n", "1", "FETCH_HEAD"],
+    )?
+    .trim()
+    .to_string();
     Ok((sha, parents))
 }
 
@@ -170,7 +176,11 @@ async fn opens_lists_and_reads_a_pull_request() -> TestResult {
     assert!(pr["base"]["repo"]["id"].is_number());
     assert!(pr["head"]["repo"]["id"].is_number());
     assert_eq!(pr["user"]["login"], "mintlify-dev");
-    assert!(pr["html_url"].as_str().is_some_and(|u| u.contains("/pull/1")));
+    assert!(
+        pr["html_url"]
+            .as_str()
+            .is_some_and(|u| u.contains("/pull/1"))
+    );
     let decoded = {
         use base64::Engine;
         let raw = base64::engine::general_purpose::STANDARD
@@ -222,7 +232,11 @@ async fn opens_lists_and_reads_a_pull_request() -> TestResult {
     assert!(one["merge_commit_sha"].is_null());
 
     // Listing filters on head, and `state=all` is honoured.
-    let listed = ok(&s, "/api/v3/repos/acme/docs/pulls?state=open&head=acme:feature").await?;
+    let listed = ok(
+        &s,
+        "/api/v3/repos/acme/docs/pulls?state=open&head=acme:feature",
+    )
+    .await?;
     assert_eq!(listed.as_array().map(Vec::len), Some(1));
     assert_eq!(listed[0]["number"], 1);
     let none = ok(&s, "/api/v3/repos/acme/docs/pulls?head=acme:nope").await?;
@@ -385,7 +399,11 @@ async fn a_merge_advances_the_base_with_two_parents() -> TestResult {
 
     // `commits/{sha}/pulls` finds it by merge commit, head sha and head ref.
     for probe in [sha.as_str(), f.feature.as_str(), "feature"] {
-        let found = ok(&s, &format!("/api/v3/repos/acme/docs/commits/{probe}/pulls")).await?;
+        let found = ok(
+            &s,
+            &format!("/api/v3/repos/acme/docs/commits/{probe}/pulls"),
+        )
+        .await?;
         assert_eq!(found.as_array().map(Vec::len), Some(1), "probe {probe}");
         assert_eq!(found[0]["number"], 1);
         assert_eq!(found[0]["base"]["ref"], "main");
@@ -485,7 +503,10 @@ async fn a_conflicting_merge_is_405_and_changes_nothing() -> TestResult {
     .await?;
     assert_eq!(status, StatusCode::OK);
     let after_first = ok(&s, "/api/v3/repos/acme/docs/git/ref/heads/main").await?;
-    let main_now = after_first["object"]["sha"].as_str().unwrap_or_default().to_string();
+    let main_now = after_first["object"]["sha"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
 
     let (status, body) = put(
         &s,
@@ -558,7 +579,11 @@ async fn comments_reviews_and_reactions_round_trip() -> TestResult {
     assert_eq!(listed.as_array().map(Vec::len), Some(1));
     assert_eq!(listed[0]["id"], comment_id);
     assert_eq!(listed[0]["user"]["login"], "mintlify-dev");
-    assert!(listed[0]["body"].as_str().is_some_and(|b| b.contains("mintlify")));
+    assert!(
+        listed[0]["body"]
+            .as_str()
+            .is_some_and(|b| b.contains("mintlify"))
+    );
 
     let (status, _) = send(
         &s,
@@ -737,7 +762,10 @@ async fn check_runs_deployments_and_statuses_are_accepted() -> TestResult {
         let s = &s;
         async move {
             client()
-                .patch(format!("{}/api/v3/repos/acme/docs/check-runs/{id}", s.base_url))
+                .patch(format!(
+                    "{}/api/v3/repos/acme/docs/check-runs/{id}",
+                    s.base_url
+                ))
                 .json(&json!({
                     "status": "completed",
                     "conclusion": if i % 2 == 0 { "success" } else { "neutral" },
@@ -754,7 +782,10 @@ async fn check_runs_deployments_and_statuses_are_accepted() -> TestResult {
 
     let listed = ok(
         &s,
-        &format!("/api/v3/repos/acme/docs/commits/{}/check-runs?filter=latest&per_page=100", f.main),
+        &format!(
+            "/api/v3/repos/acme/docs/commits/{}/check-runs?filter=latest&per_page=100",
+            f.main
+        ),
     )
     .await?;
     assert_eq!(listed["total_count"], 1);
@@ -783,7 +814,11 @@ async fn check_runs_deployments_and_statuses_are_accepted() -> TestResult {
     )
     .await?;
     assert_eq!(status, StatusCode::CREATED);
-    let deployments = ok(&s, "/api/v3/repos/acme/docs/deployments?environment=staging").await?;
+    let deployments = ok(
+        &s,
+        "/api/v3/repos/acme/docs/deployments?environment=staging",
+    )
+    .await?;
     assert_eq!(deployments.as_array().map(Vec::len), Some(1));
 
     let (status, _) = post(

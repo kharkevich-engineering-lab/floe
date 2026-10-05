@@ -159,11 +159,7 @@ fn value(v: &graphql_parser::query::Value<'_, String>, vars: &Vars) -> Value {
         G::Null => Value::Null,
         G::Enum(e) => Value::from(e.clone()),
         G::List(items) => Value::Array(items.iter().map(|i| value(i, vars)).collect()),
-        G::Object(o) => Value::Object(
-            o.iter()
-                .map(|(k, v)| (k.clone(), value(v, vars)))
-                .collect(),
-        ),
+        G::Object(o) => Value::Object(o.iter().map(|(k, v)| (k.clone(), value(v, vars))).collect()),
     }
 }
 

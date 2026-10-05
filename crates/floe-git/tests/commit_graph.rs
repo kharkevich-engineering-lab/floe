@@ -10,8 +10,8 @@
 )]
 mod common;
 
-use std::process::Command;
 use floe_git::{IngestOptions, LocalRepo, ObjectFormat, RepoId, gix_hash};
+use std::process::Command;
 
 mod cm {
     pub use super::common::*;

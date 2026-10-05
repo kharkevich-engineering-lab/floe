@@ -34,7 +34,9 @@ pub fn split_trailers(body: &str) -> (String, Vec<Trailer>) {
             start = i + 1;
         }
     }
-    let (head, block) = lines.split_at_checked(start).unwrap_or((lines.as_slice(), &[]));
+    let (head, block) = lines
+        .split_at_checked(start)
+        .unwrap_or((lines.as_slice(), &[]));
     if block.is_empty() {
         return (body.to_string(), Vec::new());
     }

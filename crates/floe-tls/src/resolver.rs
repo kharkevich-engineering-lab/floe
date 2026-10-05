@@ -173,9 +173,10 @@ pub(crate) mod tests {
     /// A self-issued pair for tests only (rcgen is a dev-dependency).
     pub(crate) fn pair(names: &[&str]) -> (String, String) {
         let key = rcgen::KeyPair::generate().unwrap();
-        let params =
-            rcgen::CertificateParams::new(names.iter().map(ToString::to_string).collect::<Vec<_>>())
-                .unwrap();
+        let params = rcgen::CertificateParams::new(
+            names.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        )
+        .unwrap();
         let cert = params.self_signed(&key).unwrap();
         (cert.pem(), key.serialize_pem())
     }
@@ -194,8 +195,14 @@ pub(crate) mod tests {
         let held = r.current().unwrap(); // a connection mid-handshake holds this one
         r.set(load_pem(&c2, &k2).unwrap());
         let now = r.current().unwrap();
-        assert_ne!(now.info.fingerprint, fp1, "new handshakes see the new certificate");
-        assert_eq!(held.info.fingerprint, fp1, "the old one stays valid for its holder");
+        assert_ne!(
+            now.info.fingerprint, fp1,
+            "new handshakes see the new certificate"
+        );
+        assert_eq!(
+            held.info.fingerprint, fp1,
+            "the old one stays valid for its holder"
+        );
         assert!(server_config(r).is_ok());
     }
 
@@ -204,7 +211,10 @@ pub(crate) mod tests {
         let (c1, _) = pair(&["a.example.com"]);
         let (_, k2) = pair(&["b.example.com"]);
         assert!(
-            load_pem(&c1, &k2).unwrap_err().to_string().contains("does not belong"),
+            load_pem(&c1, &k2)
+                .unwrap_err()
+                .to_string()
+                .contains("does not belong"),
             "key of another certificate"
         );
         assert!(load_pem("", &k2).is_err());
@@ -255,11 +265,18 @@ pub(crate) mod tests {
                 });
             }
         });
-        let fp1 = fingerprint_seen(addr, &c1).await.expect("first certificate served");
+        let fp1 = fingerprint_seen(addr, &c1)
+            .await
+            .expect("first certificate served");
         let (c2, k2) = pair(&["floe.test"]);
         r.set(load_pem(&c2, &k2).unwrap());
-        assert!(fingerprint_seen(addr, &c1).await.is_none(), "old certificate no longer offered");
-        let fp2 = fingerprint_seen(addr, &c2).await.expect("swapped certificate served");
+        assert!(
+            fingerprint_seen(addr, &c1).await.is_none(),
+            "old certificate no longer offered"
+        );
+        let fp2 = fingerprint_seen(addr, &c2)
+            .await
+            .expect("swapped certificate served");
         assert_ne!(fp1, fp2);
     }
 }

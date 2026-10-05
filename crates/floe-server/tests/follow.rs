@@ -486,7 +486,13 @@ async fn an_upstream_ref_named_refs_archive_is_never_followed() -> anyhow::Resul
 
     // Archiving still works: upstream rewinds main, the old tip is archived.
     git(
-        &["push", "-q", "--force", &up_url, &format!("{c1}:refs/heads/main")],
+        &[
+            "push",
+            "-q",
+            "--force",
+            &up_url,
+            &format!("{c1}:refs/heads/main"),
+        ],
         work.path(),
     )?;
     let r = step!("round 2", floe_server::follow::run_pass(&fo.state))?;

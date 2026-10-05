@@ -97,7 +97,10 @@ impl Status {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[allow(clippy::struct_excessive_bools, reason = "independent facts the forge reports per repository")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent facts the forge reports per repository"
+)]
 pub struct RepoEntry {
     /// `owner/name` as the forge spells it now (renames update it).
     pub full_name: String,
@@ -170,13 +173,15 @@ impl RepoEntry {
 
 /// Read the state (absent = empty, generation 0).
 pub async fn load(store: &dyn ObjectStore, kind: &str) -> Result<MirrorState, CoordError> {
-    Ok(get_json::<MirrorState>(store, &key(kind)).await?.map_or_else(
-        || MirrorState {
-            version: STATE_VERSION,
-            ..MirrorState::default()
-        },
-        |(_, s)| s,
-    ))
+    Ok(get_json::<MirrorState>(store, &key(kind))
+        .await?
+        .map_or_else(
+            || MirrorState {
+                version: STATE_VERSION,
+                ..MirrorState::default()
+            },
+            |(_, s)| s,
+        ))
 }
 
 /// Write `state` if the stored generation is still `state.generation` (or the

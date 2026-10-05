@@ -32,9 +32,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tokio::process::Command;
 use floe_git::RepoId;
 use floe_proto::v1::{RefTransaction, RefUpdate};
+use tokio::process::Command;
 
 use super::error::{FieldError, GhError, GhResult};
 use crate::AppState;

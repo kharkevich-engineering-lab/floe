@@ -356,11 +356,23 @@ mod tests {
         let with = envs(&git_cmd(None, "https://github.com/acme/w.git", Some("tok")));
         let get = |m: &std::collections::BTreeMap<String, String>, k: &str| m.get(k).cloned();
         assert_eq!(get(&with, "GIT_CONFIG_COUNT").as_deref(), Some("2"));
-        assert_eq!(get(&with, "GIT_CONFIG_KEY_0").as_deref(), Some("credential.helper"));
+        assert_eq!(
+            get(&with, "GIT_CONFIG_KEY_0").as_deref(),
+            Some("credential.helper")
+        );
         assert_eq!(get(&with, "GIT_CONFIG_VALUE_0").as_deref(), Some(""));
-        assert_eq!(get(&with, "GIT_CONFIG_KEY_1").as_deref(), Some("credential.helper"));
-        assert_eq!(get(&with, "GIT_CONFIG_VALUE_1").as_deref(), Some(CREDENTIAL_HELPER));
-        assert_eq!(get(&with, "FLOE_UPSTREAM_HOST").as_deref(), Some("github.com"));
+        assert_eq!(
+            get(&with, "GIT_CONFIG_KEY_1").as_deref(),
+            Some("credential.helper")
+        );
+        assert_eq!(
+            get(&with, "GIT_CONFIG_VALUE_1").as_deref(),
+            Some(CREDENTIAL_HELPER)
+        );
+        assert_eq!(
+            get(&with, "FLOE_UPSTREAM_HOST").as_deref(),
+            Some("github.com")
+        );
         // Without a token no helper runs at all, not even the host's.
         let without = envs(&git_cmd(None, "https://github.com/acme/w.git", None));
         assert_eq!(get(&without, "GIT_CONFIG_COUNT").as_deref(), Some("1"));
@@ -379,7 +391,10 @@ mod tests {
         let global = home.path().join("gitconfig");
         std::fs::write(
             &global,
-            format!("[credential]\n\thelper = store --file={}\n", store.display()),
+            format!(
+                "[credential]\n\thelper = store --file={}\n",
+                store.display()
+            ),
         )
         .unwrap();
         let mut c = git_cmd(None, "https://example.invalid/r.git", Some("tok"));

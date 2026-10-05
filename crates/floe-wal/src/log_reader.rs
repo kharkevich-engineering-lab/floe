@@ -1,8 +1,8 @@
 //! Read log entries from the store (provenance/rewind tooling).
 
-use prost::Message;
 use floe_proto::v1::{Checkpoint, LogEntry};
 use floe_store::{GetOptions, GetResult, ObjectStore, ObjectStoreExt};
+use prost::Message;
 
 use crate::error::WalError;
 use crate::handle::RepoHandle;
@@ -172,8 +172,8 @@ async fn replay_refs(
     handle: &super::handle::RepoHandle,
     cut: Cut,
 ) -> Result<(floe_proto::v1::RefSnapshot, u64), WalError> {
-    use prost::Message;
     use floe_store::ObjectStoreExt;
+    use prost::Message;
     let manifest = handle.manifest();
     // Start point: checkpoint ≤ cut (checkpoint created_at on the ref; when
     // the ref has no timestamp, fall back to replaying from seq 0).

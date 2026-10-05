@@ -251,7 +251,10 @@ pub struct LeaseGuard {
 }
 
 impl LeaseGuard {
-    #[allow(clippy::too_many_arguments, reason = "private constructor mirroring the lease fields")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "private constructor mirroring the lease fields"
+    )]
     fn new(
         store: DynStore,
         key: &str,

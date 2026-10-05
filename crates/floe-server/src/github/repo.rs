@@ -213,10 +213,7 @@ pub async fn resolve_commitish(view: &View, r: &str) -> GhResult<String> {
 }
 
 /// One commit object, parsed.
-pub(super) async fn commit_facts(
-    local: &floe_git::LocalRepo,
-    sha: &str,
-) -> GhResult<CommitFacts> {
+pub(super) async fn commit_facts(local: &floe_git::LocalRepo, sha: &str) -> GhResult<CommitFacts> {
     let out = git(
         local,
         &[

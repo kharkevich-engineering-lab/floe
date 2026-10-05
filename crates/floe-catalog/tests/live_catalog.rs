@@ -129,12 +129,7 @@ async fn appends_and_reads_back_all_four_tables() {
         repo: Some("o/r".into()),
         ..SyncRun::new("follow", Utc::now())
     });
-    writer.record_inventory(InventoryRecord::new(
-        Utc::now(),
-        "created",
-        "o/r",
-        "github",
-    ));
+    writer.record_inventory(InventoryRecord::new(Utc::now(), "created", "o/r", "github"));
     writer.shutdown().await;
 
     assert_eq!(count(&committer, Table::RefEvents).await, 2);

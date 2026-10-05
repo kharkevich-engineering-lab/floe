@@ -149,7 +149,12 @@ impl RefPatterns {
             return Vec::new();
         }
         out.extend(RESERVED.iter().map(|r| format!("^{r}*")));
-        out.extend(RESERVED.iter().filter_map(|r| r.strip_suffix('/')).map(|r| format!("^{r}")));
+        out.extend(
+            RESERVED
+                .iter()
+                .filter_map(|r| r.strip_suffix('/'))
+                .map(|r| format!("^{r}")),
+        );
         out
     }
 }

@@ -823,7 +823,9 @@ impl LocalRepo {
                 )));
             }
             let chunk = buf.get(..n).ok_or_else(|| {
-                GitError::Io(std::io::Error::other("read reported more bytes than the buffer holds"))
+                GitError::Io(std::io::Error::other(
+                    "read reported more bytes than the buffer holds",
+                ))
             })?;
             tmp.write_all(chunk)
                 .instrument(span.clone())
@@ -1258,10 +1260,9 @@ impl LocalRepo {
                 .spawn()
                 .and_then(|mut c| {
                     {
-                        let stdin = c
-                            .stdin
-                            .as_mut()
-                            .ok_or_else(|| std::io::Error::other("git update-ref: stdin not piped"))?;
+                        let stdin = c.stdin.as_mut().ok_or_else(|| {
+                            std::io::Error::other("git update-ref: stdin not piped")
+                        })?;
                         stdin.write_all(input.as_bytes())?;
                     }
                     c.wait_with_output()
@@ -2587,9 +2588,10 @@ impl LocalRepo {
                 .stderr(Stdio::piped());
             let mut child = cmd.spawn().map_err(GitError::Io)?;
             {
-                let stdin = child.stdin.as_mut().ok_or_else(|| {
-                    GitError::Io(std::io::Error::other("git: stdin not piped"))
-                })?;
+                let stdin = child
+                    .stdin
+                    .as_mut()
+                    .ok_or_else(|| GitError::Io(std::io::Error::other("git: stdin not piped")))?;
                 stdin.write_all(&stdin_bytes).map_err(GitError::Io)?;
             }
             child.wait_with_output().map_err(GitError::Io)
@@ -3395,8 +3397,7 @@ pub(crate) fn compute_object_set(
                         if obj.kind != ObjKind::Tag {
                             break;
                         }
-                        let tag =
-                            gix_object::TagRef::from_bytes(&obj.data, kind).map_err(ge)?;
+                        let tag = gix_object::TagRef::from_bytes(&obj.data, kind).map_err(ge)?;
                         let target = tag.target();
                         set.insert(target);
                         cur = target;
@@ -3452,10 +3453,7 @@ pub(crate) fn compute_object_set(
                 // commit and walking its tree here as well.
                 continue;
             }
-            let mut commit = repo
-                .objects
-                .find_commit_iter(&cid, &mut buf)
-                .map_err(ge)?;
+            let mut commit = repo.objects.find_commit_iter(&cid, &mut buf).map_err(ge)?;
             let tree_id = commit.tree_id().map_err(ge)?;
 
             // `tree:0` sends no trees at all, the root included.
@@ -3502,10 +3500,7 @@ pub(crate) fn walk_tree_with_filter(
     buf: &mut Vec<u8>,
 ) -> Result<(), GitError> {
     // Collect entries first to end the mutable borrow of buf before recursing.
-    let tree_iter = repo
-        .objects
-        .find_tree_iter(&tree_id, buf)
-        .map_err(ge)?;
+    let tree_iter = repo.objects.find_tree_iter(&tree_id, buf).map_err(ge)?;
     let entries: Vec<(gix_object::tree::EntryMode, gix_hash::ObjectId)> = tree_iter
         .map(|res| {
             let e = res.map_err(ge)?;
@@ -3572,10 +3567,7 @@ pub(crate) fn compute_shallow(
             if !seen.insert(*cid) {
                 continue;
             }
-            let commit = repo
-                .objects
-                .find_commit_iter(cid, &mut buf)
-                .map_err(ge)?;
+            let commit = repo.objects.find_commit_iter(cid, &mut buf).map_err(ge)?;
             let parents: Vec<gix_hash::ObjectId> = commit.parent_ids().collect();
             if d == depth.max(1) {
                 if !parents.is_empty() {

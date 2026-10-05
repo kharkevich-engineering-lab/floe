@@ -48,8 +48,8 @@ use axum::http::{Method, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bytes::Bytes;
-use metrics_exporter_prometheus::PrometheusHandle;
 use floe_store::DynStore;
+use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::error::ApiError;
 use crate::repo::{RepoRoute, parse_repo_route};
@@ -106,7 +106,8 @@ impl AppState {
         // starts the instance on the built-in runtime defaults), so the bridge
         // and the catalog writer are built from its values.
         // Boxed: opening a dedicated bucket is a backend client's large future.
-        let config_store = Arc::new(Box::pin(config_store::ConfigStore::open(&bootstrap, &store)).await?);
+        let config_store =
+            Arc::new(Box::pin(config_store::ConfigStore::open(&bootstrap, &store)).await?);
         let config = Box::pin(config_store::live::Live::start(bootstrap, config_store)).await;
         let cfg = config.current().cfg;
         let registry = floe_wal::Registry::new(store.clone(), cfg.clone());
@@ -136,7 +137,9 @@ impl AppState {
         let catalog_tail = catalog
             .as_ref()
             .filter(|_| cfg.has_role(floe_config::Role::Events))
-            .map(|w| catalog_tail::CatalogTail::new(registry.clone(), w.clone(), cfg.catalog.backfill));
+            .map(|w| {
+                catalog_tail::CatalogTail::new(registry.clone(), w.clone(), cfg.catalog.backfill)
+            });
         let state = Arc::new(Self {
             cfg: cfg.clone(),
             store,
@@ -362,10 +365,7 @@ fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
 /// under tmpfs pressure — so the line carries RSS and an explicit caveat
 /// (2026-08-22: 11 stalls on a front during a 11.9 GB background prefetch,
 /// every one in a gap between requests, none inside one).
-fn spawn_runtime_watchdog(
-    tasks: Arc<floe_wal::tasks::Tasks>,
-    inflight: Arc<middleware::Inflight>,
-) {
+fn spawn_runtime_watchdog(tasks: Arc<floe_wal::tasks::Tasks>, inflight: Arc<middleware::Inflight>) {
     tokio::spawn(async move {
         let mut last = std::time::Instant::now();
         loop {
@@ -500,18 +500,26 @@ pub(crate) async fn dispatch_route(
                 settings::http_describe(st, route, &headers).await
             }
             (&Method::PUT, "settings") => {
-                settings::http_put(st, route, &headers, &query, body.take().unwrap_or_default()).await
+                settings::http_put(st, route, &headers, &query, body.take().unwrap_or_default())
+                    .await
             }
             (&Method::DELETE, "settings") => settings::http_delete(st, route, &headers).await,
             (&Method::POST, "settings/validate") => {
                 settings::http_validate(st, route, &headers, body.take().unwrap_or_default()).await
             }
             (&Method::POST, "policy/validate") => {
-                settings::http_policy_validate(st, route, &headers, body.take().unwrap_or_default()).await
+                settings::http_policy_validate(st, route, &headers, body.take().unwrap_or_default())
+                    .await
             }
             (&Method::POST, "policy/dry-run") => {
-                settings::http_policy_dry_run(st, route, &headers, &query, body.take().unwrap_or_default())
-                    .await
+                settings::http_policy_dry_run(
+                    st,
+                    route,
+                    &headers,
+                    &query,
+                    body.take().unwrap_or_default(),
+                )
+                .await
             }
             _ => Err(ApiError::NotFound(format!("no route for {method} {sub}"))),
         }
@@ -754,9 +762,7 @@ impl floe_bundle::BundleSource for RegistryBundleSource {
         id: &floe_git::RepoId,
     ) -> Result<floe_bundle::BundleRepoHandle, floe_bundle::BundleError> {
         let h = self.0.open(id).await.map_err(|e| match e {
-            floe_wal::WalError::NotFound => {
-                floe_bundle::BundleError::RepoNotFound(id.to_string())
-            }
+            floe_wal::WalError::NotFound => floe_bundle::BundleError::RepoNotFound(id.to_string()),
             other => floe_bundle::BundleError::Other(other.to_string()),
         })?;
         Ok(floe_bundle::BundleRepoHandle {
@@ -768,10 +774,7 @@ impl floe_bundle::BundleSource for RegistryBundleSource {
         })
     }
 
-    async fn prepare_objects(
-        &self,
-        id: &floe_git::RepoId,
-    ) -> Result<(), floe_bundle::BundleError> {
+    async fn prepare_objects(&self, id: &floe_git::RepoId) -> Result<(), floe_bundle::BundleError> {
         // `git bundle create` streams from the local copy: bring the packs
         // here first (Serve level). Registry::open alone is refs-level — the
         // maintainer built from it and git said "bad object refs/heads/main".
@@ -814,13 +817,10 @@ impl floe_bundle::BundleSource for RegistryBundleSource {
                 }
             }
         }
-        let linked = h
-            .local()
-            .packs()
-            .is_ok_and(|ps| {
-                ps.iter()
-                    .any(|p| h.local().pack_path(&p.checksum).is_symlink())
-            });
+        let linked = h.local().packs().is_ok_and(|ps| {
+            ps.iter()
+                .any(|p| h.local().pack_path(&p.checksum).is_symlink())
+        });
         if linked {
             return floe_bundle::BundleEngine::Gix { faulter: None };
         }

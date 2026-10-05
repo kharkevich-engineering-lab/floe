@@ -8,11 +8,11 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use floe_proto::v1::{Checkpoint, EntryKind};
+use floe_store::{GetOptions, GetResult, ObjectStore};
 use prost::Message;
 use rust_embed::RustEmbed;
 use serde::Serialize;
-use floe_proto::v1::{Checkpoint, EntryKind};
-use floe_store::{GetOptions, GetResult, ObjectStore};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -568,8 +568,7 @@ async fn overview(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     state.auth.require_read(&headers).await.map_err(auth_err)?;
-    let id =
-        floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
+    let id = floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
     let handle = state.registry.open(&id).await.map_err(wal_err)?;
     // read_log performs its own freshness check; acquire the read guard only
     // after it has completed because read_log may need the write lock.
@@ -1043,8 +1042,7 @@ async fn ops_list(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     state.auth.require_read(&headers).await.map_err(auth_err)?;
-    let id =
-        floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
+    let id = floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
     let body = OpsInfo {
         available: crate::ops::OPS.to_vec(),
         recent: state.registry.tasks().recent(&id.to_string()),
@@ -1078,8 +1076,7 @@ async fn ops_start(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let principal = state.auth.require_write(&headers).await.map_err(auth_err)?;
-    let id =
-        floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
+    let id = floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
     // Make sure the repo exists before spawning anything.
     state.registry.open(&id).await.map_err(wal_err)?;
     tracing::info!(repo = %id, op = %op, by = %principal.name, ?params, "ops.start");
@@ -1102,8 +1099,7 @@ async fn tasks_list(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     state.auth.require_read(&headers).await.map_err(auth_err)?;
-    let id =
-        floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
+    let id = floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
     let tasks = state.registry.tasks();
     let body = serde_json::json!({
         "hostname": floe_store::coord::instance_id(),
@@ -1129,8 +1125,7 @@ async fn task_stream(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     state.auth.require_read(&headers).await.map_err(auth_err)?;
-    let id =
-        floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
+    let id = floe_git::RepoId::new(&owner, &repo).map_err(|e| ApiError::NotFound(e.to_string()))?;
     let task = state
         .registry
         .tasks()

@@ -78,9 +78,7 @@ pub async fn handler(
         }
     };
     let vars = req.variables.unwrap_or_default();
-    let name = req
-        .operation_name
-        .or(req.operation_name_camel);
+    let name = req.operation_name.or(req.operation_name_camel);
     let op = match parse::parse(&req.query, &vars, name.as_deref()) {
         Ok(op) => op,
         Err(e) => return axum::Json(GqlError::bad_request(e).body()).into_response(),

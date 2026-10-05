@@ -167,10 +167,17 @@ async fn archive_refs_are_immutable_without_a_policy() -> TestResult {
 
     let forge = Command::new("git")
         .current_dir(&*src)
-        .args(["push", "origin", "main:refs/archive/1791072000/refs/heads/main"])
+        .args([
+            "push",
+            "origin",
+            "main:refs/archive/1791072000/refs/heads/main",
+        ])
         .output()?;
     let stderr = String::from_utf8_lossy(&forge.stderr);
-    assert!(!forge.status.success(), "creating an archive ref succeeded: {stderr}");
+    assert!(
+        !forge.status.success(),
+        "creating an archive ref succeeded: {stderr}"
+    );
     assert!(
         stderr.contains("archive-immutable"),
         "stderr should name the built-in rule: {stderr}"
@@ -180,7 +187,10 @@ async fn archive_refs_are_immutable_without_a_policy() -> TestResult {
         .args(["ls-remote", "origin", "refs/archive/*"])
         .output()?;
     assert!(ls.status.success());
-    assert!(ls.stdout.is_empty(), "nothing was published under refs/archive/");
+    assert!(
+        ls.stdout.is_empty(),
+        "nothing was published under refs/archive/"
+    );
 
     // Everything else is still allow-all.
     git_in(&src, &["push", "origin", "main:refs/heads/topic"])?;

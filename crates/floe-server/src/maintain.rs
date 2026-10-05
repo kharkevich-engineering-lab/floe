@@ -22,11 +22,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use prost::Message;
-use tracing::{Instrument, info, warn};
 use floe_bundle::slots::{PlanContext, SlotStatus};
 use floe_git::RepoId;
 use floe_store::{PutBody, PutMode, PutOptions};
+use prost::Message;
+use tracing::{Instrument, info, warn};
 
 use crate::AppState;
 
@@ -712,8 +712,8 @@ const HEARTBEAT_EXPIRY: std::time::Duration = std::time::Duration::from_hours(24
 pub async fn heartbeats(
     state: &AppState,
 ) -> anyhow::Result<Vec<floe_proto::v1::MaintainerHeartbeat>> {
-    use futures::StreamExt;
     use floe_store::ObjectStoreExt;
+    use futures::StreamExt;
     let mut out = Vec::new();
     let mut keys = state.store.list(floe_proto::keys::MAINTAIN_DIR, None);
     while let Some(m) = keys.next().await {

@@ -8,12 +8,12 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
 
-use prost::Message;
-use serde::Serialize;
 use floe_config::Config;
 use floe_git::{RepackMode, RepackOptions, RepoId};
 use floe_store::ObjectStoreExt;
 use floe_wal::RepoHandle;
+use prost::Message;
+use serde::Serialize;
 
 use crate::AppState;
 
@@ -190,9 +190,7 @@ pub async fn start(
 }
 
 /// The last connectivity audit of `handle`'s repository, if any.
-pub async fn read_fsck(
-    handle: &RepoHandle,
-) -> Result<Option<floe_proto::v1::FsckReport>, String> {
+pub async fn read_fsck(handle: &RepoHandle) -> Result<Option<floe_proto::v1::FsckReport>, String> {
     use floe_store::ObjectStoreExt;
     match handle.store().get_bytes(floe_proto::keys::FSCK).await {
         Ok(Some((_, bytes))) => floe_proto::v1::FsckReport::decode(bytes.as_ref())

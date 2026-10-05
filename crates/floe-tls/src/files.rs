@@ -151,10 +151,16 @@ mod tests {
         std::fs::write(&key_path, &k2).unwrap();
         files.reload_if_changed().expect("size changed").unwrap();
         assert_ne!(resolver.current().unwrap().info.fingerprint, fp1);
-        assert_eq!(files.status().domains, vec!["b.example.com", "c.example.com"]);
+        assert_eq!(
+            files.status().domains,
+            vec!["b.example.com", "c.example.com"]
+        );
         std::fs::write(&key_path, "not a key, and a different length entirely").unwrap();
         assert!(files.reload_if_changed().unwrap().is_err());
-        assert_eq!(resolver.current().unwrap().info.sans, vec!["b.example.com", "c.example.com"]);
+        assert_eq!(
+            resolver.current().unwrap().info.sans,
+            vec!["b.example.com", "c.example.com"]
+        );
         assert!(files.status().last_error.is_some());
         // Startup is fail-closed.
         assert!(FilesCert::load(&cert_path, &key_path, CertResolver::new()).is_err());

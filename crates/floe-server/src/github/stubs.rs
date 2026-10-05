@@ -76,7 +76,9 @@ impl Store {
 /// `serde_json::Value`s; recovering the guard is strictly better than
 /// propagating a 500 to every later deploy.
 fn state() -> std::sync::MutexGuard<'static, Store> {
-    STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Every route this module owns.
@@ -157,8 +159,7 @@ async fn get_check_run(
     let store = state();
     let existing = store.check_runs.get(&id).cloned();
     drop(store);
-    let run = existing
-        .unwrap_or_else(|| check_run_json(&urls, &full_name, id, &Value::Null, None));
+    let run = existing.unwrap_or_else(|| check_run_json(&urls, &full_name, id, &Value::Null, None));
     Ok(Json(run).into_response())
 }
 

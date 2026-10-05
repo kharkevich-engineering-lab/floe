@@ -33,12 +33,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use floe_config::AcmeConfig;
 use floe_store::{DynStore, ObjectStoreExt, memory::MemoryStore};
-use futures::StreamExt;
+use floe_tls::LogNarrator;
 use floe_tls::acme::{AcmeManager, Tick};
 use floe_tls::dns::{DnsProvider, TxtRecord};
 use floe_tls::resolver::{CertResolver, cert_info, provider, server_config};
 use floe_tls::seal::SealKey;
-use floe_tls::LogNarrator;
+use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
@@ -199,15 +199,24 @@ async fn pebble_dns01_order_share_and_renew() {
         "issued: {} .. {} by {}",
         la.info.not_before, la.info.not_after, la.info.issuer
     );
-    assert!(!inst_a.due(), "a fresh certificate is not due with renew_before = 1 day");
+    assert!(
+        !inst_a.due(),
+        "a fresh certificate is not due with renew_before = 1 day"
+    );
     let st = inst_a.status();
-    assert!(st.loaded && st.last_error.is_none() && st.last_renewal_at.is_some(), "{st:?}");
+    assert!(
+        st.loaded && st.last_error.is_none() && st.last_renewal_at.is_some(),
+        "{st:?}"
+    );
 
     // Bucket state: sealed keys only.
     let (_, cert_json) = store.get_bytes(&inst_a.cert_key()).await.unwrap().unwrap();
     let cert_json = String::from_utf8(cert_json.to_vec()).unwrap();
     assert!(cert_json.contains("BEGIN CERTIFICATE"));
-    assert!(!cert_json.contains("PRIVATE KEY"), "the private key is sealed");
+    assert!(
+        !cert_json.contains("PRIVATE KEY"),
+        "the private key is sealed"
+    );
     let mut accounts = 0;
     let keys: Vec<String> = {
         let mut stream = store.list("tls/", None);
@@ -222,7 +231,10 @@ async fn pebble_dns01_order_share_and_renew() {
             accounts += 1;
             let (_, body) = store.get_bytes(key).await.unwrap().unwrap();
             let body = String::from_utf8(body.to_vec()).unwrap();
-            assert!(!body.contains("key_pkcs8"), "the account key is sealed: {body}");
+            assert!(
+                !body.contains("key_pkcs8"),
+                "the account key is sealed: {body}"
+            );
         }
     }
     assert_eq!(accounts, 1, "{keys:?}");
@@ -245,15 +257,28 @@ async fn pebble_dns01_order_share_and_renew() {
     let inst_b = manager(&pebble, &store, rb.clone(), &http, Duration::from_hours(24));
     assert_eq!(inst_b.tick(&LogNarrator).await.unwrap(), Tick::Fresh);
     assert_eq!(rb.current().unwrap().info.fingerprint, la.info.fingerprint);
-    assert!(!inst_b.refresh().await.unwrap(), "unchanged object: 304, nothing installed");
+    assert!(
+        !inst_b.refresh().await.unwrap(),
+        "unchanged object: 304, nothing installed"
+    );
 
     // Instance C has the widest renew_before config allows (60 days), longer than some CA
     // profiles' lifetime: the fresh certificate is still not due (renewal never starts before
     // two thirds of the lifetime), so no re-order loop. A forced renewal then swaps in on A
     // and B at their next revalidation — no restart.
     let rc = CertResolver::new();
-    let inst_c = manager(&pebble, &store, rc.clone(), &http, Duration::from_hours(60 * 24));
-    assert_eq!(inst_c.tick(&LogNarrator).await.unwrap(), Tick::Fresh, "fresh is never due");
+    let inst_c = manager(
+        &pebble,
+        &store,
+        rc.clone(),
+        &http,
+        Duration::from_hours(60 * 24),
+    );
+    assert_eq!(
+        inst_c.tick(&LogNarrator).await.unwrap(),
+        Tick::Fresh,
+        "fresh is never due"
+    );
     assert_eq!(inst_c.renew_now(&LogNarrator).await.unwrap(), Tick::Issued);
     assert_eq!(
         inst_c.tick(&LogNarrator).await.unwrap(),

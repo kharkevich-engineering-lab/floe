@@ -12,8 +12,8 @@
 //! real 401), pointing at the token page. With `server.auth.mode = "none"` nothing
 //! is asked. The UI is a client of these recipes, never a fork.
 
-use serde::Serialize;
 use floe_config::{AuthMode, Config};
+use serde::Serialize;
 
 fn slug(host: &str) -> String {
     host.chars()
@@ -389,10 +389,7 @@ mod tests {
             "sh -c \"$(curl -fsSL 'https://git.example.com/services/public/install.sh?repo=acme/monorepo')\"",
             "URL quoted (zsh globs `?`)"
         );
-        assert!(
-            r.manual_clone
-                .contains("Authorization: Bearer $FLOE_TOKEN")
-        );
+        assert!(r.manual_clone.contains("Authorization: Bearer $FLOE_TOKEN"));
         assert!(r.manual_clone.contains("-c fetch.bundleURI=https://git.example.com/acme/monorepo.git/bundles/catchup clone https://git.example.com/acme/monorepo.git"));
         assert_eq!(
             r.plain_clone,
@@ -429,11 +426,19 @@ mod tests {
         assert_eq!(token_file(HOST), "git-example-com-token");
         // Every TLS mode floe has (off/files/acme, D59) presents a certificate the client
         // already trusts or no TLS at all: the installer never pins a CA or skips verification.
-        for mode in [floe_config::TlsMode::Off, floe_config::TlsMode::Files, floe_config::TlsMode::Acme] {
+        for mode in [
+            floe_config::TlsMode::Off,
+            floe_config::TlsMode::Files,
+            floe_config::TlsMode::Acme,
+        ] {
             let mut cfg = oidc_cfg();
             cfg.server.tls.mode = mode;
             let r = recipes(&cfg, BASE, Some("acme/monorepo"));
-            assert!(r.install.starts_with("sh -c \"$(curl -fsSL '"), "{}", r.install);
+            assert!(
+                r.install.starts_with("sh -c \"$(curl -fsSL '"),
+                "{}",
+                r.install
+            );
             let script = install_script(&cfg, BASE, None);
             assert_posix(&script);
             assert!(!script.contains("sslCAInfo"));

@@ -175,10 +175,15 @@ fn url_host(rest: &str) -> Option<&str> {
     }
     if let Some(v6) = authority.strip_prefix('[') {
         let (host, after) = v6.split_once(']')?;
-        return (after.is_empty() || after.strip_prefix(':').is_some_and(|p| p.parse::<u16>().is_ok()))
-            .then_some(host);
+        return (after.is_empty()
+            || after
+                .strip_prefix(':')
+                .is_some_and(|p| p.parse::<u16>().is_ok()))
+        .then_some(host);
     }
-    let (host, port) = authority.split_once(':').map_or((authority, None), |(h, p)| (h, Some(p)));
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(h, p)| (h, Some(p)));
     if port.is_some_and(|p| p.parse::<u16>().is_err()) || host.is_empty() {
         return None;
     }
@@ -274,12 +279,17 @@ impl AcmeConfig {
                 valid_cert_name(d),
                 "server.tls.acme.domains: {d:?} is not a lower-case DNS name (a single leading `*.` is allowed; no IP addresses)"
             );
-            anyhow::ensure!(seen.insert(d.as_str()), "server.tls.acme.domains lists {d:?} twice");
+            anyhow::ensure!(
+                seen.insert(d.as_str()),
+                "server.tls.acme.domains lists {d:?} twice"
+            );
         }
         // `Config::normalize` trimmed it; anything left is invalid, not silently fixed here.
         let email = self.email.as_str();
         anyhow::ensure!(
-            email.split_once('@').is_some_and(|(u, h)| !u.is_empty() && h.contains('.'))
+            email
+                .split_once('@')
+                .is_some_and(|(u, h)| !u.is_empty() && h.contains('.'))
                 && !email.contains(char::is_whitespace),
             "server.tls.acme.email must be a contact address in acme mode (got {:?})",
             self.email
@@ -384,10 +394,20 @@ mod tests {
         assert!(t.validate().unwrap_err().to_string().contains("email"));
         let mut t = acme();
         t.acme.cloudflare.api_token_env = " ".into();
-        assert!(t.validate().unwrap_err().to_string().contains("api_token_env"));
+        assert!(
+            t.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("api_token_env")
+        );
         let mut t = acme();
         t.acme.storage_key_env = String::new();
-        assert!(t.validate().unwrap_err().to_string().contains("storage_key_env"));
+        assert!(
+            t.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("storage_key_env")
+        );
         for c in ["http-01", "tls-alpn-01", "DNS-01", ""] {
             let mut t = acme();
             t.acme.challenge = c.into();
@@ -425,7 +445,10 @@ mod tests {
         t.acme.directory = "staging".into();
         t.validate().unwrap();
         assert_eq!(t.acme.directory_url(), LETSENCRYPT_STAGING);
-        assert_eq!(AcmeConfig::default().directory_url(), LETSENCRYPT_PRODUCTION);
+        assert_eq!(
+            AcmeConfig::default().directory_url(),
+            LETSENCRYPT_PRODUCTION
+        );
         t.acme.directory = "http://acme.example.com/dir".into();
         assert!(t.validate().unwrap_err().to_string().contains("https://"));
 
@@ -484,7 +507,10 @@ mod tests {
         cfg.server.tls = acme();
         cfg.apply_env(
             vec![
-                ("FLOE__SERVER__TLS__ACME__EMAIL".to_string(), "ops@example.com\n".to_string()),
+                (
+                    "FLOE__SERVER__TLS__ACME__EMAIL".to_string(),
+                    "ops@example.com\n".to_string(),
+                ),
                 (
                     "FLOE__SERVER__TLS__ACME__CLOUDFLARE__API_TOKEN_ENV".to_string(),
                     " CF_TOKEN\n".to_string(),
@@ -493,8 +519,12 @@ mod tests {
             .into_iter(),
         )
         .unwrap();
-        cfg.server.tls.acme.domains = vec![" git.example.com\n".into(), "*.git.example.com ".into()];
-        assert!(cfg.validate().is_err(), "un-normalised values are refused, never sent");
+        cfg.server.tls.acme.domains =
+            vec![" git.example.com\n".into(), "*.git.example.com ".into()];
+        assert!(
+            cfg.validate().is_err(),
+            "un-normalised values are refused, never sent"
+        );
         cfg.normalize();
         cfg.validate().unwrap();
         let a = &cfg.server.tls.acme;

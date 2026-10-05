@@ -571,8 +571,8 @@ async fn run_due_respects_schedule_and_lease() {
     tr.push().await;
     tr.advance_seq();
 
-    let future2 = floe_bundle::schedule::next_fire_after(&schedule, future).unwrap()
-        + Duration::from_secs(1);
+    let future2 =
+        floe_bundle::schedule::next_fire_after(&schedule, future).unwrap() + Duration::from_secs(1);
     ops::hold_lease(&tr.store, "weekly", "test-holder", Duration::from_mins(1))
         .await
         .unwrap();
@@ -994,11 +994,7 @@ async fn too_small_closed_slots_are_recorded_and_skipped_not_remeasured() {
     )
     .unwrap()
     .unwrap();
-    assert!(floe_bundle::slots::slot_closed(
-        daily_strat,
-        yesterday,
-        now
-    ));
+    assert!(floe_bundle::slots::slot_closed(daily_strat, yesterday, now));
     let weekly_strat = cfg
         .bundles
         .strategy
@@ -1119,10 +1115,7 @@ async fn strategies_matching_no_refs_are_blocked_in_the_plan_with_the_reason() {
         can_incremental: true,
         wrong_host_reason: None,
     };
-    let rows = bundler
-        .plan(&id, pinned_now(), ctx)
-        .await
-        .unwrap();
+    let rows = bundler.plan(&id, pinned_now(), ctx).await.unwrap();
     let weekly = rows
         .iter()
         .find(|r| r.strategy == "weekly")
@@ -1134,11 +1127,5 @@ async fn strategies_matching_no_refs_are_blocked_in_the_plan_with_the_reason() {
         ),
         other => panic!("expected blocked, got {other:?}"),
     }
-    assert!(
-        bundler
-            .run_due(&id, pinned_now())
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(bundler.run_due(&id, pinned_now()).await.unwrap().is_empty());
 }

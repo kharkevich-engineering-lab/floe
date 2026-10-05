@@ -128,13 +128,17 @@ impl SealKey {
             hex::encode(self.id)
         );
         let (nonce, ct) = rest.split_at(NONCE_LEN);
-        let nonce = Nonce::try_assume_unique_for_key(nonce)
-            .map_err(|_| anyhow::anyhow!("bad nonce"))?;
+        let nonce =
+            Nonce::try_assume_unique_for_key(nonce).map_err(|_| anyhow::anyhow!("bad nonce"))?;
         let mut buf = ct.to_vec();
         let plain = self
             .key
             .open_in_place(nonce, Aad::from(aad), &mut buf)
-            .map_err(|_| anyhow::anyhow!("sealed value failed authentication (tampered, or moved from another object)"))?;
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "sealed value failed authentication (tampered, or moved from another object)"
+                )
+            })?;
         Ok(plain.to_vec())
     }
 }
@@ -148,7 +152,9 @@ mod tests {
     #[test]
     fn round_trip_and_binding() {
         let k = SealKey::parse(B64).unwrap();
-        let s = k.seal(b"tls/acme/x/cert.json#key", b"-----BEGIN PRIVATE KEY-----").unwrap();
+        let s = k
+            .seal(b"tls/acme/x/cert.json#key", b"-----BEGIN PRIVATE KEY-----")
+            .unwrap();
         assert!(s.starts_with("v1."));
         assert!(!s.contains("PRIVATE"));
         assert_eq!(
@@ -156,7 +162,11 @@ mod tests {
             b"-----BEGIN PRIVATE KEY-----"
         );
         // Fresh nonce every time.
-        assert_ne!(s, k.seal(b"tls/acme/x/cert.json#key", b"-----BEGIN PRIVATE KEY-----").unwrap());
+        assert_ne!(
+            s,
+            k.seal(b"tls/acme/x/cert.json#key", b"-----BEGIN PRIVATE KEY-----")
+                .unwrap()
+        );
         // Bound to its place.
         assert!(k.open(b"tls/acme/y/cert.json#key", &s).is_err());
         // Tampering is detected.
@@ -165,7 +175,10 @@ mod tests {
             .unwrap();
         let last = raw.len() - 1;
         raw[last] ^= 1;
-        let bad = format!("v1.{}", base64::engine::general_purpose::STANDARD.encode(raw));
+        let bad = format!(
+            "v1.{}",
+            base64::engine::general_purpose::STANDARD.encode(raw)
+        );
         assert!(k.open(b"tls/acme/x/cert.json#key", &bad).is_err());
     }
 
@@ -177,7 +190,10 @@ mod tests {
         let s = a.seal(b"k", b"secret").unwrap();
         let e = b.open(b"k", &s).unwrap_err().to_string();
         assert!(e.contains("different storage key"), "{e}");
-        assert!(SealKey::parse(B64.trim_end_matches('=')).is_ok(), "unpadded");
+        assert!(
+            SealKey::parse(B64.trim_end_matches('=')).is_ok(),
+            "unpadded"
+        );
         assert!(SealKey::parse("c2hvcnQ=").is_err(), "too short");
         assert!(SealKey::parse("not a key at all!").is_err());
         assert!(!format!("{a:?}").contains(B64));

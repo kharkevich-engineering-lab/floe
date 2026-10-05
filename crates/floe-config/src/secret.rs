@@ -124,7 +124,10 @@ mod tests {
         let t: Holder = toml::from_str("token = { value = \"v\" }").unwrap();
         assert_eq!(t.token, Secret::Value("v".into()));
         assert!(serde_json::from_str::<Secret>(r#"{"bogus":"x"}"#).is_err());
-        assert_eq!(format!("{:?}", Secret::Value("hunter2".into())), "Secret::Value(***)");
+        assert_eq!(
+            format!("{:?}", Secret::Value("hunter2".into())),
+            "Secret::Value(***)"
+        );
     }
 
     #[test]
@@ -135,7 +138,10 @@ mod tests {
         assert_eq!(env_var(name).as_deref(), Some("v1"));
         set_alias(name, Some(Secret::Value("  ".into())));
         assert_eq!(env_var(name), None);
-        set_alias(name, Some(Secret::Env("FLOE_TEST_SECRET_ALIAS_UNSET_TARGET".into())));
+        set_alias(
+            name,
+            Some(Secret::Env("FLOE_TEST_SECRET_ALIAS_UNSET_TARGET".into())),
+        );
         assert_eq!(env_var(name), None);
         set_alias(name, None);
         assert_eq!(env_var(name), None);

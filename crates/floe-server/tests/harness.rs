@@ -44,7 +44,9 @@ impl Server {
         {
             let mut tcfg = floe_config::Config::default();
             tcfg.telemetry.log_format = floe_config::LogFormat::Json;
-            tcfg.telemetry.log_filter = "warn,floe=info,floe_server=debug,floe_wal=debug,floe_git=debug,floe_store=debug".into();
+            tcfg.telemetry.log_filter =
+                "warn,floe=info,floe_server=debug,floe_wal=debug,floe_git=debug,floe_store=debug"
+                    .into();
             floe_server::telemetry::tracing_init(&tcfg);
         }
         let store = MemoryStore::shared();
@@ -198,11 +200,7 @@ impl Server {
         Ok(resp.status())
     }
 
-    pub async fn read_log(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Vec<floe_proto::v1::LogEntry>> {
+    pub async fn read_log(&self, owner: &str, repo: &str) -> Result<Vec<floe_proto::v1::LogEntry>> {
         let id = floe_git::RepoId::new(owner, repo)?;
         let handle = self.registry.open(&id).await?;
         Ok(handle.read_log(1, None).await?)

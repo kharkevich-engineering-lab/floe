@@ -165,7 +165,10 @@ pub async fn http_put(
     };
     let result = match base {
         None => h.publish_settings(text, &principal.name, &message).await,
-        Some(b) => h.publish_settings_if(text, &principal.name, &message, b).await,
+        Some(b) => {
+            h.publish_settings_if(text, &principal.name, &message, b)
+                .await
+        }
     };
     published(result)
 }
@@ -195,9 +198,11 @@ fn published(result: Result<u64, floe_wal::WalError>) -> Result<Response, ApiErr
             Ok((StatusCode::OK, axum::Json(json!({"revision": revision}))).into_response())
         }
         Err(floe_wal::WalError::Invalid(why)) => Err(ApiError::BadRequest(why)),
-        Err(floe_wal::WalError::SettingsConflict { expected, actual }) => Err(ApiError::Conflict(
-            format!("the settings changed: you edited revision {expected}, the current one is {actual}"),
-        )),
+        Err(floe_wal::WalError::SettingsConflict { expected, actual }) => {
+            Err(ApiError::Conflict(format!(
+                "the settings changed: you edited revision {expected}, the current one is {actual}"
+            )))
+        }
         Err(e) => Err(ApiError::Internal(e.to_string())),
     }
 }

@@ -92,7 +92,8 @@ impl SealKey {
             "{path} was sealed with another key (kid {kid}; this key is {}): re-enter the secret",
             self.kid
         );
-        let data = decode_any(body).with_context(|| format!("{path}: sealed data is not base64"))?;
+        let data =
+            decode_any(body).with_context(|| format!("{path}: sealed data is not base64"))?;
         let (nonce, ct) = data
             .split_at_checked(NONCE_LEN)
             .ok_or_else(|| anyhow::anyhow!("{path}: sealed data is truncated"))?;
@@ -107,7 +108,9 @@ impl SealKey {
                 Aad::from(path.as_bytes()),
                 &mut buf,
             )
-            .map_err(|_| anyhow::anyhow!("cannot open {path}: wrong key, wrong field or a tampered value"))?;
+            .map_err(|_| {
+                anyhow::anyhow!("cannot open {path}: wrong key, wrong field or a tampered value")
+            })?;
         String::from_utf8(plain.to_vec()).with_context(|| format!("{path}: not UTF-8"))
     }
 }
@@ -134,13 +137,22 @@ mod tests {
         let s = k.seal("ghp_secret", "github_mirror.token").unwrap();
         assert!(s.starts_with(&format!("v1.{}.", k.kid())), "{s}");
         assert!(!s.contains("ghp_secret"));
-        assert_ne!(s, k.seal("ghp_secret", "github_mirror.token").unwrap(), "fresh nonce");
+        assert_ne!(
+            s,
+            k.seal("ghp_secret", "github_mirror.token").unwrap(),
+            "fresh nonce"
+        );
         assert_eq!(k.open(&s, "github_mirror.token").unwrap(), "ghp_secret");
         // Moved to another field: refused.
         assert!(k.open(&s, "events.webhook_secret").is_err());
         // Another key: a clear message.
-        let other = SealKey::from_base64(&base64::engine::general_purpose::STANDARD.encode([7u8; 32])).unwrap();
-        let err = other.open(&s, "github_mirror.token").unwrap_err().to_string();
+        let other =
+            SealKey::from_base64(&base64::engine::general_purpose::STANDARD.encode([7u8; 32]))
+                .unwrap();
+        let err = other
+            .open(&s, "github_mirror.token")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("another key"), "{err}");
         // Tampered.
         let mut t = s.clone();

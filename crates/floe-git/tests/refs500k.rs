@@ -10,10 +10,10 @@
     clippy::string_slice,
     reason = "test code: a panic is how a test fails"
 )]
+use floe_git::{LocalRepo, ObjectFormat, RepoId};
 use std::fmt::Write as _;
 use std::io::Write;
 use std::time::Instant;
-use floe_git::{LocalRepo, ObjectFormat, RepoId};
 
 fn commit(dir: &std::path::Path, msg: &str) -> String {
     let out = std::process::Command::new("git")

@@ -19,10 +19,10 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::future::BoxFuture;
 use floe_git::{
     IngestOptions, LocalRepo, ObjectFaulter, ObjectFormat, RepoId, UploadPackRequest, gix_hash,
 };
+use futures::future::BoxFuture;
 
 mod cm {
     pub use super::common::*;

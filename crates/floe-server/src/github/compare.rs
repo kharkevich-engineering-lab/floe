@@ -93,8 +93,14 @@ pub async fn compare(
         "diverged"
     };
 
-    let commits_per = q.per_page.unwrap_or(MAX_COMMITS_PER_PAGE).clamp(1, MAX_COMMITS_PER_PAGE);
-    let files_per = q.per_page.unwrap_or(MAX_FILES_PER_PAGE).clamp(1, MAX_FILES_PER_PAGE);
+    let commits_per = q
+        .per_page
+        .unwrap_or(MAX_COMMITS_PER_PAGE)
+        .clamp(1, MAX_COMMITS_PER_PAGE);
+    let files_per = q
+        .per_page
+        .unwrap_or(MAX_FILES_PER_PAGE)
+        .clamp(1, MAX_FILES_PER_PAGE);
     let page = q.page.unwrap_or(1).max(1);
     let skip = page.saturating_sub(1);
 
@@ -129,10 +135,7 @@ pub async fn compare(
 
     let base_commit = repo::commit_facts(&view.local, &base).await?;
     let merge_base_commit = repo::commit_facts(&view.local, &merge_base).await?;
-    let html = format!(
-        "{}/{}/compare/{base}...{head}",
-        urls.html, view.full_name
-    );
+    let html = format!("{}/{}/compare/{base}...{head}", urls.html, view.full_name);
     Ok(axum::Json(serde_json::json!({
         "url": format!("{}/repos/{}/compare/{base}...{head}", urls.api, view.full_name),
         "html_url": html,

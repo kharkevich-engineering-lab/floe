@@ -411,10 +411,24 @@ async fn ref_writes_obey_the_push_policy() -> TestResult {
         assert_eq!(r.status(), reqwest::StatusCode::FORBIDDEN, "{name}");
         let err: Value = r.json().await?;
         assert!(
-            err["message"].as_str().unwrap_or_default().contains("archive-immutable"),
+            err["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("archive-immutable"),
             "{err}"
         );
-        assert_eq!(get(&s, &format!("/api/v3/repos/acme/docs/git/ref/{}", name.trim_start_matches("refs/"))).await?.0, reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(
+            get(
+                &s,
+                &format!(
+                    "/api/v3/repos/acme/docs/git/ref/{}",
+                    name.trim_start_matches("refs/")
+                )
+            )
+            .await?
+            .0,
+            reqwest::StatusCode::NOT_FOUND
+        );
     }
     // Ordinary refs are still allow-all.
     let topic = client()
@@ -439,13 +453,21 @@ async fn ref_writes_obey_the_push_policy() -> TestResult {
         .await?;
     assert_eq!(create.status(), reqwest::StatusCode::FORBIDDEN);
     let err: Value = create.json().await?;
-    assert!(err["message"].as_str().unwrap_or_default().contains("github-mirror-read-only"), "{err}");
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("github-mirror-read-only"),
+        "{err}"
+    );
     let delete = client()
         .delete(format!("{refs_url}/heads/topic"))
         .send()
         .await?;
     assert_eq!(delete.status(), reqwest::StatusCode::FORBIDDEN);
-    let parent = git_in(src.path(), &["rev-parse", "HEAD~1"])?.trim().to_string();
+    let parent = git_in(src.path(), &["rev-parse", "HEAD~1"])?
+        .trim()
+        .to_string();
     let force = client()
         .patch(format!("{refs_url}/heads/topic"))
         .json(&serde_json::json!({ "sha": parent, "force": true }))
@@ -453,9 +475,14 @@ async fn ref_writes_obey_the_push_policy() -> TestResult {
         .await?;
     assert_eq!(force.status(), reqwest::StatusCode::FORBIDDEN);
     let r = ok(&s, "/api/v3/repos/acme/docs/git/ref/heads/topic").await?;
-    assert_eq!(r["object"]["sha"], head, "the refused delete and force left topic in place");
     assert_eq!(
-        get(&s, "/api/v3/repos/acme/docs/git/ref/heads/other").await?.0,
+        r["object"]["sha"], head,
+        "the refused delete and force left topic in place"
+    );
+    assert_eq!(
+        get(&s, "/api/v3/repos/acme/docs/git/ref/heads/other")
+            .await?
+            .0,
         reqwest::StatusCode::NOT_FOUND
     );
     Ok(())
