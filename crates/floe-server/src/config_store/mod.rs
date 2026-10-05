@@ -236,7 +236,13 @@ pub struct InstanceStatus {
 pub struct ConfigStore {
     store: DynStore,
     location: String,
-    history: HistoryMode,
+    /// `records` or `versions` in effect now.
+    history: parking_lot::Mutex<HistoryMode>,
+    /// What `config_store.history` asked for.
+    wanted: HistoryMode,
+    /// The versioning probe failed (or said no to `versions`): ask again at
+    /// the next publish instead of failing startup (§2.3).
+    reprobe: std::sync::atomic::AtomicBool,
     key_env: String,
     key: Option<Arc<SealKey>>,
 }
@@ -245,7 +251,7 @@ impl std::fmt::Debug for ConfigStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConfigStore")
             .field("location", &self.location)
-            .field("history", &self.history)
+            .field("history", &*self.history.lock())
             .field("key", &self.key)
             .finish_non_exhaustive()
     }
@@ -278,12 +284,14 @@ impl ConfigStore {
         } else {
             Arc::new(floe_store::Prefixed::new(base, prefix))
         };
-        let history = resolve_history(cs.history, &store).await?;
+        let (history, reprobe) = resolve_history(cs.history, &store).await;
         let key = SealKey::from_env(&cs.key_env)?.map(Arc::new);
         Ok(ConfigStore {
             store,
             location,
-            history,
+            history: parking_lot::Mutex::new(history),
+            wanted: cs.history,
+            reprobe: std::sync::atomic::AtomicBool::new(reprobe),
             key_env: cs.key_env.clone(),
             key,
         })
@@ -294,10 +302,12 @@ impl ConfigStore {
         ConfigStore {
             store,
             location: "memory".into(),
-            history: match history {
+            history: parking_lot::Mutex::new(match history {
                 HistoryMode::Auto => HistoryMode::Records,
                 m => m,
-            },
+            }),
+            wanted: history,
+            reprobe: std::sync::atomic::AtomicBool::new(false),
             key_env: "FLOE_CONFIG_KEY".into(),
             key: key.map(Arc::new),
         }
@@ -310,7 +320,19 @@ impl ConfigStore {
 
     /// `records` or `versions` (never `auto` once open).
     pub fn history_mode(&self) -> HistoryMode {
-        self.history
+        *self.history.lock()
+    }
+
+    /// Retry a versioning probe that failed at startup (one bucket call,
+    /// publish rate only).
+    async fn reprobe_history(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.reprobe.load(Ordering::Relaxed) {
+            return;
+        }
+        let (mode, again) = resolve_history(self.wanted, &self.store).await;
+        *self.history.lock() = mode;
+        self.reprobe.store(again, Ordering::Relaxed);
     }
 
     /// Whether this process can seal and open secrets.
@@ -485,6 +507,7 @@ impl ConfigStore {
         req: &PublishRequest<'_>,
         bootstrap: &Config,
     ) -> Result<Published, PublishError> {
+        self.reprobe_history().await;
         for _ in 0..PUBLISH_ATTEMPTS {
             let current = self.current().await?;
             let current_revision = current.as_ref().map_or(0, |(_, r)| r.revision);
@@ -548,7 +571,8 @@ impl ConfigStore {
     /// Make sure `history/<record.revision>` exists (best effort; the next
     /// publish heals a miss).
     async fn ensure_history(&self, record: &Record, version: &Version) {
-        let entry = match self.history {
+        let mode = self.history_mode();
+        let entry = match mode {
             HistoryMode::Versions => HistoryEntry::of(record, None, Some(version.to_string())),
             HistoryMode::Records | HistoryMode::Auto => {
                 HistoryEntry::of(record, Some(record.document.clone()), None)
@@ -738,7 +762,11 @@ fn instance_key(instance: &str) -> String {
     format!("{INSTANCES}{safe}.json")
 }
 
-async fn resolve_history(mode: HistoryMode, store: &DynStore) -> Result<HistoryMode> {
+/// The history mode to use now, and whether to probe again later. Never an
+/// error: a probe that fails, is slow, or (for `versions`) finds no
+/// versioning falls back to `records` with a log line and is retried at the
+/// next publish — a config store problem must not stop an instance (§4.1).
+async fn resolve_history(mode: HistoryMode, store: &DynStore) -> (HistoryMode, bool) {
     let probe = || async {
         match tokio::time::timeout(VERSIONING_PROBE, store.object_versioning()).await {
             Ok(Ok(v)) => Ok(v),
@@ -746,24 +774,20 @@ async fn resolve_history(mode: HistoryMode, store: &DynStore) -> Result<HistoryM
             Err(_) => Err(anyhow::anyhow!("the store did not answer within {VERSIONING_PROBE:?}")),
         }
     };
-    match mode {
-        HistoryMode::Records => Ok(HistoryMode::Records),
-        HistoryMode::Versions => {
-            let on = probe().await.context("config_store.history = \"versions\"")?;
-            anyhow::ensure!(
-                on,
-                "config_store.history = \"versions\", but the config bucket keeps no object versions (enable bucket versioning, or use \"auto\"/\"records\")"
-            );
-            Ok(HistoryMode::Versions)
+    if mode == HistoryMode::Records {
+        return (HistoryMode::Records, false);
+    }
+    match (mode, probe().await) {
+        (_, Ok(true)) => (HistoryMode::Versions, false),
+        (HistoryMode::Auto, Ok(false)) => (HistoryMode::Records, false),
+        (_, Ok(false)) => {
+            tracing::error!("config_store.history = \"versions\", but the config bucket keeps no object versions; writing history records until it does (enable bucket versioning, or use \"auto\"/\"records\")");
+            (HistoryMode::Records, true)
         }
-        HistoryMode::Auto => match probe().await {
-            Ok(true) => Ok(HistoryMode::Versions),
-            Ok(false) => Ok(HistoryMode::Records),
-            Err(e) => {
-                tracing::warn!(error = %e, "config store: cannot tell whether the bucket keeps object versions; history is written as records");
-                Ok(HistoryMode::Records)
-            }
-        },
+        (_, Err(e)) => {
+            tracing::warn!(error = %e, "config store: cannot tell whether the bucket keeps object versions; history is written as records and the probe is retried at the next publish");
+            (HistoryMode::Records, true)
+        }
     }
 }
 

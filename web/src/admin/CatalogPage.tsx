@@ -53,13 +53,18 @@ function CatalogStatusBox({ current }: { current: Record<string, unknown> }) {
           {busy ? "Testing…" : "Test connection"}
         </button>
         <span role="status" aria-live="polite" className="small">
-          {res?.ok && <span className="pill live">OK (HTTP {res.status})</span>}
-          {res && !res.ok && (
-            <span className="field-error">
-              Failed{res.status ? ` (HTTP ${res.status})` : ""}: {res.message ?? res.body ?? "no details"}
+          {res?.ok && (
+            <span className="pill live">
+              OK (HTTP {res.status}
+              {res.latency_ms !== undefined ? `, ${res.latency_ms} ms` : ""})
             </span>
           )}
-          {res?.message && res.ok && <span className="muted"> {res.message}</span>}
+          {res && !res.ok && (
+            <span className="field-error">
+              Failed{res.status ? ` (HTTP ${res.status})` : ""}: {res.error_class ?? "no details"}
+            </span>
+          )}
+          {res?.unauthenticated && <span className="muted"> The writer signs or exchanges credentials; this probe did not authenticate.</span>}
           {err && <span className="field-error">{err}</span>}
         </span>
       </div>

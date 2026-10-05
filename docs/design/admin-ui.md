@@ -272,7 +272,27 @@ per cloud. An operator who wants KMS keeps the token in env (`{"env": …}`) pop
 Without a key, publishing a `value` is **400** ("set FLOE_CONFIG_KEY or use an env reference"). Never stored in
 plain text.
 
-### 5.3 Rotation
+### 5.3 Env references are host facts (allowlist)
+
+An env name is a host fact (D24): the document may only name variables this host allows, or an admin could point
+`github_mirror.token`, `events.webhook_secret` or a catalog `*_env` key at `FLOE_CONFIG_KEY`, the store's keys or a
+session secret and have floe send it somewhere. `[config_store] allowed_env` (bootstrap) lists them: exact names or
+a prefix ending in `*`; default `FLOE_SECRET_*`, `FLOE_GITHUB_TOKEN`, `FLOE_WEBHOOK_SECRET`, `FLOE_CATALOG_TOKEN`,
+`FLOE_CATALOG_CREDENTIAL`. `config_store.key_env`, `FLOE__*`, `AWS_*` and the variables `[store]`, `[server.auth]`
+and `[upstream]` read are allowed only when listed **exactly** (a glob never reaches them). The catalog's SigV4
+signing keys (`s3_access_key_env` / `s3_secret_key_env`, used to sign and never sent) may also name the AWS defaults
+and this host's `[store.s3]` key variables. The rule lives in `Config::with_runtime`, so it is enforced at publish
+(400 with the path) **and** at every apply: a document written before the rule, or behind floe's back, is refused by
+every instance (apply error, previous revision kept).
+
+**Test endpoints** (`mirror/test`, the `mirror/preview` dry run, `catalog/test`) never send a caller-named env
+reference (400). They send a freshly typed `{value}`, or the stored credential **only to the applied URL** (a
+changed `api_url`/`git_url`/`uri` needs a typed value, or for the catalog a publish first). URLs must be `https://`
+(plain `http://` only to the loopback) without userinfo, query or fragment; the catalog's candidate section must
+pass the section's validation; redirects are not followed; answers carry the status, the latency and a fixed error
+class, never the response body.
+
+### 5.4 Rotation
 
 Rotating `FLOE_CONFIG_KEY` means re-entering sealed secrets (the GUI shows them as "cannot be opened with this
 instance's key" after a rollout). A two-key window (`FLOE_CONFIG_KEY_PREVIOUS`) is deferred (§12).

@@ -462,7 +462,7 @@ export class ReposClient {
       /** Selection of the known repositories under a candidate section; `discover` runs a real dry-run pass. */
       preview: (section: Record<string, unknown> | null, o: { discover?: boolean } = {}, opts?: CallOptions) =>
         this.json<MirrorPreview>("admin/mirror/preview", opts, jsonBody("POST", { section, discover: o.discover ?? false })),
-      /** `GET /user` at GitHub with the stored token, or a candidate one. */
+      /** `GET /user` at GitHub: a freshly typed `{value}`, or (no token) the stored one — only to the configured `api_url`. Env references are refused. */
       test: (o: { api_url?: string; token?: SecretValue } = {}, opts?: CallOptions) => this.json<CredentialTest>("admin/mirror/test", opts, jsonBody("POST", o)),
       /** Ask the mirror loop for a pass now. */
       sync: (opts?: CallOptions) => this.json<{ ok: boolean; message: string }>("admin/mirror/sync", opts, jsonBody("POST", {})),
@@ -1067,21 +1067,26 @@ export interface MirrorPreview {
   repos: { full_name: string; floe: string | null; status: string; verdict: "in" | "too-large" | "out"; reason: string }[];
   plan: null | { error: string } | { summary: string; discovered: number; complete: boolean; lines: string[]; rate_remaining: number | null };
 }
+/** A fixed class for a failed probe; response bodies are never echoed (D61). */
+export type ProbeErrorClass = "no_token" | "timeout" | "unreachable" | "transport" | "redirect" | "unauthorized" | "not_found" | "http_4xx" | "http_5xx";
 export interface CredentialTest {
   ok: boolean;
   status?: number;
+  latency_ms?: number;
+  error_class?: ProbeErrorClass | null;
   login?: string | null;
   scopes?: string | null;
   rate_remaining?: number | null;
-  message?: string | null;
+  message?: string;
 }
 export interface CatalogTest {
   ok: boolean;
   auth?: string;
-  url?: string;
   status?: number;
-  body?: string;
-  message?: string | null;
+  latency_ms?: number;
+  error_class?: ProbeErrorClass | null;
+  /** The writer authenticates (OAuth2, SigV4) but the probe did not. */
+  unauthenticated?: boolean;
 }
 
 export function createClient(opts: ClientOptions = {}): ReposClient {

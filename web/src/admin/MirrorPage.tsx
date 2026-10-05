@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, type CredentialTest, type MirrorPreview, type MirrorStatus, type SecretValue } from "../api";
+import { api, type CredentialTest, type MirrorPreview, type MirrorStatus } from "../api";
+import { testToken } from "./schema-form";
 import { invalidate, useData } from "../data";
 import { Box } from "../components/Layout";
 import { relTime } from "../format";
@@ -33,7 +34,7 @@ function CredentialTestButton({ current }: { current: Record<string, unknown> })
     setErr("");
     setRes(null);
     try {
-      const token = current.token as SecretValue | undefined;
+      const token = testToken(current.token);
       setRes(await api.admin.mirror.test({ api_url: typeof current.api_url === "string" ? current.api_url : undefined, token }));
     } catch (e) {
       setErr(errorMessage(e));
@@ -56,7 +57,7 @@ function CredentialTestButton({ current }: { current: Record<string, unknown> })
         )}
         {res && !res.ok && (
           <span className="field-error">
-            Failed{res.status ? ` (HTTP ${res.status})` : ""}: {res.message ?? "no details"}
+            Failed{res.status ? ` (HTTP ${res.status})` : ""}: {res.error_class ?? res.message ?? "no details"}
           </span>
         )}
         {err && <span className="field-error">{err}</span>}
@@ -110,7 +111,11 @@ function SelectionPreview({ current }: { current: Record<string, unknown> }) {
   const discover = async () => {
     setDiscovering(true);
     try {
-      setPreview(await api.admin.mirror.preview({ ...current }, { discover: true }));
+      // Never the form's env reference: a typed value, else the stored token
+      // (which the server sends only to the configured api_url).
+      const { token: _token, ...rest } = current;
+      const typed = testToken(current.token);
+      setPreview(await api.admin.mirror.preview(typed ? { ...rest, token: typed } : rest, { discover: true }));
       setErr("");
     } catch (e) {
       setErr(errorMessage(e));

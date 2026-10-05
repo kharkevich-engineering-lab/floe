@@ -50,6 +50,23 @@ pub struct Live {
     started_at: DateTime<Utc>,
     known: Mutex<Option<Version>>,
     status: Mutex<LiveStatus>,
+    /// Serializes [`Live::apply`]: the background loop and a publishing
+    /// request revalidate concurrently, and an older revision must never be
+    /// applied after a newer one.
+    apply_lock: Mutex<()>,
+    /// The env alias this instance's mirror token resolves through (one per
+    /// `Live`, so instances in one test process never share it).
+    alias: String,
+}
+
+/// The alias for the next `Live` in this process: the documented name for
+/// the first (every production process), a numbered one after it.
+fn next_alias() -> String {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    match N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) {
+        0 => GITHUB_MIRROR_TOKEN_ALIAS.to_string(),
+        n => format!("{GITHUB_MIRROR_TOKEN_ALIAS}_{n}"),
+    }
 }
 
 impl std::fmt::Debug for Live {
@@ -64,13 +81,14 @@ impl Live {
     /// unopenable document starts the instance on the bootstrap's runtime
     /// sections (the built-in defaults) and records why.
     pub async fn start(bootstrap: Arc<Config>, store: Arc<ConfigStore>) -> Arc<Live> {
+        let alias = next_alias();
         let mut status = LiveStatus::default();
         let mut known = None;
         let mut initial: Option<(u64, Arc<Config>, RuntimeConfig)> = None;
         match tokio::time::timeout(STARTUP_LOAD, store.current()).await {
             Ok(Ok(Some((version, record)))) => {
                 known = Some(version);
-                match open_and_merge(&bootstrap, &store, &record) {
+                match open_and_merge(&bootstrap, &store, &record, &alias) {
                     Ok((cfg, rt)) => initial = Some((record.revision, cfg, rt)),
                     Err(e) => {
                         tracing::error!(revision = record.revision, error = %e, "config store: cannot apply the current document; starting with the built-in runtime defaults");
@@ -92,10 +110,12 @@ impl Live {
         let (revision, cfg, started) = initial.unwrap_or_else(|| {
             // No document: the bootstrap's own runtime sections (defaults, or
             // what an embedding set programmatically), with the mirror token
-            // read through the alias so a later document reaches it live.
+            // read through the alias so a later document reaches it live:
+            // follow and LFS resolve the alias at every call, so a token
+            // entered in the GUI later needs no restart.
             let mut c = (*bootstrap).clone();
-            c.github_mirror.token_env = GITHUB_MIRROR_TOKEN_ALIAS.to_string();
-            set_alias(GITHUB_MIRROR_TOKEN_ALIAS, Some(bootstrap.github_mirror.token.clone()));
+            c.github_mirror.token_env.clone_from(&alias);
+            set_alias(&alias, Some(bootstrap.github_mirror.token.clone()));
             (0, Arc::new(c), RuntimeConfig::from_config(&bootstrap))
         });
         status.applied_revision = revision;
@@ -108,6 +128,8 @@ impl Live {
             started_at: Utc::now(),
             known: Mutex::new(known),
             status: Mutex::new(status),
+            apply_lock: Mutex::new(()),
+            alias,
         })
     }
 
@@ -145,8 +167,7 @@ impl Live {
                 s.check_error = None;
             }
             Ok(Changed::Changed(version, record)) => {
-                *self.known.lock() = Some(version);
-                self.apply(&record);
+                self.apply(&record, version);
                 let mut s = self.status.lock();
                 s.last_check = Some(now);
                 s.check_error = None;
@@ -161,12 +182,16 @@ impl Live {
         self.tx.borrow().revision
     }
 
-    /// Apply a record (or keep the previous one and say why).
-    fn apply(&self, record: &Record) {
-        if record.revision == self.tx.borrow().revision {
+    /// Apply a record newer than the applied one (or keep the previous one
+    /// and say why). An older or equal revision — a concurrent revalidation
+    /// that read before a newer one was applied — changes nothing.
+    pub(super) fn apply(&self, record: &Record, version: Version) {
+        let _serial = self.apply_lock.lock();
+        if record.revision <= self.tx.borrow().revision {
             return;
         }
-        match open_and_merge(&self.bootstrap, &self.store, record) {
+        *self.known.lock() = Some(version);
+        match open_and_merge(&self.bootstrap, &self.store, record, &self.alias) {
             Ok((cfg, rt)) => {
                 let restart = floe_config::runtime::restart_required(&self.started, &rt);
                 tracing::info!(revision = record.revision, author = %record.author, restart_required = ?restart, "config applied");
@@ -251,10 +276,12 @@ fn open_and_merge(
     bootstrap: &Config,
     store: &ConfigStore,
     record: &Record,
+    alias: &str,
 ) -> anyhow::Result<(Arc<Config>, RuntimeConfig)> {
     let rt = store.open_document(&record.document)?;
-    let cfg = bootstrap.with_runtime(&rt)?;
-    set_alias(GITHUB_MIRROR_TOKEN_ALIAS, Some(rt.github_mirror.token.clone()));
+    let mut cfg = bootstrap.with_runtime(&rt)?;
+    cfg.github_mirror.token_env = alias.to_string();
+    set_alias(alias, Some(rt.github_mirror.token.clone()));
     Ok((Arc::new(cfg), rt))
 }
 
@@ -263,7 +290,7 @@ fn open_and_merge(
 /// is none. Fails when the document cannot be opened (a CLI should say so).
 pub async fn effective_once(bootstrap: &Arc<Config>, store: &ConfigStore) -> anyhow::Result<Arc<Config>> {
     match store.current().await? {
-        Some((_, record)) => Ok(open_and_merge(bootstrap, store, &record)?.0),
+        Some((_, record)) => Ok(open_and_merge(bootstrap, store, &record, GITHUB_MIRROR_TOKEN_ALIAS)?.0),
         None => Ok(bootstrap.clone()),
     }
 }

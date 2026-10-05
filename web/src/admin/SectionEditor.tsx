@@ -4,6 +4,7 @@ import { invalidate, useData } from "../data";
 import { Box } from "../components/Layout";
 import { ConfigDiff } from "./ConfigDiff";
 import { useUnsavedGuard } from "./useUnsavedGuard";
+import { ListTextarea } from "./ListTextarea";
 import { docsDiffer, errorsFor, fieldsOf, fromInput, groupFields, secretInput, secretState, toInput, unclaimedErrors, type Field } from "./schema-form";
 
 type SecretMode = "env" | "value" | "unset";
@@ -369,14 +370,14 @@ function FieldRow({
       break;
     case "list":
       control = (
-        <textarea
+        <ListTextarea
           id={id}
           rows={Math.max(2, String(input).split("\n").length + 1)}
-          value={String(input)}
+          value={value}
           placeholder="one per line"
           aria-invalid={invalid}
           aria-describedby={describedBy}
-          onChange={(e) => onChange(fromInput(field, e.target.value))}
+          onChange={onChange}
         />
       );
       break;

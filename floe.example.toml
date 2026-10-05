@@ -336,6 +336,9 @@ prefix = "config/"                # key prefix in that bucket: current.json, his
 ttl = "15s"                       # every instance revalidates with one conditional GET this often; 0 = only at startup
 history = "auto"                  # auto | records | versions: history bodies in floe's records or the bucket's object versions
 key_env = "FLOE_CONFIG_KEY"       # env var with 32 random bytes, base64 (openssl rand -base64 32): seals secrets (D61)
+allowed_env = ["FLOE_SECRET_*", "FLOE_GITHUB_TOKEN", "FLOE_WEBHOOK_SECRET", "FLOE_CATALOG_TOKEN", "FLOE_CATALOG_CREDENTIAL"]
+                                  # env vars the config document may name ({ env = … } and *_env keys): exact or prefix*;
+                                  # key_env, FLOE__*, AWS_* and the store/auth variables only when listed exactly
 
 # ---------------------------------------------------------------------------------------------------------------
 # Runtime configuration (D60): NOT in this file. [github_mirror], [catalog] and [events] are one versioned

@@ -4,6 +4,7 @@ import { api, type Policy, type PolicyValidation, type RepoSettings, type Settin
 import { invalidate, useData } from "../data";
 import { Box } from "../components/Layout";
 import { useUnsavedGuard } from "./useUnsavedGuard";
+import { ListTextarea } from "./ListTextarea";
 import { errorMessage } from "./SectionEditor";
 import { tomlGet, tomlSet, type TomlValue } from "./toml-lines";
 
@@ -217,18 +218,7 @@ function SettingsField({ f, value, onChange }: { f: (typeof SETTINGS_FIELDS)[num
       break;
     case "list":
       control = (
-        <textarea
-          id={id}
-          rows={3}
-          value={Array.isArray(value) ? value.join("\n") : ""}
-          onChange={(e) => {
-            const items = e.target.value
-              .split("\n")
-              .map((s) => s.trim())
-              .filter(Boolean);
-            onChange(items.length > 0 ? items : null);
-          }}
-        />
+        <ListTextarea id={id} rows={3} value={Array.isArray(value) ? value : []} onChange={(items) => onChange(items.length > 0 ? items : null)} />
       );
       break;
     default:
@@ -354,28 +344,11 @@ function PolicyForm({ repo }: { repo: string }) {
                 </button>
               </div>
               <div className="control">
-                <textarea
+                <ListTextarea
                   rows={2}
                   aria-label={`Rule ${i + 1} refs (one per line)`}
-                  value={(r.match?.refs ?? []).join("\n")}
-                  onChange={(e) =>
-                    update(
-                      rules.map((x, j) =>
-                        j === i
-                          ? {
-                              ...x,
-                              match: {
-                                ...x.match,
-                                refs: e.target.value
-                                  .split("\n")
-                                  .map((s) => s.trim())
-                                  .filter(Boolean),
-                              },
-                            }
-                          : x,
-                      ),
-                    )
-                  }
+                  value={r.match?.refs ?? []}
+                  onChange={(refs) => update(rules.map((x, j) => (j === i ? { ...x, match: { ...x.match, refs } } : x)))}
                 />
                 {r.effect?.protect ? (
                   <div className="secret-row" role="group" aria-label={`Rule ${i + 1} restricts`}>

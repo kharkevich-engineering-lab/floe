@@ -82,6 +82,27 @@ impl RuntimeConfig {
         }
     }
 
+    /// Every env var name the document makes this host read, by path (D61):
+    /// `{ env = … }` secrets and the catalog's `*_env` keys.
+    pub fn env_refs(&self) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        if let Secret::Env(n) = &self.github_mirror.token {
+            out.push(("github_mirror.token", n.clone()));
+        }
+        if let Some(Secret::Env(n)) = &self.events.webhook_secret {
+            out.push(("events.webhook_secret", n.clone()));
+        }
+        let c = &self.catalog;
+        for (path, v) in [("catalog.token_env", &c.token_env), ("catalog.credential_env", &c.credential_env)] {
+            if let Some(n) = v.as_deref().filter(|n| !n.trim().is_empty()) {
+                out.push((path, n.to_string()));
+            }
+        }
+        out.push(("catalog.s3_access_key_env", c.s3_access_key_env.clone()));
+        out.push(("catalog.s3_secret_key_env", c.s3_secret_key_env.clone()));
+        out
+    }
+
     /// The runtime sections as a bootstrap `Config` carries them (the old
     /// file's sections, for `floe config import`).
     pub fn from_config(cfg: &Config) -> Self {
@@ -100,14 +121,21 @@ impl Config {
     /// [`GITHUB_MIRROR_TOKEN_ALIAS`]; whoever applies the document registers
     /// that alias (`floe_config::secret::set_alias`).
     pub fn with_runtime(&self, rt: &RuntimeConfig) -> Result<Config> {
+        // D61: env names are host facts. Checked here, so publish (400) and
+        // every apply (a document written before the rule) both refuse it.
+        for (path, name) in rt.env_refs() {
+            anyhow::ensure!(
+                self.env_ref_allowed(path, &name),
+                "{path}: env var {name:?} is not allowed by this host's config_store.allowed_env (D61); use a FLOE_SECRET_* name, or list it there"
+            );
+        }
         let mut cfg = self.clone();
         cfg.github_mirror.clone_from(&rt.github_mirror);
         cfg.catalog.clone_from(&rt.catalog);
         cfg.events.clone_from(&rt.events);
+        // Resolved live through the alias (registered by whoever applies the
+        // document); unset resolves to "no token", as an unset variable did.
         cfg.github_mirror.token_env = GITHUB_MIRROR_TOKEN_ALIAS.to_string();
-        // The alias is always registered on an instance that applied a
-        // document; unset resolves to "no token", as an unset variable did.
-        cfg.github_mirror.use_token = true;
         cfg.validate()
             .context("the effective config (bootstrap ⊕ config document)")?;
         Ok(cfg)
@@ -203,6 +231,54 @@ mod tests {
         let mut rt = RuntimeConfig::default();
         rt.events.webhook_url = Some("ftp://x".into());
         assert!(rt.validate().unwrap_err().to_string().contains("webhook_url"));
+    }
+
+    #[test]
+    fn env_references_follow_the_host_allowlist() {
+        let host = Config::default();
+        let mut rt = RuntimeConfig::default();
+        host.with_runtime(&rt).unwrap();
+        for bad in ["FLOE_CONFIG_KEY", "FLOE__SERVER__AUTH__SESSION_SECRET", "AWS_SECRET_ACCESS_KEY", "HOME", "FLOE_SECRETX"] {
+            rt.github_mirror.token = Secret::Env(bad.into());
+            let err = host.with_runtime(&rt).unwrap_err().to_string();
+            assert!(err.starts_with("github_mirror.token:"), "{bad}: {err}");
+        }
+        rt.github_mirror.token = Secret::Env("FLOE_SECRET_GH".into());
+        host.with_runtime(&rt).unwrap();
+        // Bearer-style catalog keys follow the same list; AWS names only as signing keys.
+        rt.catalog.token_env = Some("AWS_SECRET_ACCESS_KEY".into());
+        assert!(host.with_runtime(&rt).unwrap_err().to_string().starts_with("catalog.token_env:"));
+        rt.catalog.token_env = None;
+        rt.catalog.s3_secret_key_env = "FLOE_CONFIG_KEY".into();
+        assert!(host.with_runtime(&rt).is_err());
+        rt.catalog.s3_secret_key_env = "AWS_SECRET_ACCESS_KEY".into();
+        host.with_runtime(&rt).unwrap();
+        // Only an exact host entry opens a host-only name.
+        let mut open = Config::default();
+        open.config_store.allowed_env = vec!["AWS_*".into(), "MY_TOKEN".into(), "FLOE_SECRET_*".into()];
+        rt.events.webhook_secret = Some(Secret::Env("AWS_SESSION_TOKEN".into()));
+        assert!(open.with_runtime(&rt).is_err(), "a glob never reaches AWS_*");
+        rt.events.webhook_secret = Some(Secret::Env("MY_TOKEN".into()));
+        open.with_runtime(&rt).unwrap();
+    }
+
+    #[test]
+    fn service_urls_are_https_or_loopback() {
+        for ok in ["https://api.github.com", "https://ghe.example.com/api/v3", "http://127.0.0.1:8080", "http://localhost"] {
+            crate::check_service_url("k", ok).unwrap();
+        }
+        for bad in [
+            "http://169.254.169.254/latest",
+            "http://localhost.evil.example",
+            "https://x@evil.example",
+            "https://api.github.com#frag",
+            "https://api.github.com?x=1",
+            "https://api.github.com/",
+            "ftp://x",
+            "https://",
+        ] {
+            assert!(crate::check_service_url("k", bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

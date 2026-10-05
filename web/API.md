@@ -520,12 +520,12 @@ JSON `{"error": "…", "errors": [{"path"?: "github_mirror.include", "message": 
 | `POST /api/v1/admin/config/rollback` | body `{revision, base_revision?, message?}` → as `PUT` (publishes the old document as a new revision). |
 | `GET /api/v1/admin/overview` | `{config, store, instance{…, applied_revision, restart_required[], apply_error, last_check, check_error}, instances[], mirror, catalog}`. |
 | `GET /api/v1/admin/mirror` | `{summary{enabled, lease, token_login, last_pass, counts}, repos[{id, full_name, floe, status, private, archived, fork, size_kb, pushed_at, last_seen, missing_since, last_error, paused}]}` (`mirror/github/state.json`). |
-| `POST /api/v1/admin/mirror/preview` | body `{section?, discover?}` → the known repositories under a candidate `github_mirror` section (`verdict: in\|too-large\|out`, `reason`); `discover: true` adds `plan` from a real dry-run pass against the forge (no lease, no writes). |
-| `POST /api/v1/admin/mirror/test` | body `{api_url?, token?}` (a secret; `redacted`/absent = the applied token) → `GET {api_url}/user`: `{ok, status, login, scopes, rate_remaining, message}`. |
+| `POST /api/v1/admin/mirror/preview` | body `{section?, discover?}` → the known repositories under a candidate `github_mirror` section (`verdict: in\|too-large\|out`, `reason`); `discover: true` adds `plan` from a real dry-run pass against the forge (no lease, no writes); its section must pass the section's checks and its token follows `mirror/test`'s rule. |
+| `POST /api/v1/admin/mirror/test` | body `{api_url?, token?}` → `GET {api_url}/user` (no redirects): `{ok, status, latency_ms, error_class, login, scopes, rate_remaining}`. `token` is a typed `{value}`; absent/`redacted` = the stored token, sent **only** to the applied `api_url`; an `{env}` is a 400. `api_url` must be https (loopback http) without userinfo/query/fragment. |
 | `POST /api/v1/admin/mirror/sync` | writes `mirror/github/sync-request.json`; the mirror loop restarts at its pass boundary and runs a pass within its first tick. |
 | `POST /api/v1/admin/mirror/pause` / `resume` | body `{full_name: "owner/name"}` → a config publish adding/removing that exact entry in `github_mirror.exclude` (frozen: data kept, follow stopped); answers as `PUT`, `{unchanged: true}` when already so. |
 | `GET /api/v1/admin/catalog` | `{compiled, enabled, running, up, tail, uri, warehouse, namespace, auth, restart_required}`. |
-| `POST /api/v1/admin/catalog/test` | body `{section?}` → Iceberg REST `GET {uri}/v1/config?warehouse=` with the configured bearer: `{ok, auth, url, status, body, message}`. |
+| `POST /api/v1/admin/catalog/test` | body `{section?}` → Iceberg REST `GET {uri}/v1/config?warehouse=` (no redirects): `{ok, auth, status, latency_ms, error_class, unauthenticated}`, never the body. The candidate section must validate; env names cannot differ from the applied ones; a new `uri` must be https (loopback http) and gets no stored bearer. |
 
 `GET /api/v1/tls` (admin; read-only certificate status, D59) is what the admin overview shows; TLS itself is
 bootstrap config and never editable here.

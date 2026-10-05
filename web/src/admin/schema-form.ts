@@ -103,10 +103,7 @@ export function fromInput(field: Field, raw: string | boolean): unknown {
       return s !== "" && Number.isFinite(n) ? n : s;
     }
     case "list":
-      return String(raw)
-        .split(/[\n,]/)
-        .map((s) => s.trim())
-        .filter((s) => s !== "");
+      return parseList(String(raw));
     case "nullable-string": {
       const s = String(raw).trim();
       return s === "" ? null : s;
@@ -114,6 +111,24 @@ export function fromInput(field: Field, raw: string | boolean): unknown {
     default:
       return String(raw);
   }
+}
+
+/** Split a list textarea's text into items (newline or comma separated, trimmed, no empties). */
+export function parseList(text: string): string[] {
+  return text
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+}
+
+/**
+ * The text a list textarea shows: the user's own text while it still parses
+ * to `value` — so a trailing Enter or "," survives the round trip through the
+ * document — else `value`, one item per line (a reset, a reload).
+ */
+export function listText(text: string, value: unknown): string {
+  const items = Array.isArray(value) ? value.map(String) : [];
+  return docsDiffer(parseList(text), items) ? items.join("\n") : text;
 }
 
 /** A secret field's state, for display (the value itself is never shown). */
@@ -139,6 +154,16 @@ export function secretInput(mode: "env" | "value" | "keep" | "unset", text: stri
     default:
       return null;
   }
+}
+
+/**
+ * The token a credential test or dry run may send: only a freshly typed
+ * `{value}`; anything else (an env reference, the stored/redacted one) means
+ * "use the stored token", which the server sends only to the configured URL.
+ */
+export function testToken(value: unknown): SecretValue | undefined {
+  const s = secretState(value);
+  return s.kind === "value" ? (value as SecretValue) : undefined;
 }
 
 /** `doc` with `section.key = value` (immutably). */

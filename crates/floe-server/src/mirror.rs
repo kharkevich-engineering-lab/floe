@@ -101,7 +101,19 @@ pub async fn run_loop(state: Arc<AppState>) {
             stop.clone(),
         ));
         run_mirror(&state, cfg, &stop).await;
+        // The loop returns on its own only after its single pass when
+        // `interval = 0` ("startup only"): stay idle until the config changes
+        // or a "sync now" arrives, never restart it straight away.
+        idle_until_restart(&stop).await;
         watcher.abort();
+    }
+}
+
+/// Wait until `stop` is set (the watcher saw a config change or a sync
+/// request) or draining began.
+async fn idle_until_restart(stop: &AtomicBool) {
+    while !stop.load(Ordering::SeqCst) && !floe_wal::tasks::draining() {
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -273,6 +285,24 @@ mod tests {
         fn record_inventory(&self, rec: floe_catalog::InventoryRecord) {
             self.inventory.lock().push(rec);
         }
+    }
+
+    /// `interval = 0` = one pass, then idle: the supervisor must not restart
+    /// the loop until the watcher sets `stop` (a config change, "sync now").
+    #[tokio::test]
+    async fn interval_zero_idles_until_a_restart_is_asked_for() {
+        let stop = std::sync::Arc::new(super::AtomicBool::new(false));
+        let idle = tokio::spawn({
+            let stop = stop.clone();
+            async move { super::idle_until_restart(&stop).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert!(!idle.is_finished(), "returned without a restart request");
+        stop.store(true, super::Ordering::SeqCst);
+        tokio::time::timeout(std::time::Duration::from_secs(5), idle)
+            .await
+            .expect("returns once asked")
+            .unwrap();
     }
 
     /// A pass becomes one `discovery` run and one inventory row per change.

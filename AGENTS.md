@@ -602,7 +602,13 @@ sealed tokens (D61); the rest of D49 stands.
 (`ring`) under the 32-byte key in `FLOE_CONFIG_KEY` (`config_store.key_env`), the field path as associated data.
 `{value = …}` is input only (sealed before writing; 400 without a key), `{redacted = true}` is what reads return and
 means "keep" on write (D46's redaction rule). Resolution goes through one process-wide alias per secret field
-(`floe_config::secret::env_var`), refreshed on every apply.
+(`floe_config::secret::env_var`), refreshed on every apply and read at every use (a token entered later reaches
+follow/LFS without a restart; unresolved = anonymous). **Env names are host facts**: every `{env}` and `*_env` in the
+document must be allowed by the bootstrap `[config_store] allowed_env` (default `FLOE_SECRET_*` + the documented
+names; `key_env`, `FLOE__*`, `AWS_*` and the store/auth variables only when listed exactly), checked in
+`Config::with_runtime`, i.e. at publish (400) and at every apply. Test endpoints never send a caller-named env var,
+send the stored credential only to the applied URL, follow no redirect and echo no body (`docs/design/admin-ui.md`
+§5.3).
 
 **D62 — The admin API and the SPA's admin area (2026-10-04).** `/api/v1/admin/*` (and `/api-browser/v1/admin/*`):
 config get/put/validate/schema/history/revisions/rollback, overview, mirror status/preview/test/sync/pause/resume,

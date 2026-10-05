@@ -64,6 +64,25 @@ pub struct Bridge {
     serial: dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
 
+/// The webhook's signing secret: `None` = unsigned (no secret configured);
+/// an error when one is configured but resolves to nothing on this instance.
+pub(crate) fn webhook_secret(events: &floe_config::EventsConfig) -> anyhow::Result<Option<String>> {
+    match &events.webhook_secret {
+        None => Ok(None),
+        Some(s) => match s.reveal() {
+            Some(v) => Ok(Some(v)),
+            None => match s {
+                floe_config::Secret::Env(name) => anyhow::bail!(
+                    "events.webhook_secret names {name}, which is unset or empty on this instance; refusing to send unsigned webhooks"
+                ),
+                _ => anyhow::bail!(
+                    "events.webhook_secret is set but cannot be opened on this instance; refusing to send unsigned webhooks"
+                ),
+            },
+        },
+    }
+}
+
 impl Bridge {
     /// `None` unless this instance has the `events` role and a sink is
     /// configured (`events.webhook_url`).
@@ -76,13 +95,13 @@ impl Bridge {
         }
         let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
         if let Some(url) = &cfg.events.webhook_url {
-            sinks.push(Box::new(events::WebhookSink::new(
-                url.clone(),
-                cfg.events
-                    .webhook_secret
-                    .as_ref()
-                    .and_then(floe_config::Secret::reveal),
-            )));
+            match webhook_secret(&cfg.events) {
+                Ok(secret) => sinks.push(Box::new(events::WebhookSink::new(url.clone(), secret))),
+                // Fail closed: a configured secret that resolves to nothing must
+                // not turn into unsigned deliveries. The cursor stays where it is,
+                // so the events are delivered (signed) once the secret resolves.
+                Err(e) => tracing::error!(error = %e, "events webhook NOT delivering"),
+            }
         }
         // The GitHub facade's own sink (`docs/GITHUB.md` §Webhooks): the same
         // WAL entries, rendered as GitHub `push` / `create` / `delete`
@@ -541,6 +560,25 @@ pub fn spawn_sweeper(state: Arc<crate::AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A configured secret that resolves to nothing never becomes an unsigned
+    /// webhook: the sink is not built (the cursor waits), and the bridge says why.
+    #[test]
+    fn an_unresolvable_webhook_secret_refuses_to_deliver() {
+        let mut cfg = floe_config::Config::default();
+        cfg.events.webhook_url = Some("https://hooks.example/x".into());
+        assert_eq!(webhook_secret(&cfg.events).unwrap(), None, "no secret = unsigned, as configured");
+        cfg.events.webhook_secret = Some(floe_config::Secret::Value("s".into()));
+        assert_eq!(webhook_secret(&cfg.events).unwrap().as_deref(), Some("s"));
+        cfg.events.webhook_secret = Some(floe_config::Secret::Env("FLOE_SECRET_TEST_BRIDGE_UNSET".into()));
+        let err = webhook_secret(&cfg.events).unwrap_err().to_string();
+        assert!(err.contains("FLOE_SECRET_TEST_BRIDGE_UNSET"), "{err}");
+        let registry = floe_wal::Registry::new(
+            Arc::new(floe_store::memory::MemoryStore::new()),
+            Arc::new(cfg.clone()),
+        );
+        assert!(Bridge::new(&cfg, registry).is_none(), "no sink, no unsigned deliveries");
+    }
 
     #[test]
     fn manifest_object_names() {

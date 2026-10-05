@@ -531,9 +531,7 @@ fn load_config_without_runtime(path: &std::path::Path) -> Config {
             for section in floe_config::runtime::RUNTIME_SECTIONS {
                 table.remove(*section);
             }
-            let mut cfg = Config::parse(&toml::to_string(&table)?)?;
-            cfg.derive_mirror_token_env(|k| floe_config::secret::env_var(k).is_some());
-            Ok(cfg)
+            Ok(Config::parse(&toml::to_string(&table)?)?)
         });
     match loaded {
         Ok(c) => c,

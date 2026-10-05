@@ -1,7 +1,7 @@
 // Runs under `node --experimental-strip-types --test` (part of `pnpm run build`); no test framework.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { docsDiffer, errorsFor, fieldsOf, fromInput, globMatch, groupFields, secretInput, secretState, setIn, toInput, unclaimedErrors } from "./schema-form.ts";
+import { docsDiffer, errorsFor, listText, parseList, testToken, fieldsOf, fromInput, globMatch, groupFields, secretInput, secretState, setIn, toInput, unclaimedErrors } from "./schema-form.ts";
 
 const schema = {
   properties: {
@@ -76,6 +76,21 @@ test("secrets are never echoed", () => {
   assert.deepEqual(secretInput("env", " X "), { env: "X" });
   assert.deepEqual(secretInput("value", "ghp"), { value: "ghp" });
   assert.equal(secretInput("unset", ""), null);
+});
+
+test("list text keeps what is being typed", () => {
+  assert.equal(listText("a/*\n", ["a/*"]), "a/*\n", "a trailing Enter survives");
+  assert.equal(listText("a/*,", ["a/*"]), "a/*,", "a trailing comma survives");
+  assert.equal(listText("a/*\nb", ["a/*"]), "a/*", "an outside change (reset) wins");
+  assert.equal(listText("", ["x", "y"]), "x\ny");
+  assert.deepEqual(parseList(" a , b\n\n c "), ["a", "b", "c"]);
+});
+
+test("tests send only a typed token", () => {
+  assert.deepEqual(testToken({ value: "ghp" }), { value: "ghp" });
+  assert.equal(testToken({ env: "FLOE_GITHUB_TOKEN" }), undefined);
+  assert.equal(testToken({ redacted: true }), undefined);
+  assert.equal(testToken(undefined), undefined);
 });
 
 test("errors attach to their fields", () => {

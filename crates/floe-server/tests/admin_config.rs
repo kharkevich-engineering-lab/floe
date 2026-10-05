@@ -221,3 +221,49 @@ async fn schema_pause_resume_and_a_second_instance() -> TestResult {
     assert_eq!(pv["known"], 0);
     Ok(())
 }
+
+/// D61 / security review: a test endpoint never sends an env var the caller
+/// names, never sends the stored token to another URL, and never probes an
+/// IMDS-style or fragment URL; nothing reflects a probed body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_endpoints_cannot_exfiltrate_secrets() -> TestResult {
+    let server = start().await?;
+    let post = |path: &'static str, body: Value| {
+        let server = &server;
+        async move { call(server, reqwest::Method::POST, path, Some(ADMIN), Some(body)).await }
+    };
+    let (s, b) = post("/api/v1/admin/mirror/test", json!({"token": {"env": "FLOE_CONFIG_KEY"}})).await?;
+    assert_eq!(s, 400, "{b}");
+    let (s, b) = post("/api/v1/admin/mirror/test", json!({"api_url": "https://evil.example", "token": {"env": "AWS_SECRET_ACCESS_KEY"}})).await?;
+    assert_eq!(s, 400, "{b}");
+    let (s, b) = post("/api/v1/admin/mirror/test", json!({"api_url": "https://evil.example"})).await?;
+    assert_eq!(s, 400, "the stored token only goes to the configured api_url: {b}");
+    let (s, b) = post("/api/v1/admin/mirror/test", json!({"api_url": "http://169.254.169.254", "token": {"value": "x"}})).await?;
+    assert_eq!(s, 400, "{b}");
+    let (s, b) = post(
+        "/api/v1/admin/mirror/preview",
+        json!({"discover": true, "section": {"api_url": "https://evil.example", "token": {"env": "FLOE_CONFIG_KEY"}}}),
+    )
+    .await?;
+    assert_eq!(s, 400, "{b}");
+    for uri in ["http://169.254.169.254/latest/meta-data", "https://catalog.example/iceberg#x"] {
+        let (s, b) = post("/api/v1/admin/catalog/test", json!({"section": {"uri": uri, "warehouse": "wh"}})).await?;
+        assert_eq!(s, 400, "{uri}: {b}");
+    }
+    // A reachable-but-refusing probe answers a class, not a body.
+    let (s, b) = post("/api/v1/admin/catalog/test", json!({"section": {"uri": format!("{}/nothing", server.base_url), "warehouse": "wh"}})).await?;
+    assert_eq!(s, 200, "{b}");
+    assert!(b.get("body").is_none() && b.get("error_class").is_some(), "{b}");
+    // Publishing an env reference outside the host's allowlist is a 400.
+    let (s, b) = call(
+        &server,
+        reqwest::Method::PUT,
+        "/api/v1/admin/config",
+        Some(ADMIN),
+        Some(json!({"document": {"events": {"webhook_secret": {"env": "FLOE_CONFIG_KEY"}}}})),
+    )
+    .await?;
+    assert_eq!(s, 400, "{b}");
+    assert_eq!(b["errors"][0]["path"], "events.webhook_secret", "{b}");
+    Ok(())
+}

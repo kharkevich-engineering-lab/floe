@@ -116,7 +116,7 @@ async fn secrets_are_sealed_redacted_and_kept() {
         panic!("a value without a key must be refused")
     };
     assert_eq!(errors[0].path.as_deref(), Some("github_mirror.token"));
-    put(&nokey, &mirror_doc(&json!({"env": "MY_TOKEN"})), None).await.unwrap();
+    put(&nokey, &mirror_doc(&json!({"env": "FLOE_SECRET_MY_TOKEN"})), None).await.unwrap();
 
     let c = cs(&s, HistoryMode::Records, true);
     let p = put(&c, &mirror_doc(&json!({"value": "ghp_secret"})), None).await.unwrap();
@@ -125,7 +125,7 @@ async fn secrets_are_sealed_redacted_and_kept() {
     assert!(raw.contains("\"sealed\""));
     let token_change = p.record.diff.iter().find(|d| d.path == "github_mirror.token").unwrap();
     assert_eq!(token_change.new, Some(json!("(secret)")));
-    assert_eq!(token_change.old, Some(json!({"env": "MY_TOKEN"})));
+    assert_eq!(token_change.old, Some(json!({"env": "FLOE_SECRET_MY_TOKEN"})));
     // Reads are redacted.
     let red = redact(&p.record.document);
     assert_eq!(red["github_mirror"]["token"], json!({"redacted": true}));
@@ -195,11 +195,29 @@ async fn history_object_versions_with_bucket_versioning() {
 async fn auto_history_follows_the_bucket() {
     for versioned in [false, true] {
         let (_, s) = store(versioned);
-        let mode = resolve_history(HistoryMode::Auto, &s).await.unwrap();
+        let (mode, again) = resolve_history(HistoryMode::Auto, &s).await;
         assert_eq!(mode, if versioned { HistoryMode::Versions } else { HistoryMode::Records });
+        assert!(!again);
     }
-    let (_, s) = store(false);
-    assert!(resolve_history(HistoryMode::Versions, &s).await.is_err(), "fail closed");
+    // `versions` on a bucket without versioning: records now, probed again
+    // later — never a startup failure.
+    let (m, s) = store(false);
+    assert_eq!(resolve_history(HistoryMode::Versions, &s).await, (HistoryMode::Records, true));
+    let c = ConfigStore {
+        history: parking_lot::Mutex::new(HistoryMode::Records),
+        wanted: HistoryMode::Versions,
+        reprobe: std::sync::atomic::AtomicBool::new(true),
+        ..cs(&s, HistoryMode::Records, false)
+    };
+    put(&c, &json!({}), None).await.unwrap();
+    let h1: HistoryEntry = serde_json::from_slice(&m.get_bytes(&history_key(1)).await.unwrap().unwrap().1).unwrap();
+    assert!(h1.document.is_some(), "records while the bucket keeps no versions");
+    m.versioning.store(true, std::sync::atomic::Ordering::Relaxed);
+    put(&c, &json!({}), None).await.unwrap();
+    assert_eq!(c.history_mode(), HistoryMode::Versions, "the next publish probed again");
+    let h2: HistoryEntry = serde_json::from_slice(&m.get_bytes(&history_key(2)).await.unwrap().unwrap().1).unwrap();
+    assert!(h2.object_version.is_some());
+    assert_eq!(c.revision(1).await.unwrap().revision, 1, "mixed history still reads");
 }
 
 #[tokio::test]
@@ -238,7 +256,7 @@ async fn live_applies_new_revisions_and_reports_restarts() {
     assert_eq!(live.current().revision, 0);
     assert!(!live.current().cfg.github_mirror.enabled);
     let mut rx = live.subscribe();
-    put(&c, &mirror_doc(&json!({"env": "FLOE_TEST_LIVE_TOKEN"})), None).await.unwrap();
+    put(&c, &mirror_doc(&json!({"env": "FLOE_SECRET_TEST_LIVE_TOKEN"})), None).await.unwrap();
     assert_eq!(live.revalidate().await, 1);
     assert!(rx.has_changed().unwrap());
     let applied = rx.borrow_and_update().clone();
@@ -298,4 +316,77 @@ fn error_paths_are_extracted() {
     assert_eq!(error_path("events.webhook_url must be"), Some("events.webhook_url".into()));
     assert_eq!(error_path("server.listen is bad"), None);
     assert_eq!(error_path("unknown field `x`"), None);
+}
+
+/// D61: env references are host facts — a document naming a variable the host
+/// does not allow is refused at publish and, written behind floe's back, never
+/// applied.
+#[tokio::test]
+async fn env_references_outside_the_allowlist_are_refused() {
+    let (m, s) = store(false);
+    let c = Arc::new(cs(&s, HistoryMode::Records, false));
+    for name in ["FLOE_CONFIG_KEY", "AWS_SECRET_ACCESS_KEY", "FLOE__SERVER__AUTH__SESSION_SECRET", "HOME"] {
+        let Err(PublishError::Invalid(errors)) = put(&c, &mirror_doc(&json!({ "env": name })), None).await else {
+            panic!("{name} must be refused")
+        };
+        assert_eq!(errors[0].path.as_deref(), Some("github_mirror.token"), "{errors:?}");
+    }
+    let Err(PublishError::Invalid(errors)) =
+        put(&c, &json!({"catalog": {"token_env": "AWS_SECRET_ACCESS_KEY"}}), None).await
+    else {
+        panic!("a bearer env must follow the list")
+    };
+    assert_eq!(errors[0].path.as_deref(), Some("catalog.token_env"), "{errors:?}");
+    assert!(m.get_bytes(CURRENT).await.unwrap().is_none(), "nothing written");
+
+    // A document that bypassed publish (an older binary, a hand edit).
+    let live = live::Live::start(Arc::new(bootstrap()), c.clone()).await;
+    let forged = Record {
+        revision: 1,
+        updated_at: Utc::now(),
+        author: "mallory".into(),
+        message: String::new(),
+        rolled_back_from: None,
+        document: mirror_doc(&json!({"env": "FLOE_CONFIG_KEY"})),
+        diff: vec![],
+    };
+    s.put_bytes(CURRENT, serde_json::to_vec(&forged).unwrap(), PutMode::Create).await.unwrap();
+    assert_eq!(live.revalidate().await, 0, "never applied");
+    let err = live.status().apply_error.unwrap();
+    assert!(err.contains("allowed_env"), "{err}");
+}
+
+/// Concurrent revalidations (the loop and a publishing request): an older
+/// revision read before a newer one was applied changes nothing.
+#[tokio::test]
+async fn an_older_revision_is_never_applied_after_a_newer_one() {
+    let (_, s) = store(false);
+    let c = Arc::new(cs(&s, HistoryMode::Records, false));
+    let live = live::Live::start(Arc::new(bootstrap()), c.clone()).await;
+    put(&c, &json!({"events": {"sweep_interval": "1m"}}), None).await.unwrap();
+    let r1 = c.revision(1).await.unwrap();
+    put(&c, &json!({"events": {"sweep_interval": "2m"}}), None).await.unwrap();
+    assert_eq!(live.revalidate().await, 2);
+    live.apply(&r1, floe_store::Version::new("old"));
+    assert_eq!(live.current().revision, 2);
+    assert_eq!(live.current().cfg.events.sweep_interval, std::time::Duration::from_mins(2));
+    assert!(live.status().apply_error.is_none());
+}
+
+/// A token entered after startup reaches follow/LFS through the config the
+/// process started with (its `token_env` is this instance's alias, resolved at
+/// every call): no restart, and nothing to flag as restart-required.
+#[tokio::test]
+async fn a_token_entered_later_reaches_the_startup_config() {
+    let (_, s) = store(false);
+    let c = Arc::new(cs(&s, HistoryMode::Records, true));
+    let live = live::Live::start(Arc::new(bootstrap()), c.clone()).await;
+    let startup = live.current().cfg;
+    let alias = startup.github_mirror.token_env.clone();
+    assert!(alias.starts_with(floe_config::secret::GITHUB_MIRROR_TOKEN_ALIAS), "{alias}");
+    put(&c, &mirror_doc(&json!({"value": "ghp_entered_later"})), None).await.unwrap();
+    assert_eq!(live.revalidate().await, 1);
+    assert_eq!(floe_config::secret::env_var(&alias).as_deref(), Some("ghp_entered_later"));
+    assert_eq!(live.current().cfg.github_mirror.token_env, alias);
+    assert!(live.status().restart_required.is_empty());
 }

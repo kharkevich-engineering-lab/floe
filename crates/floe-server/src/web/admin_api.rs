@@ -484,26 +484,69 @@ async fn mirror_status(State(st): State<Arc<AppState>>, headers: HeaderMap) -> R
     ok(&json!({"summary": summary, "repos": repos}))
 }
 
+/// The token a test or dry run may send (D61, the security rule): a freshly
+/// typed `{value}` to any valid URL; "use stored" (absent, `{redacted}`,
+/// `{sealed}`) only to the applied URL; never a caller-supplied `{env}`, which
+/// would let an admin read any variable of this process.
+pub(crate) fn token_for_test(
+    applied_url: &str,
+    applied_token: &Secret,
+    url: &str,
+    requested: Option<&Secret>,
+) -> Result<Option<String>, &'static str> {
+    match requested {
+        Some(Secret::Env(_)) => Err(
+            "an env reference cannot be sent by a test: type the token, or test the stored one",
+        ),
+        Some(Secret::Value(v)) => Ok(Some(v.clone()).filter(|v| !v.trim().is_empty())),
+        None | Some(Secret::Redacted(_) | Secret::Sealed(_)) => {
+            if url.trim_end_matches('/') == applied_url.trim_end_matches('/') {
+                Ok(applied_token.reveal())
+            } else {
+                Err("the stored token is only sent to the configured api_url: type it again to test another URL")
+            }
+        }
+    }
+}
+
 /// The candidate `github_mirror` section of a request (`{"section": {...}}`),
-/// over the applied one for missing keys; a redacted or sealed token means
-/// "the applied token".
-fn candidate_section(st: &AppState, section: Option<&Value>) -> Result<GithubMirrorConfig, Refusal> {
+/// over the applied one for missing keys. For a dry run (`discover`) it must
+/// pass the section's checks (https or loopback URLs) and its token follows
+/// [`token_for_test`].
+fn candidate_section(
+    st: &AppState,
+    section: Option<&Value>,
+    discover: bool,
+) -> Result<GithubMirrorConfig, Refusal> {
+    let refuse = |m: &str| Box::new(bad_request(m));
     let applied = st.config.current().cfg.github_mirror.clone();
     let Some(section) = section else {
         return Ok(applied);
     };
     let mut base = serde_json::to_value(&applied).unwrap_or_default();
-    if let (Some(b), Some(s)) = (base.as_object_mut(), section.as_object()) {
-        for (k, v) in s {
-            b.insert(k.clone(), v.clone());
+    if let Some(b) = base.as_object_mut() {
+        // The applied token is never round-tripped through the request.
+        b.insert("token".into(), json!({"redacted": true}));
+        if let Some(s) = section.as_object() {
+            for (k, v) in s {
+                b.insert(k.clone(), v.clone());
+            }
         }
     }
     let doc: RuntimeConfig = serde_json::from_value(json!({ "github_mirror": base }))
-        .map_err(|e| Box::new(bad_request(&format!("github_mirror: {e}"))))?;
+        .map_err(|e| refuse(&format!("github_mirror: {e}")))?;
     let mut gm = doc.github_mirror;
-    if matches!(gm.token, Secret::Redacted(_) | Secret::Sealed(_)) {
-        gm.token = applied.token;
+    if discover {
+        gm.check().map_err(|e| refuse(&format!("{e:#}")))?;
+        let same_host = gm.git_url == applied.git_url;
+        let url = if same_host { gm.api_url.clone() } else { String::new() };
+        let token = token_for_test(&applied.api_url, &applied.token, &url, Some(&gm.token))
+            .map_err(|m| refuse(&format!("github_mirror.token: {m} (and git_url)")))?;
+        gm.token = token.map_or(Secret::Redacted(true), Secret::Value);
+    } else {
+        gm.token = Secret::Redacted(true);
     }
+    gm.token_env.clone_from(&applied.token_env);
     Ok(gm)
 }
 
@@ -561,7 +604,7 @@ async fn mirror_preview(State(st): State<Arc<AppState>>, headers: HeaderMap, bod
         Ok(b) => b,
         Err(r) => return *r,
     };
-    let gm = match candidate_section(&st, req.section.as_ref()) {
+    let gm = match candidate_section(&st, req.section.as_ref(), req.discover) {
         Ok(g) => g,
         Err(r) => return *r,
     };
@@ -662,21 +705,22 @@ async fn mirror_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: 
         Err(r) => return *r,
     };
     let applied = st.config.current().cfg.github_mirror.clone();
-    let api = req.api_url.unwrap_or(applied.api_url).trim_end_matches('/').to_string();
-    if !(api.starts_with("https://") || api.starts_with("http://localhost") || api.starts_with("http://127.0.0.1")) {
-        return bad_request("api_url must be https:// (or a loopback http URL)");
+    let api = req.api_url.unwrap_or_else(|| applied.api_url.clone());
+    if let Err(e) = floe_config::check_service_url("api_url", &api) {
+        return bad_request(&format!("{e:#}"));
     }
-    let token = match req.token {
-        None | Some(Secret::Redacted(_) | Secret::Sealed(_)) => applied.token.reveal(),
-        Some(s) => s.reveal(),
+    let token = match token_for_test(&applied.api_url, &applied.token, &api, req.token.as_ref()) {
+        Ok(t) => t,
+        Err(m) => return bad_request(m),
     };
     let Some(token) = token else {
-        return ok(&json!({"ok": false, "message": "no token: the reference is unset on this instance, or nothing was entered"}));
+        return ok(&json!({"ok": false, "error_class": "no_token", "message": "no token: the stored one is unset on this instance, or nothing was entered"}));
     };
-    let client = match reqwest::Client::builder().timeout(TEST_TIMEOUT).build() {
+    let client = match test_client() {
         Ok(c) => c,
         Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e.to_string()})),
     };
+    let started = std::time::Instant::now();
     let resp = client
         .get(format!("{api}/user"))
         .header("Authorization", format!("Bearer {}", token.trim()))
@@ -684,24 +728,58 @@ async fn mirror_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: 
         .header("User-Agent", concat!("floe/", env!("CARGO_PKG_VERSION")))
         .send()
         .await;
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     match resp {
-        Err(e) => ok(&json!({"ok": false, "message": format!("GitHub unreachable: {e}")})),
+        Err(e) => ok(&json!({"ok": false, "latency_ms": latency_ms, "error_class": transport_class(&e)})),
         Ok(r) => {
             let status = r.status().as_u16();
             let h = |k: &str| r.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
             let scopes = h("x-oauth-scopes");
             let remaining = h("x-ratelimit-remaining").and_then(|v| v.parse::<u64>().ok());
+            // Only the login is read from the body; nothing else is echoed.
             let body: Value = r.json().await.unwrap_or(Value::Null);
             let login = body.get("login").and_then(Value::as_str).map(str::to_string);
             ok(&json!({
                 "ok": (200..300).contains(&status),
                 "status": status,
+                "latency_ms": latency_ms,
+                "error_class": status_class(status),
                 "login": login,
                 "scopes": scopes,
                 "rate_remaining": remaining,
-                "message": body.get("message").and_then(Value::as_str),
             }))
         }
+    }
+}
+
+/// The client for test probes: bounded, and never following a redirect (a
+/// 3xx could otherwise carry a probe — and a token — somewhere else).
+fn test_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(TEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
+/// A fixed error class for a status (no response body is ever echoed).
+fn status_class(status: u16) -> Option<&'static str> {
+    match status {
+        200..=299 => None,
+        300..=399 => Some("redirect"),
+        401 | 403 => Some("unauthorized"),
+        404 => Some("not_found"),
+        400..=499 => Some("http_4xx"),
+        _ => Some("http_5xx"),
+    }
+}
+
+fn transport_class(e: &reqwest::Error) -> &'static str {
+    if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "unreachable"
+    } else {
+        "transport"
     }
 }
 
@@ -777,7 +855,9 @@ async fn pause_or_resume(st: Arc<AppState>, headers: HeaderMap, body: Bytes, pau
                 document: &document,
                 author: &principal.name,
                 message: &message,
-                base_revision: None,
+                // CAS on the revision the edit was made from: a concurrent
+                // admin's publish is a 409, never silently overwritten.
+                base_revision: Some(base),
                 rolled_back_from: None,
             },
             st.config.bootstrap(),
@@ -813,9 +893,12 @@ struct CatalogTestBody {
     section: Option<Value>,
 }
 
-/// `GET {uri}/v1/config?warehouse=…` (Iceberg REST) with the configured
-/// bearer; `OAuth2` client credentials and `SigV4` (D63) are the writer's own
-/// seams, so those probes go unauthenticated and say so.
+/// `GET {uri}/v1/config?warehouse=…` (Iceberg REST). The candidate section
+/// must validate like a published one; env names cannot be changed by a test
+/// (D61); a URI other than the applied one must be https (or loopback http)
+/// and gets no stored bearer. `OAuth2` client credentials and `SigV4` (D63) are
+/// the writer's own seams, so those probes go unauthenticated. The answer is
+/// the status, the latency and a fixed error class — never the response body.
 async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(r) = admin(&st, &headers).await {
         return *r;
@@ -826,7 +909,7 @@ async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body:
     };
     let applied = st.config.current().cfg.catalog.clone();
     let cat = match req.section {
-        None => applied,
+        None => applied.clone(),
         Some(section) => {
             let mut base = serde_json::to_value(&applied).unwrap_or_default();
             if let (Some(b), Some(s)) = (base.as_object_mut(), section.as_object()) {
@@ -840,56 +923,99 @@ async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body:
             }
         }
     };
-    let Some(uri) = cat.uri.as_deref().filter(|u| !u.trim().is_empty()) else {
-        return ok(&json!({"ok": false, "message": "catalog.uri is not set"}));
+    let probe = match catalog_probe(&applied, &cat) {
+        Ok(p) => p,
+        Err(m) => return bad_request(&m),
     };
-    let mut url = format!("{}/v1/config", uri.trim_end_matches('/'));
-    if let Some(w) = cat.warehouse.as_deref().filter(|w| !w.is_empty()) {
-        url.push_str("?warehouse=");
-        url.push_str(&urlencode(w));
-    }
-    let client = match reqwest::Client::builder().timeout(TEST_TIMEOUT).build() {
+    let client = match test_client() {
         Ok(c) => c,
         Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e.to_string()})),
     };
-    let mut rq = client.get(&url).header("Accept", "application/json");
+    let mut rq = client.get(&probe.url).header("Accept", "application/json");
+    if let Some(var) = &probe.bearer_env {
+        match floe_config::secret::env_var(var) {
+            Some(t) => rq = rq.header("Authorization", format!("Bearer {}", t.trim())),
+            None => {
+                return ok(&json!({"ok": false, "auth": probe.auth, "error_class": "no_token"}));
+            }
+        }
+    }
+    let started = std::time::Instant::now();
+    let resp = rq.send().await;
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match resp {
+        Err(e) => ok(&json!({"ok": false, "auth": probe.auth, "latency_ms": latency_ms, "error_class": transport_class(&e)})),
+        Ok(r) => {
+            let status = r.status().as_u16();
+            ok(&json!({
+                "ok": (200..300).contains(&status),
+                "auth": probe.auth,
+                "status": status,
+                "latency_ms": latency_ms,
+                "error_class": status_class(status),
+                "unauthenticated": probe.unauthenticated,
+            }))
+        }
+    }
+}
+
+/// What a catalog test may do.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CatalogProbe {
+    pub url: String,
+    pub auth: &'static str,
+    /// The env var whose bearer is sent (the applied one, to the applied URI only).
+    pub bearer_env: Option<String>,
+    /// The writer would authenticate (`OAuth2`, `SigV4`) but this probe does not.
+    pub unauthenticated: bool,
+}
+
+/// The security rules of `catalog/test`, pure (see [`catalog_test`]).
+pub(crate) fn catalog_probe(
+    applied: &floe_config::CatalogConfig,
+    cat: &floe_config::CatalogConfig,
+) -> Result<CatalogProbe, String> {
+    if cat.token_env != applied.token_env
+        || cat.credential_env != applied.credential_env
+        || cat.s3_access_key_env != applied.s3_access_key_env
+        || cat.s3_secret_key_env != applied.s3_secret_key_env
+    {
+        return Err("env names cannot be changed by a test: publish them first (D61)".into());
+    }
+    let mut check = cat.clone();
+    check.enabled = true;
+    check.validate().map_err(|e| format!("{e:#}"))?;
+    let uri = cat.uri.clone().unwrap_or_default();
+    let same = applied.uri.as_deref() == Some(uri.as_str());
+    if !same {
+        floe_config::check_service_url("catalog.uri", uri.trim_end_matches('/'))
+            .map_err(|e| format!("{e:#}"))?;
+    }
     let auth = match cat.auth {
         floe_config::CatalogAuth::None => "none",
         floe_config::CatalogAuth::Bearer if cat.token_env.is_some() => "bearer",
         floe_config::CatalogAuth::Bearer => "oauth2",
         floe_config::CatalogAuth::Sigv4 => "sigv4",
     };
-    if auth == "bearer"
-        && let Some(var) = &cat.token_env
-    {
-        match floe_config::secret::env_var(var) {
-            Some(t) => rq = rq.header("Authorization", format!("Bearer {}", t.trim())),
-            None => {
-                return ok(&json!({"ok": false, "auth": auth, "message": format!("catalog.token_env names {var}, which is unset on this instance")}));
-            }
+    let bearer_env = if auth == "bearer" {
+        if !same {
+            return Err("the stored bearer is only sent to the configured catalog.uri: publish the new uri first".into());
         }
+        cat.token_env.clone()
+    } else {
+        None
+    };
+    let mut url = format!("{}/v1/config", uri.trim_end_matches('/'));
+    if let Some(w) = cat.warehouse.as_deref().filter(|w| !w.is_empty()) {
+        url.push_str("?warehouse=");
+        url.push_str(&urlencode(w));
     }
-    match rq.send().await {
-        Err(e) => ok(&json!({"ok": false, "auth": auth, "url": url, "message": format!("unreachable: {e}")})),
-        Ok(r) => {
-            let status = r.status().as_u16();
-            let text = r.text().await.unwrap_or_default();
-            let excerpt: String = text.chars().take(500).collect();
-            let note = match auth {
-                "oauth2" => Some("OAuth2 client credentials are exchanged by the writer; this probe was unauthenticated"),
-                "sigv4" => Some("the writer signs every catalog request (SigV4, D63); this probe was unsigned, so a 403 here only proves the endpoint answers"),
-                _ => None,
-            };
-            ok(&json!({
-                "ok": (200..300).contains(&status),
-                "auth": auth,
-                "url": url,
-                "status": status,
-                "body": excerpt,
-                "message": note,
-            }))
-        }
-    }
+    Ok(CatalogProbe {
+        url,
+        auth,
+        bearer_env,
+        unauthenticated: matches!(auth, "oauth2" | "sigv4"),
+    })
 }
 
 fn urlencode(s: &str) -> String {
@@ -902,4 +1028,74 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tests_never_send_env_references_or_stored_tokens_elsewhere() {
+        let stored = Secret::Value("ghp_stored".into());
+        let api = "https://api.github.com";
+        assert!(token_for_test(api, &stored, api, Some(&Secret::Env("FLOE_CONFIG_KEY".into()))).is_err());
+        assert!(token_for_test(api, &stored, "https://evil.example", Some(&Secret::Env("FLOE_GITHUB_TOKEN".into()))).is_err());
+        // Stored: only to the applied URL.
+        assert_eq!(token_for_test(api, &stored, api, None).unwrap().as_deref(), Some("ghp_stored"));
+        assert_eq!(token_for_test(api, &stored, "https://api.github.com/", Some(&Secret::Redacted(true))).unwrap().as_deref(), Some("ghp_stored"));
+        assert!(token_for_test(api, &stored, "https://evil.example", None).is_err());
+        assert!(token_for_test(api, &stored, "https://evil.example", Some(&Secret::Sealed("v1.x.y".into()))).is_err());
+        // A typed value goes where the admin says.
+        assert_eq!(token_for_test(api, &stored, "https://ghe.example/api/v3", Some(&Secret::Value("typed".into()))).unwrap().as_deref(), Some("typed"));
+    }
+
+    fn catalog(uri: &str) -> floe_config::CatalogConfig {
+        floe_config::CatalogConfig {
+            enabled: true,
+            uri: Some(uri.into()),
+            warehouse: Some("wh".into()),
+            ..floe_config::CatalogConfig::default()
+        }
+    }
+
+    #[test]
+    fn catalog_probes_are_validated_and_scoped() {
+        let applied = catalog("http://rustfs:9000/iceberg");
+        // The applied (published) URI is probed as is.
+        let p = catalog_probe(&applied, &applied).unwrap();
+        assert_eq!(p.url, "http://rustfs:9000/iceberg/v1/config?warehouse=wh");
+        // A new URI: https or loopback only; IMDS, fragments, queries, userinfo refused.
+        for bad in [
+            "http://169.254.169.254/latest/meta-data",
+            "https://catalog.example/iceberg#x",
+            "https://catalog.example/iceberg?x=1",
+            "https://u:p@catalog.example/iceberg",
+            "ftp://catalog.example",
+        ] {
+            assert!(catalog_probe(&applied, &catalog(bad)).is_err(), "{bad}");
+        }
+        catalog_probe(&applied, &catalog("https://catalog.example/iceberg")).unwrap();
+        // Env names cannot be swapped by a test.
+        let mut c = applied.clone();
+        c.auth = floe_config::CatalogAuth::Bearer;
+        c.token_env = Some("FLOE_CONFIG_KEY".into());
+        assert!(catalog_probe(&applied, &c).unwrap_err().contains("env names"));
+        // The stored bearer only to the applied URI.
+        let mut bearer = catalog("https://catalog.example/iceberg");
+        bearer.auth = floe_config::CatalogAuth::Bearer;
+        bearer.token_env = Some("FLOE_CATALOG_TOKEN".into());
+        assert_eq!(catalog_probe(&bearer, &bearer).unwrap().bearer_env.as_deref(), Some("FLOE_CATALOG_TOKEN"));
+        let mut moved = bearer.clone();
+        moved.uri = Some("https://evil.example/iceberg".into());
+        assert!(catalog_probe(&bearer, &moved).is_err());
+    }
+
+    #[test]
+    fn error_classes_are_fixed() {
+        assert_eq!(status_class(200), None);
+        assert_eq!(status_class(302), Some("redirect"));
+        assert_eq!(status_class(403), Some("unauthorized"));
+        assert_eq!(status_class(418), Some("http_4xx"));
+        assert_eq!(status_class(502), Some("http_5xx"));
+    }
 }
