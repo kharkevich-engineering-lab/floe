@@ -95,7 +95,7 @@ impl RuntimeConfig {
     }
 
     /// Every env var name the document makes this host read, by path (D61):
-    /// `{ env = … }` secrets and the catalog's `*_env` keys.
+    /// `{ env = … }` secrets, the catalog's `*_env` keys and `codeintel.embed.api_key_env`.
     pub fn env_refs(&self) -> Vec<(&'static str, String)> {
         let mut out = Vec::new();
         if let Secret::Env(n) = &self.github_mirror.token {
@@ -122,6 +122,11 @@ impl RuntimeConfig {
             if !v.trim().is_empty() {
                 out.push((path, v.clone()));
             }
+        }
+        // D52: the embedder's API key is read from the env var the document names.
+        let key = &self.codeintel.embed.api_key_env;
+        if !key.trim().is_empty() {
+            out.push(("codeintel.embed.api_key_env", key.clone()));
         }
         out
     }

@@ -1020,4 +1020,21 @@ mcp_handle_secret = "0123456789abcdef0123456789abcdef"
         );
         assert!(crate::RuntimeConfig::from_toml("[mcp]\nhandle_secret = \"x\"\n").is_err());
     }
+
+    /// D61: the embedder's key variable is an env reference of the document, so it obeys
+    /// this host's `config_store.allowed_env` like every other one.
+    #[test]
+    fn the_embed_key_variable_is_an_allowed_env_reference() {
+        let mut rt = crate::RuntimeConfig::default();
+        rt.codeintel.embed.api_key_env = "AWS_SECRET_ACCESS_KEY".into();
+        let e = Config::default().with_runtime(&rt).unwrap_err().to_string();
+        assert!(e.starts_with("codeintel.embed.api_key_env:"), "{e}");
+        rt.codeintel.embed.api_key_env = "FLOE_SECRET_EMBED_KEY".into();
+        Config::default().with_runtime(&rt).unwrap();
+        assert!(
+            rt.env_refs()
+                .iter()
+                .any(|(p, n)| *p == "codeintel.embed.api_key_env" && n == "FLOE_SECRET_EMBED_KEY")
+        );
+    }
 }
