@@ -89,11 +89,13 @@ export function TasksOverlay({ repo }: { repo: string }) {
     };
   }, [open]);
 
-  // Nothing to show: render nothing (and close a stale dropdown).
-  useEffect(() => {
-    if (running.length === 0 && justDone.length === 0) setOpen(false);
-  }, [running.length, justDone.length]);
-  if (running.length === 0 && justDone.length === 0) return null;
+  // Nothing to show: render nothing, and close a stale dropdown so it does not pop open again
+  // with the next task. Adjusting state while rendering (not in an effect) skips a wasted
+  // commit; React re-renders this component right away with the new state.
+  if (running.length === 0 && justDone.length === 0) {
+    if (open) setOpen(false);
+    return null;
+  }
 
   // The headline task: the one with progress, else the newest running, else the latest finished.
   const head = running.find((t) => t.progress) ?? running[0] ?? justDone[justDone.length - 1];

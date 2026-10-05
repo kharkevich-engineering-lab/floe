@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, type AdminOverview, type TlsStatus } from "../api";
-import { useData } from "../data";
+import { useData, useNow } from "../data";
 import { Box } from "../components/Layout";
 import { RouteBoundary } from "../components/Loading";
 import { relTime } from "../format";
@@ -27,6 +27,7 @@ const STALE_MS = 10 * 60 * 1000;
 /** Page 1: what runs where — the config revision, this and every other instance, the mirror, the catalog, TLS. */
 export function OverviewPage() {
   const o: AdminOverview = useData("admin:overview", () => api.admin.overview(), 10_000);
+  const now = useNow(10_000);
   const c = o.config;
   const me = o.instance;
   const counts = Object.entries(o.mirror.counts ?? {}).filter(([, n]) => n > 0);
@@ -78,7 +79,7 @@ export function OverviewPage() {
             </thead>
             <tbody>
               {o.instances.map((i) => {
-                const stale = Date.now() - new Date(i.seen_at).getTime() > STALE_MS;
+                const stale = now - new Date(i.seen_at).getTime() > STALE_MS;
                 return (
                   <tr key={i.instance} className={stale ? "stale" : undefined}>
                     <td>
@@ -140,6 +141,7 @@ export function OverviewPage() {
 /** Read-only TLS status from `GET /api/v1/tls` (D59). TLS is bootstrap config (`[server.tls]`): never editable here. */
 function TlsBox() {
   const tls: TlsStatus = useData("admin:tls", () => api.tls(), 60_000);
+  const now = useNow(60_000);
   if (tls.mode === "off") {
     return (
       <p className="muted pad">
@@ -147,7 +149,7 @@ function TlsBox() {
       </p>
     );
   }
-  const expires = tls.not_after ? new Date(tls.not_after).getTime() - Date.now() : null;
+  const expires = tls.not_after ? new Date(tls.not_after).getTime() - now : null;
   const soon = expires !== null && expires < 14 * 24 * 3600 * 1000;
   return (
     <>
