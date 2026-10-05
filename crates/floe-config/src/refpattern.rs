@@ -17,6 +17,18 @@ use std::fmt;
 /// Namespaces follow never touches: archived tips and the fetch scratch.
 pub const RESERVED: [&str; 2] = ["refs/archive/", "refs/follow/"];
 
+/// `name` is inside namespace `ns` (`"refs/archive/"`, with its trailing `/`):
+/// under it, or the ref of the namespace's own name (`refs/archive`), which would
+/// shadow it (git cannot hold `refs/archive` and `refs/archive/…` together).
+pub fn in_namespace(name: &str, ns: &str) -> bool {
+    name.starts_with(ns) || Some(name) == ns.strip_suffix('/')
+}
+
+/// `name` is in one of the [`RESERVED`] namespaces (or shadows one).
+pub fn is_reserved(name: &str) -> bool {
+    RESERVED.iter().any(|ns| in_namespace(name, ns))
+}
+
 /// A parsed, validated, non-empty `follow` list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefPatterns {
@@ -66,7 +78,7 @@ impl RefPatterns {
             if !pattern.starts_with("refs/") {
                 return Err(err("must start with refs/"));
             }
-            if RESERVED.iter().any(|r| pattern.starts_with(r)) {
+            if is_reserved(pattern) {
                 return Err(err("refs/archive/ and refs/follow/ are reserved"));
             }
             if pattern.matches('*').count() > 1 {
@@ -90,7 +102,7 @@ impl RefPatterns {
     /// Whether follow keeps `name` equal to upstream's: a positive entry matches,
     /// no negative entry does, and the name is outside the reserved namespaces.
     pub fn matches(&self, name: &str) -> bool {
-        if RESERVED.iter().any(|r| name.starts_with(r)) {
+        if is_reserved(name) {
             return false;
         }
         let mut positive = false;
@@ -117,7 +129,8 @@ impl RefPatterns {
     /// The fetch refspecs: positive `+<src>:refs/follow/<src minus refs/>` (a `*`
     /// carries through), negative `^<src>`, then `^refs/archive/*` and
     /// `^refs/follow/*` so an upstream that is itself a floe never feeds its archive
-    /// into ours. Exact entries in `skip` are left out. Empty when no positive
+    /// into ours, and `^refs/archive` / `^refs/follow`, an upstream ref of the
+    /// namespace's own name that would shadow ours. Exact entries in `skip` are left out. Empty when no positive
     /// refspec is left (nothing to fetch).
     pub fn refspecs(&self, skip: &[&str]) -> Vec<String> {
         let mut out: Vec<String> = self
@@ -136,6 +149,7 @@ impl RefPatterns {
             return Vec::new();
         }
         out.extend(RESERVED.iter().map(|r| format!("^{r}*")));
+        out.extend(RESERVED.iter().filter_map(|r| r.strip_suffix('/')).map(|r| format!("^{r}")));
         out
     }
 }
@@ -235,6 +249,10 @@ mod tests {
             // Reserved namespaces are never followed, whatever the patterns say.
             (&["refs/*"], "refs/archive/1/refs/heads/main", false),
             (&["refs/*"], "refs/follow/heads/main", false),
+            // ... nor the namespaces' own names, which would shadow them.
+            (&["refs/*"], "refs/archive", false),
+            (&["refs/*"], "refs/follow", false),
+            (&["refs/*"], "refs/archives", true),
             (&["refs/*"], "refs/pull/1/head", true),
             (&["refs/*"], "HEAD", false),
         ];
@@ -248,6 +266,8 @@ mod tests {
             &["refs/heads/**"],
             &["refs/*/x/*"],
             &["refs/archive/*"],
+            &["refs/archive"],
+            &["refs/follow", "refs/heads/*"],
             &["^refs/follow/x", "refs/heads/*"],
             &["refs/heads/a..b"],
             &["refs/heads/a b"],
@@ -279,10 +299,12 @@ mod tests {
                 "^refs/heads/dependabot/*",
                 "^refs/archive/*",
                 "^refs/follow/*",
+                "^refs/archive",
+                "^refs/follow",
             ]
         );
         assert_eq!(pats.exact().collect::<Vec<_>>(), vec!["refs/tags/v1"]);
-        assert_eq!(pats.refspecs(&["refs/tags/v1"]).len(), 4);
+        assert_eq!(pats.refspecs(&["refs/tags/v1"]).len(), 6);
         // Every positive skipped: nothing to fetch.
         let only = p(&["refs/heads/main"]).unwrap();
         assert!(only.refspecs(&["refs/heads/main"]).is_empty());

@@ -228,6 +228,7 @@ pub async fn publish(
         atomic: true,
         ..Default::default()
     };
+    super::write::enforce_policy(st, handle, &txn).await?;
     handle.local().fill_peeled(&mut txn);
     let meta = HashMap::from([
         ("principal".to_string(), super::auth::USER_LOGIN.to_string()),

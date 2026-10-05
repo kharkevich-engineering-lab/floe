@@ -206,7 +206,11 @@ is receive-pack's, minus the wire:
 3. `git pack-objects --revs --stdout` over `<new> ^<base>`: a self-contained pack of exactly the new
    objects.
 4. `LocalRepo::ingest_pack` indexes it into the serving copy, `check_connectivity_async` proves the tip.
-5. `RepoHandle::publish_push_synced` — pack PUT ∥ log PUT → manifest CAS.
+5. The repository's push policy (`docs/POLICY.md`: `policy.json` and the built-in `archive-immutable`
+   rule), evaluated as receive-pack does (`write::enforce_policy`, principal `USER_LOGIN`); a refused ref
+   is a 403 (GraphQL `FORBIDDEN`) and nothing is published. A GitHub mirror's read-only repository stays
+   read-only through the facade too.
+6. `RepoHandle::publish_push_synced` — pack PUT ∥ log PUT → manifest CAS.
 
 Ref create, fast-forward update, force update and delete are the same call with no pack.
 

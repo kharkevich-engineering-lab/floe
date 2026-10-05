@@ -44,6 +44,9 @@ pub enum GhError {
     },
     /// Bad Request (400).
     BadRequest(String),
+    /// Forbidden (403): the repository's push policy (`docs/POLICY.md`, the
+    /// built-in `archive-immutable` rule included) refuses the ref write.
+    Forbidden(String),
     /// Service Unavailable (503) — the repository's objects are not available on this host
     /// (placement, a too-large pack set). Carries `Retry-After`.
     Unavailable(String),
@@ -68,6 +71,7 @@ impl GhError {
             GhError::Conflict(_) => StatusCode::CONFLICT,
             GhError::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             GhError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            GhError::Forbidden(_) => StatusCode::FORBIDDEN,
             GhError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             GhError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -78,6 +82,7 @@ impl GhError {
             GhError::NotFound(_) => "Not Found".to_string(),
             GhError::Conflict(m)
             | GhError::BadRequest(m)
+            | GhError::Forbidden(m)
             | GhError::Unavailable(m)
             | GhError::Internal(m) => m.clone(),
             GhError::Validation { message, .. } => message.clone(),

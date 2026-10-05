@@ -48,9 +48,10 @@ pub const ARCHIVE_REFS: &str = "refs/archive/";
 
 /// Under [`ARCHIVE_REFS`], or the ref `refs/archive` itself: a ref of that
 /// exact name would shadow the namespace (git cannot hold `refs/archive` and
-/// `refs/archive/<ts>/…` at once), so follow could never archive again.
+/// `refs/archive/<ts>/…` at once), so follow could never archive again. The
+/// same rule follow's patterns use (`floe_config::refpattern::in_namespace`).
 fn in_archive_namespace(name: &str) -> bool {
-    name.starts_with(ARCHIVE_REFS) || Some(name) == ARCHIVE_REFS.strip_suffix('/')
+    floe_config::refpattern::in_namespace(name, ARCHIVE_REFS)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

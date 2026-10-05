@@ -432,6 +432,81 @@ async fn upstream_globs_force_push_and_delete_are_archived_then_applied() -> any
     Ok(())
 }
 
+/// An upstream ref named exactly `refs/archive` (legal upstream, where nothing
+/// archives) would shadow our archive namespace: `refs/*` must not follow it, or
+/// every later archive (`refs/archive/<ts>/…`) fails with a D/F conflict and
+/// follow is wedged for the repository.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_upstream_ref_named_refs_archive_is_never_followed() -> anyhow::Result<()> {
+    let up = step!("start upstream", Server::start())?;
+    step!("put upstream repo", up.put_repo("u", "src"))?;
+    // The upstream is a floe too: replace its built-in archive-immutable rule
+    // by one that lets the exact `refs/archive` ref be created there.
+    let put = reqwest::Client::new()
+        .put(format!("{}/u/src/policy", up.base_url))
+        .header("content-type", "application/json")
+        .body(
+            r#"{"version":1,"rules":[{"name":"archive-immutable","match":{"refs":["refs/archive/**"]},"effect":{"protect":{"restricts":["delete"]}}}]}"#,
+        )
+        .send()
+        .await?;
+    assert!(put.status().is_success(), "{}", put.text().await?);
+    let up_url = up.repo_url("u", "src");
+    let work = tempfile::tempdir()?;
+    git_in(work.path(), &["init", "-q", "-b", "main"])?;
+    git_in(work.path(), &["config", "user.email", "t@t"])?;
+    git_in(work.path(), &["config", "user.name", "Tester"])?;
+    let c1 = commit(work.path(), "a")?;
+    let c2 = commit(work.path(), "b")?;
+    git(
+        &["push", "-q", &up_url, "main", &format!("{c1}:refs/archive")],
+        work.path(),
+    )?;
+    assert!(ls_remote(&up_url)?.contains_key("refs/archive"));
+
+    let fo = step!(
+        "start follower",
+        Server::start_with_tweak(|c| {
+            c.server.roles = vec![floe_config::Role::Serve, floe_config::Role::Maintain];
+            c.upstream.git = Some(up_url.clone());
+            c.upstream.follow = vec!["refs/*".into()];
+            c.compaction.enabled = false;
+            c.bundles.enabled = false;
+            c.wal.snapshot_every_entries = 0;
+        })
+    )?;
+    step!("put follower repo", fo.put_repo("o", "r"))?;
+    let fo_url = fo.repo_url("o", "r");
+
+    let r = step!("round 1", floe_server::follow::run_pass(&fo.state))?;
+    assert_eq!((r.behind, r.published, r.failed), (1, 1, 0), "{r:?}");
+    let refs = ls_remote(&fo_url)?;
+    assert_eq!(refs.get("refs/heads/main"), Some(&c2), "{refs:?}");
+    assert!(!refs.contains_key("refs/archive"), "{refs:?}");
+
+    // Archiving still works: upstream rewinds main, the old tip is archived.
+    git(
+        &["push", "-q", "--force", &up_url, &format!("{c1}:refs/heads/main")],
+        work.path(),
+    )?;
+    let r = step!("round 2", floe_server::follow::run_pass(&fo.state))?;
+    assert_eq!((r.behind, r.published, r.failed), (1, 1, 0), "{r:?}");
+    let refs = ls_remote(&fo_url)?;
+    assert_eq!(refs.get("refs/heads/main"), Some(&c1), "{refs:?}");
+    assert!(!refs.contains_key("refs/archive"), "{refs:?}");
+    let archived: Vec<_> = refs
+        .iter()
+        .filter(|(k, _)| k.starts_with("refs/archive/") && k.ends_with("/refs/heads/main"))
+        .collect();
+    assert_eq!(archived.len(), 1, "{refs:?}");
+    assert_eq!(archived[0].1, &c2);
+
+    // And nothing is left to do.
+    let r = step!("round 3", floe_server::follow::run_pass(&fo.state))?;
+    assert_eq!((r.behind, r.published, r.failed), (0, 0, 0), "{r:?}");
+    Ok(())
+}
+
 async fn start_op(
     fo: &Server,
     id: &floe_git::RepoId,

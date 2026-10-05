@@ -261,6 +261,40 @@ pub async fn delete_ref(st: &Arc<AppState>, id: &RepoId, ref_name: &str) -> GhRe
     publish(st, &handle, ref_name, &current, "", None).await
 }
 
+/// The repository's push policy (`docs/POLICY.md`, `policy.json` plus the
+/// built-in `archive-immutable` rule), evaluated for the facade's writes exactly
+/// as receive-pack does (same `force` rule: an update that does not descend
+/// from the old tip, or cannot be told, is a force). The facade is a writer
+/// like any other: a read-only mirror stays read-only, `refs/archive/*` stays
+/// follow's. Any denied ref refuses the write (403).
+pub(super) async fn enforce_policy(
+    st: &Arc<AppState>,
+    handle: &Arc<floe_wal::RepoHandle>,
+    txn: &RefTransaction,
+) -> GhResult<()> {
+    let policy = crate::policy::load(&st.store, handle.id())
+        .await
+        .map_err(|e| GhError::Internal(format!("load policy: {e}")))?;
+    let mut forces = std::collections::HashSet::<String>::new();
+    if policy.has_protect() {
+        let local = handle.local();
+        for u in &txn.updates {
+            if crate::policy::classify(&u.old_oid, &u.new_oid) == crate::policy::RefOp::Update
+                && !matches!(local.is_ancestor(&u.old_oid, &u.new_oid).await, Ok(true))
+            {
+                forces.insert(u.name.clone());
+            }
+        }
+    }
+    let ev = crate::policy::evaluate(&policy, super::auth::USER_LOGIN, txn, |u| {
+        forces.contains(&u.name)
+    });
+    if let Some((name, Err(why))) = ev.per_ref.iter().find(|(_, r)| r.is_err()) {
+        return Err(GhError::Forbidden(format!("{name}: {why}")));
+    }
+    Ok(())
+}
+
 /// One ref update through the WAL: pack PUT ∥ log PUT → manifest CAS. `old`
 /// and `new` are hex or `""` (create / delete).
 async fn publish(
@@ -281,6 +315,7 @@ async fn publish(
         atomic: true,
         ..Default::default()
     };
+    enforce_policy(st, handle, &txn).await?;
     handle.local().fill_peeled(&mut txn);
     let meta = HashMap::from([
         ("principal".to_string(), super::auth::USER_LOGIN.to_string()),
