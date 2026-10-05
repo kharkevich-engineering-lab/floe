@@ -201,7 +201,7 @@ authoritative nameservers answer them, lets the CA validate, removes the records
 instance revalidates the certificate object with a conditional GET every `poll_interval` and swaps a new one
 in for the next handshake — no restart, no dropped connection. The first order on an empty bucket is a
 `tls-acme` task and `/readyz` stays 503 until a certificate is loaded. Renewal starts `renew_before` (30 days)
-ahead; failures back off exponentially (shared through the bucket, so restarts do not hammer the CA) and log a
+ahead, but never before two thirds of the certificate's lifetime (short-lived profiles stay safe); failures back off exponentially (shared through the bucket, so restarts do not hammer the CA) and log a
 warning while the certificate is inside that window. Admins see domains, expiry, issuer and the last error at
 `GET /api/v1/tls` (`repos.tls()`); `/readyz` shows expiry and issuer.
 

@@ -549,8 +549,12 @@ revalidates `cert.json` by conditional GET every `poll_interval` (10 min; 10 s w
 the new certificate into a rustls `ResolvesServerCert` — new handshakes get it, established connections keep
 theirs, no restart. The first order is a `tls-acme` task (D13) and `/readyz` is 503 until a certificate is loaded.
 Propagation is checked against the zone's authoritative nameservers (or `resolvers`) with a timeout before the CA
-is asked; challenge records are always deleted. Failures back off 5 min × 2ⁿ up to 6 h (≥ 1 h after
-`rateLimited`), recorded in `tls/acme/<set>/status.json` so restarts and other instances honour it; inside
+is asked; challenge records are always deleted. Renewal starts `renew_before` ahead of expiry but never before two thirds
+of the certificate's lifetime (a 60-day `renew_before` against a 6- or 45-day profile would otherwise make every
+fresh certificate due and re-order every poll), and no order starts within 12 h of a successful one while a
+certificate is loaded. Failures back off 5 min × 2ⁿ up to 6 h (≥ 1 h after
+`rateLimited`), recorded in `tls/acme/<set>/status.json`, which every instance revalidates with `cert.json`, so
+restarts and other instances honour it and show the same state; inside
 `renew_before` a failing renewal logs a warning every pass. Crates: `instant-acme` (maintained, RFC 8555, used
 over our reqwest), `hickory-resolver` (propagation), `x509-parser` (expiry/issuer). Surfaces: `GET /api/v1/tls`
 (admin: domains, expiry, issuer, last renewal and error — the admin UI's overview), `instance.tls` on `/readyz`

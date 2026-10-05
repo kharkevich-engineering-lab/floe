@@ -47,7 +47,8 @@ mode = "off"                      # "off"   — plain HTTP/1.1 + h2c (local deve
 # email = "ops@example.com"       # ACME account contact (expiry notices). Required.
 directory = "https://acme-v02.api.letsencrypt.org/directory"   # default: Let's Encrypt production; "staging" =
                                   # Let's Encrypt staging (try it first); any other https:// RFC 8555 directory works
-renew_before = "30d"              # renew when the certificate expires within this window (1d..60d)
+renew_before = "30d"              # renew when the certificate expires within this window (1d..60d), but never before
+                                  # two thirds of its lifetime; and never within 12h of the last successful order
 storage_key_env = "FLOE_TLS_STORAGE_KEY"   # env var with the 32-byte key (base64 or hex) sealing private keys in the
                                   # bucket — `openssl rand -base64 32`; the same on every instance; startup fails without it
 challenge = "dns-01"              # the only accepted value: HTTP-01 / TLS-ALPN-01 are refused (every instance behind

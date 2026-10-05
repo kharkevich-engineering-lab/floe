@@ -11,13 +11,15 @@
 //! `<dir>` hashes the directory URL, `<set>` the directory + the sorted domain list, so a
 //! changed `domains` (or staging → production) is a new certificate, never a mix-up.
 //!
-//! Every instance runs [`AcmeManager::run`]: revalidate `cert.json` with a conditional GET
-//! (one ~15 ms request per `poll_interval`; 304 = nothing to do), install a changed one into
-//! the [`CertResolver`] (hot swap). When the certificate is missing or within
-//! `renew_before` of expiry, the instance that wins the lease orders a new one — narrated as
-//! a task (D13) — and writes it; the others pick it up on their next poll. Failures back off
+//! Every instance runs [`AcmeManager::run`]: revalidate `cert.json` and `status.json` with
+//! conditional GETs (~15 ms each per `poll_interval`; 304 = nothing to do), install a changed
+//! certificate into the [`CertResolver`] (hot swap). When the certificate is missing or past
+//! its renewal point ([`renew_at`]: `renew_before` ahead of expiry, never before two thirds of
+//! the lifetime), the instance that wins the lease orders a new one — narrated as a task
+//! (D13) — and writes it; the others pick it up on their next poll. Failures back off
 //! exponentially, recorded in `status.json` so a restart or another instance does not hammer
-//! the CA (Let's Encrypt limits failed validations per hostname per hour).
+//! the CA (Let's Encrypt limits failed validations per hostname per hour), and no order starts
+//! within 12 h of a successful one while a certificate is loaded.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -50,6 +52,15 @@ const BACKOFF_BASE: Duration = Duration::from_mins(5);
 const BACKOFF_MAX: Duration = Duration::from_hours(6);
 /// A CA that says "rate limited" is not asked again for at least this long.
 const RATE_LIMITED_MIN: Duration = Duration::from_hours(1);
+/// Guard against a renewal loop: while a certificate is loaded, no new order starts within
+/// this long of the last successful one, whatever `due()` says. The lifetime clamp in
+/// [`renew_at`] already keeps a fresh certificate from being due; this bounds the damage of
+/// any future bug to two orders a day (Let's Encrypt allows 5 duplicate certificates a week).
+const MIN_ORDER_SPACING: Duration = Duration::from_hours(12);
+/// Never renew before this fraction of the lifetime has passed (certbot and Let's Encrypt's
+/// ARI guidance renew around two thirds in).
+const LIFETIME_NUM: i64 = 2;
+const LIFETIME_DEN: i64 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredAccount {
@@ -73,11 +84,15 @@ pub(crate) struct StoredCert {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct StoredStatus {
+/// `tls/acme/<set>/status.json`: the renewal state every instance shares.
+pub struct StoredStatus {
     #[serde(default)]
     pub last_attempt_at: Option<String>,
     #[serde(default)]
     pub last_success_at: Option<String>,
+    /// Unix seconds of `last_success_at` (the order-spacing guard).
+    #[serde(default)]
+    pub last_success_unix: Option<i64>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -100,6 +115,27 @@ pub enum Tick {
     Issued,
     /// This instance tried and failed (recorded in `status.json`).
     Failed(String),
+}
+
+/// When a certificate valid from `not_before` to `not_after` (unix seconds) is due for
+/// renewal: `renew_before` ahead of expiry, but never before two thirds of its lifetime.
+/// Without the clamp a `renew_before` longer than the CA's lifetime (60 days against a 6- or
+/// 45-day profile) makes every freshly issued certificate due at once, and the lease holder
+/// re-orders every poll until the CA's rate limits stop it.
+pub fn renew_at(not_before: i64, not_after: i64, renew_before: Duration) -> i64 {
+    let lifetime = not_after.saturating_sub(not_before).max(0);
+    let window = not_after.saturating_sub(i64::try_from(renew_before.as_secs()).unwrap_or(i64::MAX));
+    let floor = not_before.saturating_add(lifetime / LIFETIME_DEN * LIFETIME_NUM);
+    window.max(floor)
+}
+
+/// Unix time before which no new order may start because one succeeded recently
+/// (`None` = no restriction). Applies only while a certificate is loaded: a missing
+/// certificate is always worth an order.
+fn spacing_until(status: &StoredStatus, loaded: bool) -> Option<i64> {
+    let last = status.last_success_unix.filter(|_| loaded)?;
+    let until = last.saturating_add(i64::try_from(MIN_ORDER_SPACING.as_secs()).unwrap_or(i64::MAX));
+    (until > now()).then_some(until)
 }
 
 /// Retry delay after `failures` consecutive failures.
@@ -159,6 +195,7 @@ impl std::fmt::Debug for AcmeManager {
 #[derive(Default)]
 struct Local {
     cert_version: Option<Version>,
+    status_version: Option<Version>,
     status: StoredStatus,
     load_error: Option<String>,
 }
@@ -286,34 +323,57 @@ impl AcmeManager {
         format!("{}#{field}", self.cert_key())
     }
 
-    /// Whether the loaded certificate is missing or within `renew_before` of expiry.
+    /// Whether the loaded certificate is missing or past its renewal point ([`renew_at`]).
     pub fn due(&self) -> bool {
         match self.resolver.current() {
             None => true,
-            Some(l) => {
-                let renew = i64::try_from(self.cfg.renew_before.as_secs()).unwrap_or(i64::MAX);
-                now() >= l.info.not_after.saturating_sub(renew)
-            }
+            Some(l) => now() >= renew_at(l.info.not_before, l.info.not_after, self.cfg.renew_before),
         }
     }
 
-    async fn read_status(&self) -> StoredStatus {
-        match self.store.get_bytes(&self.status_key()).await {
-            Ok(Some((_, b))) => serde_json::from_slice(&b).unwrap_or_default(),
-            Ok(None) | Err(_) => StoredStatus::default(),
+    /// Revalidate `status.json` (conditional GET, like `cert.json`) so every instance shows
+    /// the shared renewal state — a failure another instance recorded, and its clearing when
+    /// some instance succeeds — not only the one that ordered.
+    pub async fn refresh_status(&self) -> StoredStatus {
+        let key = self.status_key();
+        let known = self.local().status_version.clone();
+        let got = match &known {
+            Some(v) => self.store.get_if_changed(&key, v).await,
+            None => self.store.get_bytes(&key).await,
+        };
+        let mut l = self.local();
+        match got {
+            Ok(Some((meta, b))) => {
+                l.status = serde_json::from_slice(&b).unwrap_or_default();
+                l.status_version = Some(meta.version);
+            }
+            // Unchanged (304): keep what we have.
+            Ok(None) if known.is_some() => {}
+            Ok(None) | Err(StoreError::NotFound { .. }) => {
+                l.status = StoredStatus::default();
+                l.status_version = None;
+            }
+            Err(e) => tracing::debug!(error = %e, "reading tls status.json failed"),
         }
+        l.status.clone()
     }
 
     async fn write_status(&self, s: &StoredStatus) {
         let body = serde_json::to_vec_pretty(s).unwrap_or_default();
-        if let Err(e) = self
+        let written = self
             .store
             .put_bytes(&self.status_key(), body, PutMode::Overwrite)
-            .await
-        {
-            tracing::warn!(error = %e, "writing tls status.json failed");
+            .await;
+        let mut l = self.local();
+        l.status = s.clone();
+        match written {
+            Ok(meta) => l.status_version = Some(meta.version),
+            Err(e) => {
+                l.status_version = None;
+                drop(l);
+                tracing::warn!(error = %e, "writing tls status.json failed");
+            }
         }
-        self.local().status = s.clone();
     }
 
     /// One pass: revalidate, then order if due and nobody else is.
@@ -321,11 +381,10 @@ impl AcmeManager {
         if let Err(e) = self.refresh().await {
             tracing::debug!(error = %e, "tls refresh failed");
         }
+        let status = self.refresh_status().await;
         if !self.due() {
             return Ok(Tick::Fresh);
         }
-        let status = self.read_status().await;
-        self.local().status = status.clone();
         if let Some(l) = self.resolver.current()
             && let Some(err) = &status.last_error
         {
@@ -342,6 +401,21 @@ impl AcmeManager {
         {
             return Ok(Tick::BackingOff(at));
         }
+        if let Some(until) = spacing_until(&status, self.resolver.is_loaded()) {
+            tracing::warn!(until = %rfc3339(until), "TLS certificate looks due right after a successful order; holding off (renewal-loop guard)");
+            return Ok(Tick::BackingOff(until));
+        }
+        self.with_lease(narrator, false).await
+    }
+
+    /// Order a certificate now, under the lease, ignoring `due()`, backoff and the spacing
+    /// guard. For tests (Pebble renewal) and a future operator action; never called by the
+    /// poll loop.
+    pub async fn renew_now(&self, narrator: &dyn Narrator) -> Result<Tick> {
+        self.with_lease(narrator, true).await
+    }
+
+    async fn with_lease(&self, narrator: &dyn Narrator, force: bool) -> Result<Tick> {
         let Some(lease) = floe_store::coord::try_acquire(
             self.store.clone(),
             &self.lease_key(),
@@ -355,7 +429,7 @@ impl AcmeManager {
         };
         let guard = Arc::new(tokio::sync::Mutex::new(lease));
         let hb = floe_store::coord::LeaseGuard::spawn_heartbeat(guard.clone(), LEASE_HEARTBEAT, LEASE_TTL);
-        let out = self.under_lease(narrator).await;
+        let out = self.under_lease(narrator, force).await;
         hb.abort();
         let _ = hb.await;
         if let Ok(m) = Arc::try_unwrap(guard)
@@ -366,17 +440,22 @@ impl AcmeManager {
         out
     }
 
-    async fn under_lease(&self, narrator: &dyn Narrator) -> Result<Tick> {
+    async fn under_lease(&self, narrator: &dyn Narrator, force: bool) -> Result<Tick> {
         // Another instance may have finished an order between our poll and the lease.
         let _ = self.refresh().await;
-        if !self.due() {
-            return Ok(Tick::Fresh);
-        }
-        let mut status = self.read_status().await;
-        if let Some(at) = status.next_attempt_at
-            && at > now()
-        {
-            return Ok(Tick::BackingOff(at));
+        let mut status = self.refresh_status().await;
+        if !force {
+            if !self.due() {
+                return Ok(Tick::Fresh);
+            }
+            if let Some(at) = status.next_attempt_at
+                && at > now()
+            {
+                return Ok(Tick::BackingOff(at));
+            }
+            if let Some(until) = spacing_until(&status, self.resolver.is_loaded()) {
+                return Ok(Tick::BackingOff(until));
+            }
         }
         let what = if self.resolver.is_loaded() { "renewal" } else { "first order" };
         let task = narrator.begin(
@@ -390,7 +469,9 @@ impl AcmeManager {
                 status.failures = 0;
                 status.last_error = None;
                 status.next_attempt_at = None;
-                status.last_success_at = Some(rfc3339(now()));
+                let issued = now();
+                status.last_success_at = Some(rfc3339(issued));
+                status.last_success_unix = Some(issued);
                 self.write_status(&status).await;
                 metrics::counter!("floe_tls_acme_orders_total", "ok" => "true").increment(1);
                 task.finish(Ok(format!("certificate issued, valid until {}", rfc3339(not_after))));
@@ -709,6 +790,165 @@ impl HttpClient for ReqwestHttp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use floe_store::memory::MemoryStore;
+
+    const DAY: i64 = 86_400;
+
+    #[test]
+    fn renewal_point_is_clamped_to_two_thirds_of_the_lifetime() {
+        let issued = 1_800_000_000;
+        // 90 days, 30 days ahead: day 60 either way.
+        assert_eq!(renew_at(issued, issued + 90 * DAY, Duration::from_hours(30 * 24)), issued + 60 * DAY);
+        // 6-day profile with the maximum renew_before (60 days): day 4, not "already due".
+        assert_eq!(renew_at(issued, issued + 6 * DAY, Duration::from_hours(60 * 24)), issued + 4 * DAY);
+        // 45 days with 30 ahead: day 30 (the window would say day 15).
+        assert_eq!(renew_at(issued, issued + 45 * DAY, Duration::from_hours(30 * 24)), issued + 30 * DAY);
+        // 45 days with 60 ahead: still day 30.
+        assert_eq!(renew_at(issued, issued + 45 * DAY, Duration::from_hours(60 * 24)), issued + 30 * DAY);
+        // A short renew_before still wins when it is later than the floor.
+        assert_eq!(renew_at(issued, issued + 90 * DAY, Duration::from_hours(24)), issued + 89 * DAY);
+    }
+
+    #[test]
+    fn spacing_guard_holds_renewals_after_a_recent_success() {
+        let recent = StoredStatus {
+            last_success_unix: Some(now() - 60),
+            ..StoredStatus::default()
+        };
+        let until = spacing_until(&recent, true).expect("held");
+        assert!(until > now() && until <= now() + 12 * 3600);
+        assert!(spacing_until(&recent, false).is_none(), "a missing certificate is always ordered");
+        let old = StoredStatus {
+            last_success_unix: Some(now() - 13 * 3600),
+            ..StoredStatus::default()
+        };
+        assert!(spacing_until(&old, true).is_none());
+        assert!(spacing_until(&StoredStatus::default(), true).is_none());
+    }
+
+    struct NoDns;
+    #[async_trait::async_trait]
+    impl DnsProvider for NoDns {
+        fn name(&self) -> &'static str {
+            "none"
+        }
+        async fn create_txt(&self, _: &str, _: &str) -> Result<TxtRecord> {
+            anyhow::bail!("no DNS in unit tests")
+        }
+        async fn delete_txt(&self, _: &TxtRecord) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+    fn instance(store: &DynStore, renew_before: Duration) -> (Arc<AcmeManager>, Arc<CertResolver>) {
+        let resolver = CertResolver::new();
+        let cfg = AcmeConfig {
+            domains: vec!["floe.test".into()],
+            email: "ops@floe.test".into(),
+            renew_before,
+            ..AcmeConfig::default()
+        };
+        let mgr = AcmeManager::new(
+            &cfg,
+            store.clone(),
+            resolver.clone(),
+            SealKey::parse(KEY).unwrap(),
+            Arc::new(NoDns),
+            reqwest::Client::new(),
+        )
+        .unwrap();
+        (mgr, resolver)
+    }
+
+    /// A certificate valid from `from` to `to` (unix seconds).
+    fn pem(from: i64, to: i64) -> (String, String) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["floe.test".to_string()]).unwrap();
+        let epoch = rcgen::date_time_ymd(1970, 1, 1);
+        params.not_before = epoch + Duration::from_secs(u64::try_from(from).unwrap());
+        params.not_after = epoch + Duration::from_secs(u64::try_from(to).unwrap());
+        (params.self_signed(&key).unwrap().pem(), key.serialize_pem())
+    }
+
+    /// Write `cert.json` the way the orderer does.
+    async fn publish(mgr: &AcmeManager, chain: &str, key: &str) {
+        let stored = StoredCert {
+            version: 1,
+            directory: mgr.directory.clone(),
+            domains: mgr.domains.clone(),
+            chain_pem: chain.to_string(),
+            key_sealed: mgr.seal.seal(mgr.aad("key").as_bytes(), key.as_bytes()).unwrap(),
+            not_after: 0,
+            issued_at: String::new(),
+            issued_by: "test".into(),
+        };
+        mgr.store
+            .put_bytes(&mgr.cert_key(), serde_json::to_vec(&stored).unwrap(), PutMode::Overwrite)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn freshly_issued_short_lived_certificates_are_not_due() {
+        let store: DynStore = MemoryStore::shared();
+        let (mgr, _) = instance(&store, Duration::from_hours(60 * 24));
+        for days in [6, 45] {
+            let (chain, key) = pem(now() - 60, now() + days * DAY);
+            publish(&mgr, &chain, &key).await;
+            assert!(mgr.refresh().await.unwrap());
+            assert!(!mgr.due(), "a fresh {days}-day certificate with renew_before = 60d");
+            assert_eq!(mgr.tick(&crate::LogNarrator).await.unwrap(), Tick::Fresh);
+        }
+        // Past two thirds of a 6-day lifetime it is due.
+        let (chain, key) = pem(now() - 5 * DAY, now() + DAY);
+        publish(&mgr, &chain, &key).await;
+        assert!(mgr.refresh().await.unwrap());
+        assert!(mgr.due());
+    }
+
+    #[tokio::test]
+    async fn every_instance_follows_the_shared_status() {
+        let store: DynStore = MemoryStore::shared();
+        let (a, ra) = instance(&store, Duration::from_hours(30 * 24));
+        // A presents an expiring certificate and another instance's renewal has been failing.
+        let (old_chain, old_key) = pem(now() - 80 * DAY, now() + DAY);
+        ra.set(load_pem(&old_chain, &old_key).unwrap());
+        let failing = StoredStatus {
+            failures: 3,
+            last_error: Some("boom".into()),
+            next_attempt_at: Some(now() + 3600),
+            ..StoredStatus::default()
+        };
+        store
+            .put_bytes(&a.status_key(), serde_json::to_vec(&failing).unwrap(), PutMode::Overwrite)
+            .await
+            .unwrap();
+        assert!(matches!(a.tick(&crate::LogNarrator).await.unwrap(), Tick::BackingOff(_)));
+        let st = a.status();
+        assert_eq!((st.failures, st.last_error.as_deref()), (3, Some("boom")));
+
+        // B renews: new cert.json, cleared status.json.
+        let (b, _) = instance(&store, Duration::from_hours(30 * 24));
+        let (chain, key) = pem(now() - 60, now() + 90 * DAY);
+        publish(&b, &chain, &key).await;
+        let ok = StoredStatus {
+            last_success_at: Some(rfc3339(now())),
+            last_success_unix: Some(now()),
+            ..StoredStatus::default()
+        };
+        b.write_status(&ok).await;
+
+        // A's next pass installs the certificate (fresh, so it returns early) and still drops
+        // the stale failure state.
+        assert_eq!(a.tick(&crate::LogNarrator).await.unwrap(), Tick::Fresh);
+        let st = a.status();
+        assert_eq!(st.failures, 0, "{st:?}");
+        assert!(st.last_error.is_none() && st.next_attempt_at.is_none(), "{st:?}");
+        assert!(st.last_renewal_at.is_some());
+        assert!(!st.renewal_due);
+    }
 
     #[test]
     fn backoff_doubles_and_caps() {

@@ -247,11 +247,19 @@ async fn pebble_dns01_order_share_and_renew() {
     assert_eq!(rb.current().unwrap().info.fingerprint, la.info.fingerprint);
     assert!(!inst_b.refresh().await.unwrap(), "unchanged object: 304, nothing installed");
 
-    // Instance C considers everything due (renew_before > validity) and renews; A and B swap
-    // the new certificate in on their next revalidation — no restart.
+    // Instance C has the widest renew_before config allows (60 days), longer than some CA
+    // profiles' lifetime: the fresh certificate is still not due (renewal never starts before
+    // two thirds of the lifetime), so no re-order loop. A forced renewal then swaps in on A
+    // and B at their next revalidation — no restart.
     let rc = CertResolver::new();
-    let inst_c = manager(&pebble, &store, rc.clone(), &http, Duration::from_hours(8760));
-    assert_eq!(inst_c.tick(&LogNarrator).await.unwrap(), Tick::Issued);
+    let inst_c = manager(&pebble, &store, rc.clone(), &http, Duration::from_hours(60 * 24));
+    assert_eq!(inst_c.tick(&LogNarrator).await.unwrap(), Tick::Fresh, "fresh is never due");
+    assert_eq!(inst_c.renew_now(&LogNarrator).await.unwrap(), Tick::Issued);
+    assert_eq!(
+        inst_c.tick(&LogNarrator).await.unwrap(),
+        Tick::Fresh,
+        "a just-issued certificate does not trigger another order"
+    );
     let renewed = rc.current().unwrap().info.fingerprint.clone();
     assert_ne!(renewed, la.info.fingerprint);
     assert!(inst_a.refresh().await.unwrap());
@@ -259,4 +267,8 @@ async fn pebble_dns01_order_share_and_renew() {
     assert_eq!(handshake(ra.clone(), &root, "floe.test").await, renewed);
     assert!(inst_b.refresh().await.unwrap());
     assert_eq!(rb.current().unwrap().info.fingerprint, renewed);
+    // Every instance sees the shared status of C's success.
+    let shared = inst_b.refresh_status().await;
+    assert_eq!(shared.failures, 0);
+    assert!(shared.last_success_unix.is_some());
 }
