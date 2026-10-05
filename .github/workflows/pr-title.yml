@@ -1,7 +1,8 @@
 name: Semantic Pull Request
 on:
   pull_request_target:
-    types: [opened, edited, synchronize]
+    # labeled/unlabeled so adding or removing an ignoreLabels label re-runs the check.
+    types: [opened, edited, synchronize, labeled, unlabeled]
 
 permissions:
   pull-requests: read
@@ -28,6 +29,12 @@ jobs:
             build
             test
           requireScope: false
+          # Dependabot's multi-ecosystem group titles are generated ("chore(deps): Bump the
+          # "all" group ...") with a capitalised subject we cannot configure; its PRs carry the
+          # `dependencies` label, so skip the subject check for them. The chore(deps) prefix
+          # comes from .github/dependabot.yml's commit-message setting.
+          ignoreLabels: |
+            dependencies
           subjectPattern: ^(?![A-Z]).+$
           subjectPatternError: |
             The subject "{subject}" found in the pull request title "{title}"
