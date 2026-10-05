@@ -424,13 +424,7 @@ async fn mirror_summary(st: &AppState) -> Value {
 
 fn catalog_json(st: &AppState, c: &floe_config::CatalogConfig) -> Value {
     let up = st.catalog.as_ref().map(|w| w.is_up());
-    let auth = if c.token_env.is_some() {
-        "bearer"
-    } else if c.credential_env.is_some() {
-        "oauth2"
-    } else {
-        "none"
-    };
+    let auth = serde_json::to_value(c.auth).unwrap_or_default();
     json!({
         "compiled": cfg!(feature = "catalog"),
         "enabled": c.enabled,
@@ -814,9 +808,9 @@ struct CatalogTestBody {
     section: Option<Value>,
 }
 
-/// `GET {uri}/v1/config?warehouse=…` with the configured bearer (Iceberg
-/// REST). Other auth schemes (`OAuth2` client credentials, `SigV4`) report
-/// what would be used without a call until the writer's auth seam exposes them.
+/// `GET {uri}/v1/config?warehouse=…` (Iceberg REST) with the configured
+/// bearer; `OAuth2` client credentials and `SigV4` (D63) are the writer's own
+/// seams, so those probes go unauthenticated and say so.
 async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(r) = admin(&st, &headers).await {
         return *r;
@@ -854,17 +848,21 @@ async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body:
         Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": e.to_string()})),
     };
     let mut rq = client.get(&url).header("Accept", "application/json");
-    let mut auth = "none";
-    if let Some(var) = &cat.token_env {
-        auth = "bearer";
+    let auth = match cat.auth {
+        floe_config::CatalogAuth::None => "none",
+        floe_config::CatalogAuth::Bearer if cat.token_env.is_some() => "bearer",
+        floe_config::CatalogAuth::Bearer => "oauth2",
+        floe_config::CatalogAuth::Sigv4 => "sigv4",
+    };
+    if auth == "bearer"
+        && let Some(var) = &cat.token_env
+    {
         match floe_config::secret::env_var(var) {
             Some(t) => rq = rq.header("Authorization", format!("Bearer {}", t.trim())),
             None => {
                 return ok(&json!({"ok": false, "auth": auth, "message": format!("catalog.token_env names {var}, which is unset on this instance")}));
             }
         }
-    } else if cat.credential_env.is_some() {
-        auth = "oauth2";
     }
     match rq.send().await {
         Err(e) => ok(&json!({"ok": false, "auth": auth, "url": url, "message": format!("unreachable: {e}")})),
@@ -872,9 +870,11 @@ async fn catalog_test(State(st): State<Arc<AppState>>, headers: HeaderMap, body:
             let status = r.status().as_u16();
             let text = r.text().await.unwrap_or_default();
             let excerpt: String = text.chars().take(500).collect();
-            let note = (auth == "oauth2").then_some(
-                "OAuth2 client credentials are exchanged by the writer; this probe was unauthenticated",
-            );
+            let note = match auth {
+                "oauth2" => Some("OAuth2 client credentials are exchanged by the writer; this probe was unauthenticated"),
+                "sigv4" => Some("the writer signs every catalog request (SigV4, D63); this probe was unsigned, so a 403 here only proves the endpoint answers"),
+                _ => None,
+            };
             ok(&json!({
                 "ok": (200..300).contains(&status),
                 "auth": auth,

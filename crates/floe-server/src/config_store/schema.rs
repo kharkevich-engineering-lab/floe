@@ -43,8 +43,11 @@ const ANNOTATIONS: &[(&str, &str, &str, &str, &str)] = &[
     ("catalog.uri", "Catalog URI", "Iceberg REST catalog base URL.", "url", "Connection"),
     ("catalog.warehouse", "Warehouse", "Warehouse identifier (S3 Tables: the table bucket).", "", "Connection"),
     ("catalog.namespace", "Namespace", "Created when absent (create_tables).", "", "Connection"),
-    ("catalog.token_env", "Bearer token env var", "Env var holding a bearer token for the catalog (never the value).", "env", "Authentication"),
-    ("catalog.credential_env", "OAuth2 credential env var", "Env var holding client_id:client_secret.", "env", "Authentication"),
+    ("catalog.auth", "Authentication", "none; bearer (token_env or credential_env); sigv4 (every request signed with the s3_* credentials, D63).", "", "Authentication"),
+    ("catalog.sigv4_service", "SigV4 service", "Signing name: s3 for RustFS /iceberg, s3tables for AWS S3 Tables.", "", "Authentication"),
+    ("catalog.sigv4_region", "SigV4 region", "Unset = s3_region.", "", "Authentication"),
+    ("catalog.token_env", "Bearer token env var", "auth = bearer: env var holding a bearer token (never the value).", "env", "Authentication"),
+    ("catalog.credential_env", "OAuth2 credential env var", "auth = bearer: env var holding client_id:client_secret.", "env", "Authentication"),
     ("catalog.s3_endpoint", "Data-file S3 endpoint", "When the catalog does not vend credentials.", "url", "Data files"),
     ("catalog.s3_region", "Data-file S3 region", "", "", "Data files"),
     ("catalog.s3_access_key_env", "Access key env var", "", "env", "Data files"),
@@ -62,7 +65,10 @@ const ANNOTATIONS: &[(&str, &str, &str, &str, &str)] = &[
     ("events.sweep_interval", "Sweep interval", "Backstop sweep over every repository. 0 = off.", "duration", "Webhook"),
 ];
 
-const ENUMS: &[(&str, &[&str])] = &[("github_mirror.on_rewrite", &["archive", "refuse"])];
+const ENUMS: &[(&str, &[&str])] = &[
+    ("github_mirror.on_rewrite", &["archive", "refuse"]),
+    ("catalog.auth", &["none", "bearer", "sigv4"]),
+];
 
 /// Optional keys whose default is `null`, and the type they take when set.
 const NULLABLE_STRINGS: &[&str] = &[
@@ -71,6 +77,7 @@ const NULLABLE_STRINGS: &[&str] = &[
     "catalog.token_env",
     "catalog.credential_env",
     "catalog.s3_endpoint",
+    "catalog.sigv4_region",
     "events.webhook_url",
 ];
 

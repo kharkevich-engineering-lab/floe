@@ -2881,10 +2881,8 @@ max_buffer_rows = 100
 
     #[test]
     fn catalog_sigv4_parses_and_fails_closed() {
-        let mut c = Config::parse(
+        let rt = RuntimeConfig::from_toml(
             r#"
-[store]
-bucket = "b"
 [catalog]
 enabled = true
 uri = "http://rustfs:9000/iceberg"
@@ -2894,6 +2892,7 @@ s3_region = "eu-west-1"
 "#,
         )
         .unwrap();
+        let mut c = Config::default().with_runtime(&rt).unwrap();
         c.validate().unwrap();
         assert_eq!(c.catalog.auth, CatalogAuth::Sigv4);
         assert_eq!(c.catalog.sigv4_service, "s3");
@@ -2918,7 +2917,7 @@ s3_region = "eu-west-1"
         c.catalog.s3_secret_key_env = String::new();
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("s3_secret_key_env"), "{err}");
-        let err = Config::parse("[catalog]\nauth = \"basic\"\n").unwrap_err();
+        let err = RuntimeConfig::from_toml("[catalog]\nauth = \"basic\"\n").unwrap_err();
         assert!(format!("{err:#}").contains("unknown variant"), "{err:#}");
     }
 
