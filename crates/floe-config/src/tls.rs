@@ -96,13 +96,13 @@ impl Default for AcmeConfig {
             domains: vec![],
             email: String::new(),
             directory: LETSENCRYPT_PRODUCTION.to_string(),
-            renew_before: Duration::from_secs(30 * 86_400),
+            renew_before: Duration::from_hours(720),
             storage_key_env: "FLOE_TLS_STORAGE_KEY".to_string(),
             challenge: DNS01.to_string(),
             dns_provider: DnsProvider::Cloudflare,
-            propagation_timeout: Duration::from_secs(300),
+            propagation_timeout: Duration::from_mins(5),
             resolvers: vec![],
-            poll_interval: Duration::from_secs(600),
+            poll_interval: Duration::from_mins(10),
             cloudflare: CloudflareConfig::default(),
         }
     }
@@ -235,7 +235,7 @@ impl AcmeConfig {
             !self.storage_key_env.trim().is_empty(),
             "server.tls.acme.storage_key_env must name the env var with the key that seals private keys in the bucket"
         );
-        let day = Duration::from_secs(86_400);
+        let day = Duration::from_hours(24);
         anyhow::ensure!(
             self.renew_before >= day && self.renew_before <= 60 * day,
             "server.tls.acme.renew_before must be between 1 day and 60 days (got {:?})",
@@ -369,9 +369,9 @@ mod tests {
         assert!(t.validate().unwrap_err().to_string().contains("https://"));
 
         let mut t = acme();
-        t.acme.renew_before = Duration::from_secs(3600);
+        t.acme.renew_before = Duration::from_hours(1);
         assert!(t.validate().is_err());
-        t.acme.renew_before = Duration::from_secs(61 * 86_400);
+        t.acme.renew_before = Duration::from_hours(1464);
         assert!(t.validate().is_err());
 
         let mut t = acme();
@@ -401,7 +401,7 @@ zone_id = "0123abcd"
         )
         .unwrap();
         t.validate().unwrap();
-        assert_eq!(t.acme.renew_before, Duration::from_secs(20 * 86_400));
+        assert_eq!(t.acme.renew_before, Duration::from_hours(480));
         assert_eq!(t.acme.cloudflare.api_token_env, "CLOUDFLARE_API_TOKEN");
         assert!(
             toml::from_str::<TlsConfig>("mode = \"self_signed\"").is_err(),
