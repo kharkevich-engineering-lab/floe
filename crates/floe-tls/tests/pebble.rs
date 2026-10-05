@@ -134,13 +134,13 @@ fn manager(
 /// `root_pem` sees for SNI `name`.
 async fn handshake(resolver: Arc<CertResolver>, root_pem: &str, name: &str) -> String {
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config(resolver).unwrap()));
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let (s, _) = l.accept().await.unwrap();
-        let mut tls = acceptor.accept(s).await.unwrap();
-        let mut b = [0u8; 1];
-        tls.read_exact(&mut b).await.unwrap();
+        let (sock, _) = listener.accept().await.unwrap();
+        let mut tls = acceptor.accept(sock).await.unwrap();
+        let mut byte = [0u8; 1];
+        tls.read_exact(&mut byte).await.unwrap();
         tls.write_all(b"k").await.unwrap();
         tls.shutdown().await.unwrap();
     });
@@ -171,11 +171,11 @@ async fn handshake(resolver: Arc<CertResolver>, root_pem: &str, name: &str) -> S
 #[tokio::test]
 #[ignore = "needs Pebble + pebble-challtestsrv (CI job acme-pebble)"]
 async fn pebble_dns01_order_share_and_renew() {
-    let Some(e) = env() else {
+    let Some(pebble) = env() else {
         eprintln!("FLOE_TEST_PEBBLE_* not set; skipping the Pebble ACME test");
         return;
     };
-    let ca = std::fs::read(&e.ca).unwrap();
+    let ca = std::fs::read(&pebble.ca).unwrap();
     let http = reqwest::Client::builder()
         .add_root_certificate(reqwest::Certificate::from_pem(&ca).unwrap())
         .build()
@@ -184,11 +184,11 @@ async fn pebble_dns01_order_share_and_renew() {
 
     // Instance A orders the first certificate.
     let ra = CertResolver::new();
-    let a = manager(&e, &store, ra.clone(), &http, Duration::from_hours(24));
-    assert!(a.due(), "nothing loaded yet");
-    assert!(!a.status().loaded);
-    let t = a.tick(&LogNarrator).await.unwrap();
-    assert_eq!(t, Tick::Issued, "{:?}", a.status());
+    let inst_a = manager(&pebble, &store, ra.clone(), &http, Duration::from_hours(24));
+    assert!(inst_a.due(), "nothing loaded yet");
+    assert!(!inst_a.status().loaded);
+    let tick = inst_a.tick(&LogNarrator).await.unwrap();
+    assert_eq!(tick, Tick::Issued, "{:?}", inst_a.status());
     let la = ra.current().expect("installed");
     let mut sans = la.info.sans.clone();
     sans.sort();
@@ -199,37 +199,37 @@ async fn pebble_dns01_order_share_and_renew() {
         "issued: {} .. {} by {}",
         la.info.not_before, la.info.not_after, la.info.issuer
     );
-    assert!(!a.due(), "a fresh certificate is not due with renew_before = 1 day");
-    let st = a.status();
+    assert!(!inst_a.due(), "a fresh certificate is not due with renew_before = 1 day");
+    let st = inst_a.status();
     assert!(st.loaded && st.last_error.is_none() && st.last_renewal_at.is_some(), "{st:?}");
 
     // Bucket state: sealed keys only.
-    let (_, cert_json) = store.get_bytes(&a.cert_key()).await.unwrap().unwrap();
+    let (_, cert_json) = store.get_bytes(&inst_a.cert_key()).await.unwrap().unwrap();
     let cert_json = String::from_utf8(cert_json.to_vec()).unwrap();
     assert!(cert_json.contains("BEGIN CERTIFICATE"));
     assert!(!cert_json.contains("PRIVATE KEY"), "the private key is sealed");
     let mut accounts = 0;
     let keys: Vec<String> = {
-        let mut s = store.list("tls/", None);
-        let mut v = Vec::new();
-        while let Some(m) = s.next().await {
-            v.push(m.unwrap().key);
+        let mut stream = store.list("tls/", None);
+        let mut found = Vec::new();
+        while let Some(meta) = stream.next().await {
+            found.push(meta.unwrap().key);
         }
-        v
+        found
     };
-    for k in &keys {
-        if k.ends_with("account.json") {
+    for key in &keys {
+        if key.ends_with("account.json") {
             accounts += 1;
-            let (_, b) = store.get_bytes(k).await.unwrap().unwrap();
-            let b = String::from_utf8(b.to_vec()).unwrap();
-            assert!(!b.contains("key_pkcs8"), "the account key is sealed: {b}");
+            let (_, body) = store.get_bytes(key).await.unwrap().unwrap();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert!(!body.contains("key_pkcs8"), "the account key is sealed: {body}");
         }
     }
     assert_eq!(accounts, 1, "{keys:?}");
 
     // The issued chain verifies against Pebble's root, for the name and the wildcard.
     let root = http
-        .get(format!("{}/roots/0", e.management))
+        .get(format!("{}/roots/0", pebble.management))
         .send()
         .await
         .unwrap()
@@ -242,21 +242,21 @@ async fn pebble_dns01_order_share_and_renew() {
 
     // Instance B (same bucket) picks it up by conditional GET; it does not order.
     let rb = CertResolver::new();
-    let b = manager(&e, &store, rb.clone(), &http, Duration::from_hours(24));
-    assert_eq!(b.tick(&LogNarrator).await.unwrap(), Tick::Fresh);
+    let inst_b = manager(&pebble, &store, rb.clone(), &http, Duration::from_hours(24));
+    assert_eq!(inst_b.tick(&LogNarrator).await.unwrap(), Tick::Fresh);
     assert_eq!(rb.current().unwrap().info.fingerprint, la.info.fingerprint);
-    assert!(!b.refresh().await.unwrap(), "unchanged object: 304, nothing installed");
+    assert!(!inst_b.refresh().await.unwrap(), "unchanged object: 304, nothing installed");
 
     // Instance C considers everything due (renew_before > validity) and renews; A and B swap
     // the new certificate in on their next revalidation — no restart.
     let rc = CertResolver::new();
-    let c = manager(&e, &store, rc.clone(), &http, Duration::from_hours(8760));
-    assert_eq!(c.tick(&LogNarrator).await.unwrap(), Tick::Issued);
+    let inst_c = manager(&pebble, &store, rc.clone(), &http, Duration::from_hours(8760));
+    assert_eq!(inst_c.tick(&LogNarrator).await.unwrap(), Tick::Issued);
     let renewed = rc.current().unwrap().info.fingerprint.clone();
     assert_ne!(renewed, la.info.fingerprint);
-    assert!(a.refresh().await.unwrap());
+    assert!(inst_a.refresh().await.unwrap());
     assert_eq!(ra.current().unwrap().info.fingerprint, renewed);
     assert_eq!(handshake(ra.clone(), &root, "floe.test").await, renewed);
-    assert!(b.refresh().await.unwrap());
+    assert!(inst_b.refresh().await.unwrap());
     assert_eq!(rb.current().unwrap().info.fingerprint, renewed);
 }
