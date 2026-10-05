@@ -298,8 +298,10 @@ mod tests {
     #[test]
     fn off_and_files_validate_and_reject_foreign_keys() {
         TlsConfig::default().validate().unwrap();
-        let mut t = TlsConfig::default();
-        t.cert = Some("/c.pem".into());
+        let mut t = TlsConfig {
+            cert: Some("/c.pem".into()),
+            ..TlsConfig::default()
+        };
         assert!(t.validate().is_err(), "off with a cert");
         t.mode = TlsMode::Files;
         assert!(t.validate().unwrap_err().to_string().contains("both"));
