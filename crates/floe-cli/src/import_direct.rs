@@ -194,7 +194,7 @@ fn tips_hash(snap: &RefSnapshot) -> String {
         h.update(b"\n");
     }
     h.update(snap.head_target.as_bytes());
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 fn read_import_marker(path: &Path) -> Option<ImportMarker> {

@@ -31,6 +31,13 @@ updates:
     directory: /
     patterns: ["*"]
     multi-ecosystem-group: all
+    ignore:
+      # arrow-array must be the arrow major that iceberg links against: floe-catalog hands
+      # RecordBatch/ArrayRef across the iceberg API, and iceberg 0.10.1 (pinned, the latest)
+      # requires arrow 58. A second arrow major does not type-check. Drop this entry when
+      # iceberg moves to a newer arrow, and bump both together.
+      - dependency-name: arrow-array
+        versions: [">= 59"]
 
   # The SPA and SDK (web/).
   - package-ecosystem: npm

@@ -56,7 +56,6 @@ http.workspace = true
 http-body.workspace = true
 http-body-util.workspace = true
 async-compression.workspace = true
-gix-packetline.workspace = true
 gix-hash.workspace = true
 gix-object.workspace = true
 gix-actor.workspace = true
