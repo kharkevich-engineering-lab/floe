@@ -144,7 +144,7 @@ aws-smithy-types = "1"
 aws-sigv4 = "1"
 aws-credential-types = "1"
 clap = { version = "4", features = ["derive", "env"] }
-rand = "0.9"
+rand = "0.10"
 sha1 = "0.10"
 sha2 = "0.11"
 hmac = "0.12"
