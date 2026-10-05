@@ -196,6 +196,15 @@ fn cfg_full_only(keep: usize) -> Config {
 }
 
 /// Config with weekly (full) + daily (incremental based on weekly).
+/// The instant slot-based tests treat as "now", never the wall clock: Wednesday 2026-09-02
+/// 12:00 UTC, mid-week and mid-day, far from any `@weekly` (Sunday 23:00) or `@daily` (23:00)
+/// fire and its close grace, and long past, so every slot it plans is also closed for the
+/// code's own clock. Wall-clock tests failed in the windows after Sunday 23:00 UTC (CI,
+/// 2026-10-04/05).
+fn pinned_now() -> SystemTime {
+    floe_bundle::slots::from_epoch(1_788_350_400)
+}
+
 fn cfg_weekly_daily(keep_full: usize, keep_inc: usize) -> Config {
     Config {
         bundles: BundlesConfig {
@@ -520,7 +529,7 @@ async fn run_due_respects_schedule_and_lease() {
     let cfg = Arc::new(cfg_full_only(4));
     let bundler = Bundler::new_with_source(Arc::new(source), cfg);
 
-    let now = SystemTime::now();
+    let now = pinned_now();
 
     // First run: never built → due → should build.
     let built = bundler.run_due(&id, now).await.unwrap();
@@ -589,7 +598,7 @@ async fn pruning_keeps_chain_valid() {
     let cfg = Arc::new(cfg_weekly_daily(2, 3));
     let bundler = Bundler::new_with_source(Arc::new(source), cfg);
 
-    let now = SystemTime::now();
+    let now = pinned_now();
 
     // Build 3 full bundles (each time advancing seq).
     for i in 0..3u64 {
@@ -732,7 +741,7 @@ async fn run_all_due_multiple_repos() {
     let cfg = Arc::new(cfg_full_only(4));
     let bundler = Bundler::new_with_source(Arc::new(source), cfg);
 
-    let now = SystemTime::now();
+    let now = pinned_now();
     bundler.run_all_due(now).await.unwrap();
 
     // Both repos should have a bundle.
@@ -873,7 +882,7 @@ async fn min_commits_gate_skips_small_incrementals() {
     let rows = bundler
         .plan(
             &id,
-            std::time::SystemTime::now(),
+            pinned_now(),
             floe_bundle::slots::PlanContext {
                 first_state: None,
                 can_full: true,
@@ -962,7 +971,13 @@ async fn too_small_closed_slots_are_recorded_and_skipped_not_remeasured() {
     let cfg = Arc::new(cfg);
     let bundler = Bundler::new_with_source(Arc::new(source), cfg.clone());
     // A closed daily slot (yesterday 23:00) on a weekly cut at the Sunday before it.
-    let now = std::time::SystemTime::now();
+    // `now` is pinned, never the wall clock: with `@weekly` (Sunday 23:00 UTC) a run between
+    // Sunday 23:00 and Monday 23:00 saw a newer, unbuilt weekly slot after "yesterday's" daily,
+    // which then was not planned at all (CI, Monday 00:02 UTC, 2026-10-05: "row for 1791072000;
+    // dailies: [(1791158400, Missing)]"). With `pinned_now` the newest daily is Tuesday
+    // 2026-09-01 23:00, "yesterday" Monday 23:00, the weekly Sunday 2026-08-30 23:00, with no
+    // weekly slot in between.
+    let now = pinned_now();
     let daily_strat = cfg
         .bundles
         .strategy
@@ -1105,7 +1120,7 @@ async fn strategies_matching_no_refs_are_blocked_in_the_plan_with_the_reason() {
         wrong_host_reason: None,
     };
     let rows = bundler
-        .plan(&id, std::time::SystemTime::now(), ctx)
+        .plan(&id, pinned_now(), ctx)
         .await
         .unwrap();
     let weekly = rows
@@ -1121,7 +1136,7 @@ async fn strategies_matching_no_refs_are_blocked_in_the_plan_with_the_reason() {
     }
     assert!(
         bundler
-            .run_due(&id, std::time::SystemTime::now())
+            .run_due(&id, pinned_now())
             .await
             .unwrap()
             .is_empty()
