@@ -117,7 +117,7 @@ pub fn plan(state: &MirrorState, input: &PlanInput<'_>) -> Plan {
     let mut seen = BTreeSet::new();
     for r in &input.discovery.repos {
         seen.insert(r.id.clone());
-        p.seen(r);
+        p.seen(r, true);
     }
     let ids: Vec<String> = state.repos.keys().cloned().collect();
     for id in ids {
@@ -159,8 +159,12 @@ impl Planner<'_, '_> {
         self.changes.push((id.to_string(), what.to_string()));
     }
 
-    /// The forge reported `r` (by discovery or by a Found lookup).
-    fn seen(&mut self, r: &RemoteRepo) {
+    /// The forge reported `r`: by discovery (`listed`: one of the configured
+    /// listings returned it), or by a Found lookup for an id a complete
+    /// discovery lacked (`listed = false`: no listing has it any more, so it is
+    /// out of the selection unless explicit in `repos` by its current or
+    /// recorded name, which is the rename path; §B.6, §B.9).
+    fn seen(&mut self, r: &RemoteRepo, listed: bool) {
         let now = self.input.now;
         let old = self.state.repos.get(&r.id).cloned();
         let explicit = is_explicit(self.cfg(), &r.full_name())
@@ -170,7 +174,9 @@ impl Planner<'_, '_> {
         // §B.9: `skip_archived` only stops a mirror from *starting*. A repository
         // already mirrored that is archived at the source keeps following (at
         // 24h), so its selection is judged as if it were not archived.
-        let verdict = if r.archived && old.as_ref().is_some_and(|e| e.floe.is_some()) {
+        let verdict = if !listed && !explicit {
+            Verdict::Out
+        } else if r.archived && old.as_ref().is_some_and(|e| e.floe.is_some()) {
             let live = RemoteRepo {
                 archived: false,
                 ..r.clone()
@@ -334,8 +340,15 @@ impl Planner<'_, '_> {
         };
         let (status, change) = match found {
             Lookup::Found(r) => {
-                // A rename or transfer: selection decides on the new name.
-                self.seen(&r);
+                // Absent from a complete discovery yet Found: unstarred, removed
+                // from `repos`, its owner dropped from `users`/`orgs`, or
+                // transferred to an owner no listing covers. Not selected (frozen
+                // as `excluded`) unless explicit in `repos` (a rename). An
+                // incomplete discovery proves nothing: decided on the next
+                // complete one.
+                if complete || is_explicit(self.cfg(), &r.full_name()) || is_explicit(self.cfg(), &e.full_name) {
+                    self.seen(&r, false);
+                }
                 return;
             }
             Lookup::Gone => (Status::Gone, "gone"),
@@ -578,6 +591,68 @@ mod tests {
         let p = run(&s, &explicit, &disc(vec![], true), &lookups, t(1));
         assert_eq!(p.state.repos.get("1").unwrap().status, Status::Active);
         assert_eq!(steps(&p, "1"), ["publish"]);
+    }
+
+    /// Found by lookup but in no listing any more: not selected, frozen once,
+    /// and stays missing (no flip-flop, so lookups wind down to the excluded
+    /// tail). Each way out of the selection: unstarred, dropped from `repos`,
+    /// owner dropped from `users`.
+    #[test]
+    fn found_but_no_longer_listed_is_excluded_and_frozen() {
+        let r = remote("1", "Acme", "Widgets");
+        let starred = GithubMirrorConfig {
+            starred: vec!["@me".into()],
+            ..GithubMirrorConfig::default()
+        };
+        let listed = GithubMirrorConfig {
+            repos: vec!["Acme/Widgets".into()],
+            ..GithubMirrorConfig::default()
+        };
+        let user = GithubMirrorConfig {
+            users: vec!["acme".into()],
+            ..GithubMirrorConfig::default()
+        };
+        let unstarred = starred.clone();
+        let mut dropped = listed.clone();
+        dropped.repos = vec!["Acme/Other".into()];
+        let mut no_user = user.clone();
+        no_user.users = vec!["someone-else".into()];
+        for (why, before, after) in [
+            ("unstarred", &starred, &unstarred),
+            ("removed from repos", &listed, &dropped),
+            ("owner removed from users", &user, &no_user),
+        ] {
+            let mut s = MirrorState::default();
+            mirrored(&mut s, before, &r);
+            let lookups = BTreeMap::from([("1".to_string(), Lookup::Found(r.clone()))]);
+            // Discovery under the new selection no longer returns it.
+            let p = run(&s, after, &disc(vec![], true), &lookups, t(1));
+            let e = p.state.repos.get("1").unwrap();
+            assert_eq!(e.status, Status::Excluded, "{why}");
+            assert!(e.missing_since.is_some(), "{why}: stays missing");
+            assert_eq!(steps(&p, "1"), ["publish"], "{why}: frozen (follow = [])");
+            assert_eq!(p.changes, [("1".to_string(), "excluded".to_string())], "{why}");
+            // The next pass: still excluded, nothing to publish, no new change.
+            let mut s2 = p.state.clone();
+            if let Some(e) = s2.repos.get_mut("1") {
+                e.settings_sha = Some(settings::hash(&settings::render(
+                    &FakeSource::new("https://github.com"),
+                    after,
+                    &e.to_remote("1"),
+                    Status::Excluded,
+                )));
+            }
+            let p = run(&s2, after, &disc(vec![], true), &lookups, t(2));
+            assert_eq!(p.state.repos.get("1").unwrap().status, Status::Excluded, "{why}");
+            assert!(p.actions.is_empty() && p.changes.is_empty(), "{why}: {:?}", p.actions);
+        }
+        // An incomplete discovery proves nothing: the entry is left as it is.
+        let mut s = MirrorState::default();
+        mirrored(&mut s, &starred, &r);
+        let lookups = BTreeMap::from([("1".to_string(), Lookup::Found(r.clone()))]);
+        let p = run(&s, &unstarred, &disc(vec![], false), &lookups, t(1));
+        assert_eq!(p.state.repos.get("1").unwrap().status, Status::Active);
+        assert!(p.actions.is_empty(), "{:?}", p.actions);
     }
 
     #[test]

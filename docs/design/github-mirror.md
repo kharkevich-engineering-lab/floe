@@ -942,6 +942,11 @@ Where the code differs from §B.1–§B.14 (the code wins):
   `conflict`. The crash-window adoption needs `RepoEntry.claiming`, saved by a state CAS right before the
   create (`apply::Flow::Persist`), instead of any empty repository with the mapped name. Every publish also
   writes `repo.description` (§B.7.1).
+- **Found but no longer listed (2026-10-05, review fix)**: an id a complete discovery lacks and whose lookup is
+  `Found` is in no configured listing any more (unstarred, dropped from `repos`, its owner dropped from
+  `users`/`orgs`, or transferred out). It is `excluded` and frozen unless it is explicit in `repos` by its
+  current or recorded name (the rename path). `select` alone (include globs, skips) let it stay `active` under
+  `include = ["*/*"]`. An incomplete discovery leaves such an entry as it is.
 - **Telemetry seam**: `floe-mirror` does not depend on the catalog writer. `run_loop` takes an
   `on_pass: Fn(&PassReport)` hook, and `PassReport.changes` carries the inventory changes. The server's
   `floe_server::mirror::run_loop` passes `record_pass` over `AppState::recorder`. `floe github sync` passes the
