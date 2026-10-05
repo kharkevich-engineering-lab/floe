@@ -116,3 +116,4 @@ link, so a scenario can assert "a push on a healthy link is ≤ N requests" as a
 - What moved to the failure path, and how often that path runs (measured or reasoned).
 - Which CAS'd object's write rate changes.
 - Sim scenario(s) covering the new failure mode; `Stats::ops` budget assertion if the hot path changed.
+
