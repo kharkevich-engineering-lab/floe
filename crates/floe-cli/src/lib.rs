@@ -531,7 +531,7 @@ fn load_config_without_runtime(path: &std::path::Path) -> Config {
             for section in floe_config::runtime::RUNTIME_SECTIONS {
                 table.remove(*section);
             }
-            Ok(Config::parse(&toml::to_string(&table)?)?)
+            Config::parse(&toml::to_string(&table)?)
         });
     match loaded {
         Ok(c) => c,
