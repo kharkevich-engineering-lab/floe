@@ -15,7 +15,6 @@ yanked = "deny"
 # never add one without a reason and an issue.
 ignore = [
     { id = "RUSTSEC-2026-0258", reason = "h2 0.4.15 (cargo update) and 0.3.27 (aws-smithy legacy stack), #10" },
-    { id = "RUSTSEC-2026-0285", reason = "rustls 0.23.43, fixed by cargo update to >= 0.23.45, #10" },
     { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
     { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
