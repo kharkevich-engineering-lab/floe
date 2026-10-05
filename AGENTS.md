@@ -605,7 +605,9 @@ means "keep" on write (D46's redaction rule). Resolution goes through one proces
 (`floe_config::secret::env_var`), refreshed on every apply and read at every use (a token entered later reaches
 follow/LFS without a restart; unresolved = anonymous). **Env names are host facts**: every `{env}` and `*_env` in the
 document must be allowed by the bootstrap `[config_store] allowed_env` (default `FLOE_SECRET_*` + the documented
-names; `key_env`, `FLOE__*`, `AWS_*` and the store/auth variables only when listed exactly), checked in
+names; `key_env`, `FLOE__*`, `AWS_*` and the store/auth variables only when listed exactly; the catalog's SigV4
+signing-key fields may also name the AWS defaults, because SigV4 sends only the key id, a host-bound signature and
+a session token that is useless without the secret), checked in
 `Config::with_runtime`, i.e. at publish (400) and at every apply. Test endpoints never send a caller-named env var,
 send the stored credential only to the applied URL, follow no redirect and echo no body (`docs/design/admin-ui.md`
 §5.3).

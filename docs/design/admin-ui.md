@@ -281,7 +281,10 @@ a prefix ending in `*`; default `FLOE_SECRET_*`, `FLOE_GITHUB_TOKEN`, `FLOE_WEBH
 `FLOE_CATALOG_CREDENTIAL`. `config_store.key_env`, `FLOE__*`, `AWS_*` and the variables `[store]`, `[server.auth]`
 and `[upstream]` read are allowed only when listed **exactly** (a glob never reaches them). The catalog's SigV4
 signing keys (`s3_access_key_env` / `s3_secret_key_env`, used to sign and never sent) may also name the AWS defaults
-and this host's `[store.s3]` key variables. The rule lives in `Config::with_runtime`, so it is enforced at publish
+and this host's `[store.s3]` key variables. That exception is deliberate, so do not re-flag it: SigV4 never sends the secret
+key. Only the access key id, a signature and (with session credentials) `X-Amz-Security-Token` leave the process. The
+signature is bound to the request's host, date, region and service, so a catalog URI an admin chooses cannot replay it
+against AWS, and a session token is useless without the secret key. The rule lives in `Config::with_runtime`, so it is enforced at publish
 (400 with the path) **and** at every apply: a document written before the rule, or behind floe's back, is refused by
 every instance (apply error, previous revision kept).
 
