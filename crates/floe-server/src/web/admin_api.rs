@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use crate::AppState;
 use crate::auth::Principal;
 use crate::config_store::{self, PublishError, PublishRequest, redact};
+use crate::error::ApiError;
 
 /// Bound on outbound test calls (GitHub `/user`, the catalog's `/v1/config`).
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -55,11 +56,15 @@ pub fn routes(mut r: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
 /// A refusal, already rendered (boxed: a `Response` is too large for an `Err`).
 type Refusal = Box<Response>;
 
+/// An admin principal, else the refusal: no credential is a 401 (a browser
+/// signs in, a script learns its token is missing), a non-admin a 403.
 async fn admin(st: &AppState, headers: &HeaderMap) -> Result<Principal, Refusal> {
-    st.auth
-        .require_admin(headers)
-        .await
-        .map_err(|e| Box::new(crate::web::api::auth_err(e).into_response()))
+    match st.auth.authenticate(headers).await {
+        Ok(p) if p.admin => Ok(p),
+        Ok(p) if p.anonymous => Err(Box::new(ApiError::Unauthorized.into_response())),
+        Ok(_) => Err(Box::new(ApiError::Forbidden.into_response())),
+        Err(e) => Err(Box::new(crate::web::api::auth_err(e).into_response())),
+    }
 }
 
 fn no_store(mut r: Response) -> Response {
