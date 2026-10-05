@@ -8,6 +8,7 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
+    "types": ["vite/client"],
     "strict": true,
     "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
