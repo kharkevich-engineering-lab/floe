@@ -314,9 +314,9 @@ function PolicyForm({ repo }: { repo: string }) {
     };
   }, [text, dirty, repo]);
   const rules: Rule[] = doc && Array.isArray(doc.rules) ? (doc.rules as Rule[]) : [];
-  const update = (next: Rule[]) => {
-    const base = doc ?? { version: 1 };
-    setText(JSON.stringify({ version: 1, ...base, rules: next }, null, 2));
+  const update = (nextRules: Rule[]) => {
+    const current = doc ?? { version: 1 };
+    setText(JSON.stringify({ version: 1, ...current, rules: nextRules }, null, 2));
     setNote(null);
   };
   const save = async () => {
