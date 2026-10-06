@@ -44,6 +44,7 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `floe.standalone.toml` | The one-machine shape: `floe-server --config floe.standalone.toml` → `http://floe.localhost:8080/` (loopback; TLS modes in D59). |
 | `deploy/nginx.conf.example` | An optional nginx in front; documents the `X-Accel-Redirect` byte-offload contract. |
 | `Containerfile`, `flake.nix` | An OCI image; a Nix package, image and devshell. |
+| `deploy/helm/floe/README.md` | Anyone deploying to Kubernetes or changing the chart (D64): install examples, TLS modes, the maintain split. |
 
 ---
 
@@ -677,6 +678,17 @@ last; the latter records each table's snapshot id, its generation and its purge 
 only; `views.sql` (shipped, tested against DuckDB) gives exactly-once, commit-consistent reads; catalog
 credentials are an admin privilege, one table bucket per tenant.
 
+**D64 — The Helm chart is a thin client of the `common` library chart (2026-10-06).** `deploy/helm/floe` renders
+every Kubernetes object through `common` (`oci://ghcr.io/technicaldomain/helm`, the owner's library): each template
+is one `common.*` call with an empty override, `values.yaml` is the library's values plus `floeToml`, the bootstrap
+file (runtime sections stay in the config document, D60), and secrets arrive as env vars from Secrets. What the
+library cannot express is added to the library (2.5.0: PodDisruptionBudget, topology spread, pod-spec fields, probe
+scheme and per-probe kind, ConfigMap and PVC mounts, monitor endpoint fields), not re-implemented in the chart. One
+release is one Deployment: a separate `maintain` host (D9/D30) is a second release of the same chart against the
+same bucket. Published by the release workflow to `oci://ghcr.io/kharkevich-engineering-lab/charts/floe` with
+chart version = `appVersion` = the release (set at packaging, never committed); CI lints, renders every `ci/`
+values file through kubeconform and installs the dev values into kind against RustFS.
+
 ## 5. Working rules
 
 - **No backwards compatibility (pre-1.0, banner at top):** change the shape and delete the old one in the same
@@ -733,6 +745,7 @@ credentials are an admin privilege, one table bucket per tenant.
   | release container: + arm64 | the build recipe: `Containerfile`, `.dockerignore`, `compose.yaml`, `deploy/**`, `Cargo.lock`, `rust-toolchain.toml`, `web/package.json`, `web/pnpm-lock.yaml`, `scripts/**`, `.github/workflows/**` |
   | cargo-deny (`deny.toml`) | `Cargo.lock`, `deny.toml` |
   | actionlint | `.github/**` |
+  | Helm chart: lint, kubeconform, kind install (x86_64) | `deploy/helm/**`, `.github/workflows/**` (and `deploy/helm/**` alone runs nothing else) |
 
   `CI result` aggregates them: green when every job succeeded or was skipped by its filter, and is the one CI
   check branch protection requires. **`main` is protected**: a merge needs `CI result` and `Conventional commit

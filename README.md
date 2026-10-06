@@ -128,6 +128,7 @@ open http://floe.localhost:8080/
 * `floe.standalone.toml` — the one-machine shape (loopback, rustfs, every role). Start here.
 * `floe.example.toml` — every key with its default and a comment.
 * `Containerfile`, `flake.nix` — an OCI image and a Nix package/devshell.
+* `deploy/helm/floe` — a Helm chart (D64), published with every release.
 * `deploy/nginx.conf.example` — an optional nginx in front: public TLS, one `auth_request` per credential, and
   **byte offload**: floe answers bundle/LFS downloads with `X-Accel-Redirect` and nginx streams + caches the
   object from the bucket itself (S3 presigned or GCS with floe's bearer). The file documents the contract.
@@ -276,6 +277,10 @@ Each release is built natively on an x86_64 and an arm64 runner (no emulation) a
   `floe-<version>-aarch64-unknown-linux-gnu.tar.gz` (each with a `.sha256`), holding `floe` and `floe-server`
   (glibc ≥ 2.36: Debian 12+, Ubuntu 23.04+).
 * A multi-arch image `ghcr.io/kharkevich-engineering-lab/floe`, tagged `<version>`, `<major>.<minor>` and `latest`.
+* A Helm chart `oci://ghcr.io/kharkevich-engineering-lab/charts/floe`, version `<version>` with `appVersion`
+  `<version>` (the image above): `helm install git oci://ghcr.io/kharkevich-engineering-lab/charts/floe --version <version>`.
+  Its source and examples are in `deploy/helm/floe` (`README.md` there: dev with RustFS, S3 + IRSA, the TLS modes,
+  a separate maintain host).
 
 `floe --version` (and the git `agent=` capability) report `<version> (<commit>)`. The version lives only in
 the release tag: `Cargo.toml` keeps a placeholder that no release rewrites, so a build from source, even of a
