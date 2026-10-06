@@ -48,8 +48,7 @@ floeToml: |
   [server.auth]
   mode = "token"                # none is loopback-only: token or oidc in a cluster
   anonymous_read = false
-  tokens = [{ principal = "admin", token = "", token_env = "FLOE_TOKEN_ADMIN", write = true, admin = true }]
-  # `token = ""` is required by the parser even when token_env names the variable.
+  tokens = [{ principal = "admin", token_env = "FLOE_TOKEN_ADMIN", write = true, admin = true }]
 
   [server.tls]
   mode = "off"
