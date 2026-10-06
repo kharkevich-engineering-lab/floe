@@ -741,12 +741,18 @@ jobs:
       # kind is preinstalled on the runner image (its version picks the node image).
       - name: Install into kind against RustFS
         timeout-minutes: 12
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           kind create cluster --name floe --wait 120s
           kubectl create namespace floe
           kubectl -n floe apply -f ci/kind/rustfs.yaml
           kubectl -n floe wait --for=condition=complete job/create-bucket --timeout=180s
-          helm install floe . --namespace floe -f ci/dev-rustfs-values.yaml --wait --timeout 5m
+          # The committed appVersion is never bumped after a release, so pin the image to the newest
+          # published release instead of letting the tag drift behind it.
+          tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName | ltrimstr("v")')"
+          echo "installing image tag ${tag}"
+          helm install floe . --namespace floe -f ci/dev-rustfs-values.yaml --set image.tag="${tag}" --wait --timeout 5m
           kubectl -n floe port-forward svc/floe-floe 8097:80 > "$RUNNER_TEMP/port-forward.log" 2>&1 &
           for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8097/readyz && break; sleep 1; done
           curl -fsS http://127.0.0.1:8097/readyz

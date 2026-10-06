@@ -48,7 +48,9 @@ floeToml: |
   [server.auth]
   mode = "token"                # none is loopback-only: token or oidc in a cluster
   anonymous_read = false
-  tokens = [{ principal = "admin", token_env = "FLOE_TOKEN_ADMIN", write = true, admin = true }]
+  tokens = [{ principal = "admin", token = "", token_env = "FLOE_TOKEN_ADMIN", write = true, admin = true }]
+  # `token = ""` keeps this parseable by images before the fix that made `token` optional
+  # (fix(config) in the release after 2.0.1); drop it once the chart ships with that image.
 
   [server.tls]
   mode = "off"

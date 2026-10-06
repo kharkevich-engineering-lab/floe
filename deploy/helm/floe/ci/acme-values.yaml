@@ -7,7 +7,7 @@ floeToml: |
   public_url = "https://git.example.com"
   [server.auth]
   mode = "token"
-  tokens = [{ principal = "admin", token_env = "FLOE_TOKEN_ADMIN", write = true, admin = true }]
+  tokens = [{ principal = "admin", token = "", token_env = "FLOE_TOKEN_ADMIN", write = true, admin = true }]
   [server.tls]
   mode = "acme"
   [server.tls.acme]
