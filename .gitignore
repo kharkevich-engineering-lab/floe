@@ -21,5 +21,7 @@ node_modules/
 result
 result-*
 
-# Helm chart dependencies (helm dependency build restores them from Chart.lock)
+# Helm chart dependencies: fetched by `helm dependency update` (Chart.yaml pins exact versions,
+# so no Chart.lock is kept)
 deploy/helm/*/charts/
+deploy/helm/*/Chart.lock

@@ -328,7 +328,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "$GITHUB_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
-          helm dependency build
+          helm dependency update
           helm package . --version "${VERSION}" --app-version "${VERSION}" --destination "$RUNNER_TEMP/chart"
           helm push "$RUNNER_TEMP/chart/floe-${VERSION}.tgz" "oci://${CHARTS}"
       - name: Check the published chart
