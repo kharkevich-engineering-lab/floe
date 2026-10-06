@@ -1,0 +1,17 @@
+# D9/D30 split, release 1 of 2 (`helm install git …`): the serving fleet, autoscaled, on tmpfs.
+sharedSecrets: [floe-credentials]
+env:
+  - {name: FLOE__SERVER__ROLES, value: '["serve", "events"]'}
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+pdb:
+  enabled: true
+  minAvailable: 1
+volumes:
+  - {name: cache, emptyDir: {medium: Memory, sizeLimit: 12Gi}}
+  - {name: tmp, emptyDir: {}}
+resources:
+  requests: {cpu: "1", memory: 14Gi}
+  limits: {cpu: "4", memory: 16Gi}

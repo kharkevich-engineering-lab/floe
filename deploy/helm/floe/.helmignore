@@ -1,0 +1,12 @@
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/
+# CI values and the kind smoke manifests are not part of the package.
+ci/

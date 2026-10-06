@@ -268,7 +268,9 @@ pub enum AuthMode {
 #[serde(deny_unknown_fields)]
 pub struct StaticToken {
     pub principal: String,
-    /// Read from env var if set, else literal.
+    /// Read from env var if set, else literal. Optional when `token_env` is set
+    /// (`validate` requires one of the two).
+    #[serde(default)]
     pub token: String,
     #[serde(default)]
     pub token_env: Option<String>,
@@ -2882,6 +2884,11 @@ audiences = ["floe-cli", "https://git.example.com"]
         let err = Config::parse("[store]\nbucket = \"b\"\n[server.auth]\nmode = \"token\"\n")
             .unwrap_err();
         assert!(err.to_string().contains("tokens"), "{err}");
+        // `token_env` alone is enough (the documented form); neither is refused.
+        let env_only = Config::parse("[store]\nbucket = \"b\"\n[server.auth]\nmode = \"token\"\ntokens = [{ principal = \"ci\", token_env = \"FLOE_TOKEN_CI\" }]\n").unwrap();
+        assert_eq!(env_only.server.auth.tokens[0].token, "");
+        let err = Config::parse("[store]\nbucket = \"b\"\n[server.auth]\nmode = \"token\"\ntokens = [{ principal = \"ci\" }]\n").unwrap_err();
+        assert!(err.to_string().contains("`token` or `token_env`"), "{err}");
         // oidc: anonymous_read off, an allowlist, and a way in.
         let err = Config::parse("[store]\nbucket = \"b\"\n[server.auth]\nmode = \"oidc\"\nanonymous_read = false\nallowed_domains = [\"example.com\"]\n").unwrap_err();
         assert!(err.to_string().contains("way in"), "{err}");

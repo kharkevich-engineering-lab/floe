@@ -1,0 +1,3 @@
+{{- include "common.service" (list . "floe.service") -}}
+{{- define "floe.service" -}}
+{{- end -}}

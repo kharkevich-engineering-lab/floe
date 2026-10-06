@@ -1,0 +1,3 @@
+{{- template "common.httproute" (list . "floe.httproute") -}}
+{{- define "floe.httproute" -}}
+{{- end -}}

@@ -58,6 +58,8 @@ jobs:
       tls: ${{ github.event_name != 'pull_request' || steps.filter.outputs.tls == 'true' }}
       deny: ${{ github.event_name != 'pull_request' || steps.filter.outputs.deny == 'true' }}
       actions: ${{ github.event_name != 'pull_request' || steps.filter.outputs.actions == 'true' }}
+      # The Helm chart (deploy/helm/floe): lint, render, kubeconform, a kind install.
+      helm: ${{ github.event_name != 'pull_request' || steps.filter.outputs.helm == 'true' }}
     steps:
       - id: filter
         if: github.event_name == 'pull_request'
@@ -72,6 +74,7 @@ jobs:
               - '!site/**'
               - '!LICENSE'
               - '!NOTICE'
+              - '!deploy/helm/**'
             rust:
               - 'crates/**'
               - 'Cargo.toml'
@@ -94,6 +97,7 @@ jobs:
               - '!**/*.md'
               - 'scripts/**'
               - '.github/workflows/**'
+              - '!deploy/helm/**'
             container_recipe:
               - 'Containerfile'
               - '.dockerignore'
@@ -105,6 +109,7 @@ jobs:
               - 'web/pnpm-lock.yaml'
               - 'scripts/**'
               - '.github/workflows/**'
+              - '!deploy/helm/**'
             tls:
               - 'crates/floe-tls/**'
               - 'crates/floe-store/**'
@@ -120,6 +125,9 @@ jobs:
               - 'deny.toml'
             actions:
               - '.github/**'
+            helm:
+              - 'deploy/helm/**'
+              - '.github/workflows/**'
       - id: matrix
         env:
           BOTH: ${{ github.event_name != 'pull_request' || steps.filter.outputs.container_recipe == 'true' }}
@@ -673,13 +681,109 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
       - run: '"$RUNNER_TEMP/actionlint" -color'
 
+  helm:
+    name: Helm chart
+    # deploy/helm/floe is a thin chart over the `common` library (oci://ghcr.io/technicaldomain/helm):
+    # the pinned library version must resolve, every values file under ci/ must lint
+    # and render to manifests Kubernetes 1.33 accepts (kubeconform -strict, CRD schemas from the
+    # datree catalog for the monitors and the HTTPRoute), and the dev values must install into kind
+    # against RustFS and serve git. The chart is arch-independent: one runner.
+    needs: changes
+    if: needs.changes.outputs.helm == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: deploy/helm/floe
+    env:
+      # Fixed releases checked against hashes pinned here; bump a version and its hash together.
+      HELM_VERSION: 4.1.1
+      HELM_SHA256: 5d4c7623283e6dfb1971957f4b755468ab64917066a8567dd50464af298f4031
+      KUBECONFORM_VERSION: 0.8.0
+      KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+      # datreeio/CRDs-catalog at a fixed commit (ServiceMonitor, PodMonitor, VMServiceScrape, HTTPRoute).
+      CRDS_CATALOG: https://raw.githubusercontent.com/datreeio/CRDs-catalog/fd90051867733c60d32d16450556e9cd18459aef
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install helm and kubeconform
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfLo helm.tgz "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
+          curl --proto '=https' --tlsv1.2 -sSfLo kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+          mkdir -p bin
+          tar -xzf helm.tgz -C bin --strip-components=1 linux-amd64/helm
+          tar -xzf kubeconform.tgz -C bin kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          bin/helm version && bin/kubeconform -v
+      - name: Fetch the chart's dependencies
+        # Chart.yaml pins the library to an exact version, so update resolves the same chart every
+        # time; no Chart.lock is committed (the owner's charts don't keep one either).
+        run: helm dependency update
+      - name: Lint
+        run: |
+          helm lint --strict .
+          for values in ci/*-values.yaml; do
+            helm lint --strict . -f "$values"
+          done
+      - name: Render and validate
+        run: |
+          for values in ci/*-values.yaml; do
+            echo "::group::${values}"
+            helm template floe . --namespace floe -f "$values" > "$RUNNER_TEMP/rendered.yaml"
+            kubeconform -strict -summary -kubernetes-version 1.33.0 \
+              -schema-location default \
+              -schema-location "${CRDS_CATALOG}/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+              "$RUNNER_TEMP/rendered.yaml"
+            echo "::endgroup::"
+          done
+      # kind is preinstalled on the runner image (its version picks the node image).
+      - name: Install into kind against RustFS
+        timeout-minutes: 12
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          kind create cluster --name floe --wait 120s
+          kubectl create namespace floe
+          kubectl -n floe apply -f ci/kind/rustfs.yaml
+          kubectl -n floe wait --for=condition=complete job/create-bucket --timeout=180s
+          # The committed appVersion is never bumped after a release, so pin the image to the newest
+          # published release instead of letting the tag drift behind it.
+          tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName | ltrimstr("v")')"
+          echo "installing image tag ${tag}"
+          helm install floe . --namespace floe -f ci/dev-rustfs-values.yaml --set image.tag="${tag}" --wait --timeout 5m
+          kubectl -n floe port-forward svc/floe-floe 8097:80 > "$RUNNER_TEMP/port-forward.log" 2>&1 &
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8097/readyz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8097/readyz
+          echo
+          # /metrics is behind auth: 401 without the token, 200 with it.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8097/metrics)" = 401
+          curl -fsS -o /dev/null -H 'Authorization: Bearer floe-dev-admin-token' http://127.0.0.1:8097/metrics
+          # A push creates the repository; a clone reads it back (read-only root filesystem).
+          export GIT_CONFIG_GLOBAL=/dev/null
+          auth='http.extraHeader=Authorization: Bearer floe-dev-admin-token'
+          work="$RUNNER_TEMP/git" && mkdir -p "$work" && cd "$work"
+          git init -q -b main src && echo smoke > src/README && git -C src add README
+          git -C src -c user.name=ci -c user.email=ci@example.com commit -qm smoke
+          git -C src -c "$auth" push -q http://127.0.0.1:8097/smoke/chart.git main
+          git -c "$auth" -c transfer.bundleURI=false clone -q http://127.0.0.1:8097/smoke/chart.git out
+          test "$(cat out/README)" = smoke
+      - name: Cluster state
+        if: always()
+        run: |
+          kubectl -n floe get all,pvc,configmap,secret 2>/dev/null || true
+          kubectl -n floe describe deploy/floe-floe 2>/dev/null | tail -40 || true
+          kubectl -n floe logs deploy/floe-floe --tail=200 2>/dev/null || true
+          kind delete cluster --name floe || true
+
   # The one check branch protection requires. Green when every job succeeded or was skipped by
   # its path filter; red on any failure or cancellation — including `changes` itself failing,
   # which would otherwise skip everything downstream and look like a docs-only PR.
   ci-result:
     name: CI result
     if: always()
-    needs: [changes, fmt, build-test, e2e, catalog, codeintel, acme-pebble, container, msrv, deny, actionlint]
+    needs: [changes, fmt, build-test, e2e, catalog, codeintel, acme-pebble, container, msrv, deny, actionlint, helm]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

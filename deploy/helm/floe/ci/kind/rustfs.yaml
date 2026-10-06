@@ -1,0 +1,41 @@
+# kind smoke test (CI `helm` job): a RustFS store and its floe-test bucket, as in compose.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: rustfs}
+spec:
+  selector: {matchLabels: {app: rustfs}}
+  template:
+    metadata: {labels: {app: rustfs}}
+    spec:
+      containers:
+        - name: rustfs
+          image: rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+          env:
+            - {name: RUSTFS_ACCESS_KEY, value: floe-dev}
+            - {name: RUSTFS_SECRET_KEY, value: floe-dev-secret}
+            - {name: RUSTFS_ADDRESS, value: "0.0.0.0:9000"}
+            - {name: RUSTFS_VOLUMES, value: /data}
+          ports: [{containerPort: 9000}]
+          readinessProbe: {httpGet: {path: /minio/health/live, port: 9000}, periodSeconds: 2}
+          volumeMounts: [{name: data, mountPath: /data}]
+      volumes: [{name: data, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: rustfs}
+spec:
+  selector: {app: rustfs}
+  ports: [{port: 9000, targetPort: 9000}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: create-bucket}
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mb
+          image: docker.io/curlimages/curl:8.16.0
+          command: [sh, -c, 'curl -fsS --aws-sigv4 aws:amz:us-east-1:s3 --user floe-dev:floe-dev-secret -X PUT http://rustfs:9000/floe-test || curl -fsS --aws-sigv4 aws:amz:us-east-1:s3 --user floe-dev:floe-dev-secret -I http://rustfs:9000/floe-test']

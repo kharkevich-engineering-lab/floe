@@ -1,0 +1,3 @@
+{{- include "common.persistentvolumeclaim" (list . "floe.pvc") -}}
+{{- define "floe.pvc" -}}
+{{- end -}}

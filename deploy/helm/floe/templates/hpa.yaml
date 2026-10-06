@@ -1,0 +1,3 @@
+{{- template "common.hpa" (list . "floe.hpa") -}}
+{{- define "floe.hpa" -}}
+{{- end -}}

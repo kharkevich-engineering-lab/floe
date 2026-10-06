@@ -1,0 +1,33 @@
+# floe orders its own certificate (ACME DNS-01, Cloudflare), exposed by a LoadBalancer on 443.
+replicas: 2
+sharedSecrets: [floe-credentials]       # CLOUDFLARE_API_TOKEN, FLOE_TLS_STORAGE_KEY, FLOE_TOKEN_ADMIN
+floeToml: |
+  [server]
+  listen = "0.0.0.0:8097"
+  public_url = "https://git.example.com"
+  [server.auth]
+  mode = "token"
+  tokens = [{ principal = "admin", token = "", token_env = "FLOE_TOKEN_ADMIN", write = true, admin = true }]
+  [server.tls]
+  mode = "acme"
+  [server.tls.acme]
+  domains = ["git.example.com"]
+  email = "ops@example.com"
+  directory = "staging"
+  [store]
+  bucket = "floe"
+  [store.s3]
+  region = "us-east-1"
+  [cache]
+  dir = "/var/lib/floe"
+  max_bytes = "10GiB"
+# No certificate until the first order completes: TCP liveness/startup, HTTPS readiness.
+healthCheck:
+  scheme: HTTPS
+  liveness: {kind: tcp}
+  startup: {kind: tcp, failureThreshold: 60}
+service:
+  type: LoadBalancer
+  port: 443
+  appProtocol: https
+  externalTrafficPolicy: Local

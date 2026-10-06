@@ -1,0 +1,28 @@
+# D9/D30 split, release 2 of 2 (`helm install git-maintain …`): one maintainer on an SSD PVC.
+# No Service: it serves no clients. Same bucket and Secrets as the serving release.
+solution: {component: maintain}
+sharedSecrets: [floe-credentials]
+deploymentStrategy: Recreate
+env:
+  - {name: FLOE__SERVER__ROLES, value: '["maintain"]'}
+  - {name: FLOE__MAINTENANCE__DISK, value: ssd}
+  - {name: FLOE__CACHE__MODE, value: disk}
+  - {name: FLOE__CACHE__MAX_BYTES, value: 180GiB}
+  - {name: FLOE__SERVER__DRAIN_TIMEOUT, value: 2m}
+terminationGracePeriodSeconds: 180
+service: {enabled: false}
+serviceAccount: {create: false, name: git-floe}   # the serving release's (one IRSA role)
+volumes:
+  - {name: tmp, emptyDir: {}}
+volumeMounts:
+  - {name: tmp, mountPath: /tmp}
+persistence:
+  enabled: true
+  mountPath: /var/lib/floe
+  volumeName: cache
+  size: 200Gi
+  storageClass: fast-ssd
+nodeSelector: {node.kubernetes.io/disk: ssd}
+resources:
+  requests: {cpu: "2", memory: 8Gi}
+  limits: {cpu: "8", memory: 16Gi}

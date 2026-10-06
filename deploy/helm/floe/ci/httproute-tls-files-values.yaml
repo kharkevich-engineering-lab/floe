@@ -1,0 +1,28 @@
+# floe terminates TLS with a cert-manager Secret (mode = "files"), routed by an HTTPRoute.
+sharedSecrets: [floe-credentials]
+env:
+  - {name: FLOE__SERVER__TLS__MODE, value: files}
+  - {name: FLOE__SERVER__TLS__CERT, value: /etc/floe-tls/tls.crt}
+  - {name: FLOE__SERVER__TLS__KEY, value: /etc/floe-tls/tls.key}
+  - {name: FLOE__SERVER__PUBLIC_URL, value: "https://git.example.com"}
+healthCheck:
+  scheme: HTTPS
+service:
+  port: 443
+  appProtocol: https
+volumes:
+  - {name: cache, emptyDir: {sizeLimit: 12Gi}}
+  - {name: tmp, emptyDir: {}}
+  - {name: tls, secret: {secretName: git-example-com-tls}}
+volumeMounts:
+  - {name: cache, mountPath: /var/lib/floe}
+  - {name: tmp, mountPath: /tmp}
+  - {name: tls, mountPath: /etc/floe-tls, readOnly: true}
+gateway:
+  enabled: true
+  parentRefs: [{name: public, namespace: gateway-system, sectionName: https}]
+  hostnames: [git.example.com]
+  rules:
+    - matches: [{path: {type: PathPrefix, value: /}}]
+      backendRefs: [{name: floe-floe, port: 443}]
+      timeouts: {request: "0s", backendRequest: "0s"}

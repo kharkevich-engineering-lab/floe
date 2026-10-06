@@ -18,6 +18,8 @@ concurrency:
 env:
   # GHCR names must be lowercase; the repository is kharkevich-engineering-lab/floe.
   IMAGE: ghcr.io/kharkevich-engineering-lab/floe
+  # The Helm chart's OCI repository: oci://ghcr.io/kharkevich-engineering-lab/charts/floe.
+  CHARTS: ghcr.io/kharkevich-engineering-lab/charts
 
 jobs:
   # The version this push will release, before anything is built with it. floe bakes
@@ -243,9 +245,10 @@ jobs:
             exit 1
           fi
 
-  # One multi-arch manifest from the per-arch digests, tagged only once the release exists.
+  # One multi-arch manifest from the per-arch digests, tagged only once the release exists; then
+  # the Helm chart of the same version.
   image:
-    name: Publish the multi-arch image
+    name: Publish the multi-arch image and the Helm chart
     needs: [version, release]
     runs-on: ubuntu-latest
     permissions:
@@ -299,3 +302,39 @@ jobs:
             echo "$raw" | python3 -c "import json,sys; m=json.load(sys.stdin)['manifests']; sys.exit(0 if any(x['platform']['architecture']=='$arch' for x in m) else 1)" \
               || { echo "::error::${IMAGE}:${VERSION} has no linux/${arch} manifest"; exit 1; }
           done
+      # The Helm chart (deploy/helm/floe), packaged as this release: chart version = appVersion =
+      # the image tag. Nothing is committed back; the version is set at packaging time, like
+      # FLOE_VERSION for the binaries. Pushed after the image so the chart never points at a tag
+      # that does not exist.
+      - name: Checkout the chart
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: deploy/helm
+      - name: Install helm
+        env:
+          # Same pin as ci.yml's helm job; bump both together.
+          HELM_VERSION: 4.1.1
+          HELM_SHA256: 5d4c7623283e6dfb1971957f4b755468ab64917066a8567dd50464af298f4031
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfLo helm.tgz "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
+          mkdir -p bin && tar -xzf helm.tgz -C bin --strip-components=1 linux-amd64/helm
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Package and push the chart
+        working-directory: deploy/helm/floe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$GITHUB_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          helm dependency update
+          helm package . --version "${VERSION}" --app-version "${VERSION}" --destination "$RUNNER_TEMP/chart"
+          helm push "$RUNNER_TEMP/chart/floe-${VERSION}.tgz" "oci://${CHARTS}"
+      - name: Check the published chart
+        run: |
+          set -euo pipefail
+          chart=$(helm show chart "oci://${CHARTS}/floe" --version "${VERSION}")
+          echo "$chart"
+          echo "$chart" | grep -qx "version: ${VERSION}" || { echo "::error::chart version is not ${VERSION}"; exit 1; }
+          echo "$chart" | grep -qx "appVersion: ${VERSION}" || { echo "::error::chart appVersion is not ${VERSION}"; exit 1; }

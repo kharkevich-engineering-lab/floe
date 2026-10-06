@@ -1,0 +1,12 @@
+# PodMonitor with a read-only scrape token.
+sharedSecrets: [floe-credentials]
+env:
+  - name: FLOE__SERVER__AUTH__TOKENS
+    value: '[{principal = "admin", token = "", token_env = "FLOE_TOKEN_ADMIN", write = true, admin = true}, {principal = "metrics", token = "", token_env = "FLOE_TOKEN_METRICS", write = false}]'
+monitoring:
+  enabled: true
+  kind: PodMonitor
+  interval: 30s
+  labels: {release: kube-prometheus-stack}
+  endpoint:
+    authorization: {type: Bearer, credentials: {name: floe-credentials, key: FLOE_TOKEN_METRICS}}

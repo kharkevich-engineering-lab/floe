@@ -1,0 +1,5 @@
+{{- template "common.configmap" (list . "floe.configmap") -}}
+{{- define "floe.configmap" -}}
+data:
+  floe.toml: {{ required "floeToml is required" .Values.floeToml | quote }}
+{{- end -}}

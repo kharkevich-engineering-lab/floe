@@ -20,3 +20,8 @@ node_modules/
 # nix build outputs
 result
 result-*
+
+# Helm chart dependencies: fetched by `helm dependency update` (Chart.yaml pins exact versions,
+# so no Chart.lock is kept)
+deploy/helm/*/charts/
+deploy/helm/*/Chart.lock

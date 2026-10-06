@@ -1,0 +1,13 @@
+# Development: a RustFS bucket in the namespace, credentials from values (never in production).
+secretData:
+  AWS_ACCESS_KEY_ID: floe-dev
+  AWS_SECRET_ACCESS_KEY: floe-dev-secret
+  FLOE_TOKEN_ADMIN: floe-dev-admin-token
+env:
+  - {name: FLOE__STORE__BUCKET, value: floe-test}
+  - {name: FLOE__STORE__S3__ENDPOINT, value: "http://rustfs:9000"}
+  - {name: FLOE__STORE__S3__FORCE_PATH_STYLE, value: "true"}
+  - {name: FLOE__SERVER__AUTO_CREATE_ON_PUSH, value: "true"}
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {cpu: "2", memory: 2Gi}
