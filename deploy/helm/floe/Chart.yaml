@@ -1,0 +1,29 @@
+apiVersion: v2
+name: floe
+description: >-
+  floe: a git server that is one binary in front of an object store (smart HTTP, bundle-uri, LFS,
+  web UI). Every pod is a disposable cache; the bucket is the repository.
+type: application
+# The release workflow packages the chart with --version and --app-version set to the
+# semantic-release version, so the published chart, its appVersion and the image tag are always
+# the same number. The values here are the last release at the time of the change (nothing
+# commits back to main); a chart installed from this directory uses the image tagged appVersion.
+version: 2.0.1
+appVersion: "2.0.1"
+kubeVersion: ">=1.29.0-0"
+home: https://github.com/kharkevich-engineering-lab/floe
+sources:
+  - https://github.com/kharkevich-engineering-lab/floe
+keywords:
+  - git
+  - git-lfs
+  - bundle-uri
+  - s3
+  - gcs
+maintainers:
+  - name: Alexander Kharkevich
+    email: alex@kharkevich.org
+dependencies:
+  - name: common
+    version: 2.5.0
+    repository: oci://ghcr.io/technicaldomain/helm

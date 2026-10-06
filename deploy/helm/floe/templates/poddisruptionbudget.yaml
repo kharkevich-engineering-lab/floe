@@ -1,0 +1,3 @@
+{{- template "common.pdb" (list . "floe.pdb") -}}
+{{- define "floe.pdb" -}}
+{{- end -}}

@@ -1,0 +1,12 @@
+{{- $m := .Values.monitoring | default dict -}}
+{{- if $m.enabled -}}
+{{- if eq $m.kind "PodMonitor" -}}
+{{- template "common.podMonitor" (list . "floe.monitoring") -}}
+{{- else if eq $m.kind "VMServiceScrape" -}}
+{{- template "common.vmServiceScrape" (list . "floe.monitoring") -}}
+{{- else -}}
+{{- template "common.serviceMonitor" (list . "floe.monitoring") -}}
+{{- end -}}
+{{- end -}}
+{{- define "floe.monitoring" -}}
+{{- end -}}

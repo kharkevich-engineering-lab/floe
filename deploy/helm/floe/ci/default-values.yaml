@@ -1,0 +1,2 @@
+# The defaults: token auth, AWS S3 through the SDK credential chain, TLS off, emptyDir cache.
+{}

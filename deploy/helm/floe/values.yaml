@@ -1,0 +1,199 @@
+# floe chart values. Every key except floeToml is the `common` library's (2.5.0, README in
+# github.com/technicaldomain/helm/tree/main/charts/common); the templates are one-line calls.
+
+image:
+  registry: ghcr.io/kharkevich-engineering-lab  # multi-arch: linux/amd64, linux/arm64
+  name: floe
+  tag: ""                       # "" = the chart's appVersion
+  pullPolicy: IfNotPresent
+
+replicas: 1                     # ignored when hpa.enabled; every replica serves every repository
+deploymentStrategy: RollingUpdate   # Recreate for a ReadWriteOnce cache PVC
+fullnameOverride: ""            # resources are named <release>-floe
+solution:
+  component: server             # app.kubernetes.io/component (e.g. maintain for a role install)
+
+# The container port; floeToml's server.listen must use the same one.
+config:
+  port: 8097
+  portName: http
+
+# ---------------------------------------------------------------------------------------------
+# floe.toml, the bootstrap configuration (D60). Mounted at /etc/floe/floe.toml (the image's
+# FLOE_CONFIG). Every key: floe.example.toml. Any key can also be overridden per pod with an
+# env var FLOE__SECTION__KEY=<TOML value> (see `env` below), handy for the bucket name.
+#
+# NOT here: the runtime sections [github_mirror], [catalog], [events], [codeintel], [mcp]. floe
+# refuses them in this file; they live in the bucket's config document, edited at /_admin or
+# with `floe config set` (D60), with secrets sealed by FLOE_CONFIG_KEY (D61).
+#
+# TLS ([server.tls], D59):
+#   mode = "off"   behind an Ingress / HTTPRoute that terminates TLS (the default here).
+#   mode = "files" cert = "/etc/floe-tls/tls.crt", key = "/etc/floe-tls/tls.key": mount a
+#                  kubernetes.io/tls Secret (cert-manager) at /etc/floe-tls via volumes; floe
+#                  reloads it when the Secret is renewed. Set healthCheck.scheme: HTTPS.
+#   mode = "acme"  [server.tls.acme] domains, email; CLOUDFLARE_API_TOKEN and
+#                  FLOE_TLS_STORAGE_KEY from a Secret. /readyz is 503 until the first
+#                  certificate is loaded, the TLS port has no certificate before that: use
+#                  healthCheck.scheme: HTTPS with liveness/startup kind: tcp.
+# README.md has an example of each.
+# ---------------------------------------------------------------------------------------------
+floeToml: |
+  [server]
+  listen = "0.0.0.0:8097"
+  # public_url = "https://git.example.com"   # the URL clients use, when behind an Ingress
+  roles = []                    # D9: [] = serve + maintain + events
+  drain_timeout = "20s"         # D31 phase 2; keep terminationGracePeriodSeconds above 30s + this
+
+  [server.auth]
+  mode = "token"                # none is loopback-only: token or oidc in a cluster
+  anonymous_read = false
+  tokens = [{ principal = "admin", token = "", token_env = "FLOE_TOKEN_ADMIN", write = true, admin = true }]
+  # `token = ""` is required by the parser even when token_env names the variable.
+
+  [server.tls]
+  mode = "off"
+
+  [store]
+  backend = "s3"
+  bucket = "floe"
+
+  [store.s3]
+  endpoint = "https://s3.us-east-1.amazonaws.com"
+  region = "us-east-1"
+  # No AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY in the pod = the SDK chain: IRSA, Pod Identity (D43).
+
+  [cache]
+  dir = "/var/lib/floe"         # the `cache` volume below
+  max_bytes = "10GiB"           # keep the cache volume's sizeLimit above it
+
+  [telemetry]
+  log_format = "json"
+  metrics = true                # /metrics, behind auth (see monitoring)
+
+# The ConfigMap is a file, not env: no envFrom; restart pods when it changes; mount at /etc/floe.
+configmap:
+  enabled: false
+  checksumEnabled: true
+  mountPath: /etc/floe
+
+# ---------------------------------------------------------------------------------------------
+# Secrets, as env vars. floe reads every secret from env: AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
+# (omit for IRSA), each token's token_env (FLOE_TOKEN_ADMIN), FLOE_CONFIG_KEY (D61),
+# FLOE__SERVER__AUTH__SESSION_SECRET / __OAUTH_CLIENT_SECRET / __MCP_HANDLE_SECRET (oidc, MCP),
+# CLOUDFLARE_API_TOKEN + FLOE_TLS_STORAGE_KEY (acme), FLOE_GITHUB_TOKEN / FLOE_SECRET_* (named by
+# the runtime config document).
+# ---------------------------------------------------------------------------------------------
+sharedSecrets: []               # preferred: Secrets you manage, every key loaded (envFrom)
+#  - floe-credentials
+secretRefs: {}                  # or one variable at a time
+#  FLOE_CONFIG_KEY: {name: floe-config-key, key: key}
+secretData: {}                  # development only: a Secret created from these values
+env: []                         # plain env, e.g. FLOE__ overrides
+#  - {name: FLOE__STORE__BUCKET, value: my-bucket}
+
+# Probes: /healthz (liveness, startup), /readyz (readiness: 503 while draining, prewarming or
+# waiting for an ACME certificate). The library treats 0 as unset, hence delays of 1.
+healthCheck:
+  liveness: {path: /healthz, initialDelaySeconds: 1, periodSeconds: 10, timeoutSeconds: 3, failureThreshold: 6}
+  readiness: {path: /readyz, initialDelaySeconds: 1, periodSeconds: 5, timeoutSeconds: 3, failureThreshold: 2}
+  startup: {path: /healthz, periodSeconds: 2, failureThreshold: 90}
+
+# D31 drains in two phases: up to 30 s of normal serving while maintenance stops, then
+# server.drain_timeout for in-flight requests. 30 + 20 + margin.
+terminationGracePeriodSeconds: 65
+enableServiceLinks: false
+automountServiceAccountToken: false   # floe never calls the Kubernetes API
+
+resources:                      # with an emptyDir medium: Memory the cache counts against the limit
+  requests: {cpu: 250m, memory: 1Gi}
+  limits: {cpu: "4", memory: 4Gi}
+
+securityContext:                # the image's user floe is uid/gid 1000
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  runAsNonRoot: true
+  seccompProfile: {type: RuntimeDefault}
+containerSecurityContext:       # read-only root: floe writes only to the cache and /tmp
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities: {drop: [ALL]}
+
+# The cache (disposable: the bucket is the only state) and /tmp. For tmpfs as on the reference
+# hosts (AGENTS.md §1.1) set medium: Memory and raise resources.limits.memory above max_bytes.
+# For a `maintenance.disk = "ssd"` host use persistence below and drop the cache entries here.
+volumes:
+  - name: cache
+    emptyDir: {sizeLimit: 12Gi}
+  - name: tmp
+    emptyDir: {}
+volumeMounts:
+  - {name: cache, mountPath: /var/lib/floe}
+  - {name: tmp, mountPath: /tmp}
+
+persistence:                    # a PVC for the cache instead (ReadWriteOnce: one replica, Recreate)
+  enabled: false
+  mountPath: /var/lib/floe
+  volumeName: cache
+  size: 200Gi
+  storageClass: ""
+
+serviceAccount:
+  create: true
+  annotations: {}               # eks.amazonaws.com/role-arn (IRSA), iam.gke.io/gcp-service-account
+
+service:
+  port: 80
+
+# Git and LFS stream large bodies for a long time. ingress-nginx annotations:
+#   nginx.ingress.kubernetes.io/proxy-body-size: "0"
+#   nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+#   nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+#   nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+#   nginx.ingress.kubernetes.io/proxy-buffering: "off"
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts: []                     # [{host: git.example.com, paths: [{path: /}]}]
+  tls: []
+
+# HTTPRoute (Gateway API). The library renders one unless enabled is false. For long transfers
+# give `rules` a timeouts block ({request: "0s"}) with the backendRef to the Service.
+gateway:
+  enabled: false
+  parentRefs: []
+  hostnames: []
+  rules: []
+
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+pdb:
+  enabled: true
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+
+topologySpread:                 # plus the library's preferred anti-affinity (antiAffinityLabels)
+  topologyKeys: [topology.kubernetes.io/zone, kubernetes.io/hostname]
+  whenUnsatisfiable: ScheduleAnyway
+
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}
+
+# /metrics needs a credential: add a read-only token to floeToml (principal "metrics",
+# token_env FLOE_TOKEN_METRICS) and put its Secret key in endpoint.authorization.
+monitoring:
+  enabled: false
+  kind: ServiceMonitor          # ServiceMonitor | PodMonitor | VMServiceScrape
+  interval: 60s
+  port: http                    # a port name: the library quotes it
+  path: /metrics
+  labels: {}
+  endpoint: {}
+  #  authorization: {type: Bearer, credentials: {name: floe-credentials, key: FLOE_TOKEN_METRICS}}

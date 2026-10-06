@@ -1,0 +1,11 @@
+floe {{ .Chart.AppVersion }} is installed as {{ include "common.fullname" . }} in {{ .Release.Namespace }}.
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "common.fullname" . }}
+{{- if ne (default dict .Values.service).enabled false }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "common.fullname" . }} 8097:{{ (default dict .Values.service).port | default 80 }}
+  curl -s http://127.0.0.1:8097/readyz
+{{- end }}
+
+floe.toml (bootstrap) is the ConfigMap {{ include "common.fullname" . }}. Runtime configuration (the
+GitHub mirror, catalog, events, codeintel, MCP) is edited at <public_url>/_admin by an admin token.
+Secrets are env vars: AWS keys (or IRSA), FLOE_TOKEN_*, FLOE_CONFIG_KEY, FLOE__SERVER__AUTH__*.
