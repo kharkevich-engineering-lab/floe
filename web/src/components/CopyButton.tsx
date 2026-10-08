@@ -69,6 +69,11 @@ export function CopyButton({
     >
       {state === "done" ? <CheckIcon /> : <ClipboardIcon />}
       {label && <span>{state === "done" ? "Copied" : state === "error" ? "Failed" : label}</span>}
+      {!label && (
+        <span className="sr-only" role="status">
+          {state === "done" ? "Copied" : state === "error" ? "Copy failed" : ""}
+        </span>
+      )}
     </button>
   );
 }

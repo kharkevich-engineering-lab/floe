@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import logo from "../assets/logo.svg";
 
 /** Which instance answered — kind is the loud part (a serverless host vs the SSD host must
  * be distinguishable at a glance), then the name, revision, build. */
@@ -12,8 +13,9 @@ export interface InstanceInfo {
   disk: "tmpfs" | "ssd" | string;
 }
 
-const LABEL: Record<string, string> = { serverless: "a serverless host", ssd: "The SSD host 🚀", dev: "dev" };
+const LABEL: Record<string, string> = { serverless: "Serverless host", ssd: "SSD host", dev: "Development" };
 
+/** The page footer: the Lab lockup and which machine answered this page. */
 export function InstanceFooter() {
   const [info, setInfo] = useState<InstanceInfo | null>(null);
   useEffect(() => {
@@ -27,13 +29,22 @@ export function InstanceFooter() {
       live = false;
     };
   }, []);
-  if (!info) return null;
-  const where = info.kind === "serverless" ? `${info.revision || info.name}${info.instance ? ` · ${info.instance}` : ""}` : info.name;
+  const where = info ? (info.kind === "serverless" ? `${info.revision || info.name}${info.instance ? ` · ${info.instance}` : ""}` : info.name) : "";
   return (
-    <footer className={`instance-footer kind-${info.kind}`} title={`roles: ${info.roles.join(", ")} · disk: ${info.disk}`}>
-      <span className="instance-kind">{LABEL[info.kind] ?? info.kind}</span>
-      <span className="instance-where">{where}</span>
-      <span className="instance-version">{info.version}</span>
+    <footer className="site-footer">
+      <div className="footer-brand">
+        <img src={logo} alt="" width={24} height={24} />
+        <span>
+          <strong>floe</strong> — a Kharkevich Engineering Lab product
+        </span>
+      </div>
+      {info && (
+        <p className={`instance kind-${info.kind}`} title={`Roles: ${info.roles.join(", ")} · disk: ${info.disk}`}>
+          <span className="instance-kind">{LABEL[info.kind] ?? info.kind}</span>
+          <span className="instance-where">{where}</span>
+          <span className="instance-version">{info.version}</span>
+        </p>
+      )}
     </footer>
   );
 }

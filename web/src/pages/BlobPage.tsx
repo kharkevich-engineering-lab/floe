@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { File } from "@pierre/diffs/react";
+import { useTheme } from "../theme";
 import { api, client } from "../api";
 import { useResolved } from "../use-resolved";
 import { useRepo } from "./RepoLayout";
@@ -15,6 +16,7 @@ export function BlobPage() {
   const { r, data: b } = useResolved(full, rest, (res) => api.blob(full, res.sha, res.path));
   const isMd = /\.(md|markdown)$/i.test(rest);
   const [mode, setMode] = useState<"preview" | "code">("preview");
+  const { light } = useTheme();
   const lines = b.contents ? b.contents.split("\n").length - (b.contents.endsWith("\n") ? 1 : 0) : 0;
   const rawURL = client.repo(full).urls.raw(b.sha, b.path);
   return (
@@ -58,7 +60,7 @@ export function BlobPage() {
           ) : (
             <File
               file={{ name: b.name, contents: b.contents.replace(/\n$/, "") }}
-              options={{ disableFileHeader: true, themeType: "light", overflow: "scroll" }}
+              options={{ disableFileHeader: true, themeType: light ? "light" : "dark", overflow: "scroll" }}
             />
           ))}
       </Box>

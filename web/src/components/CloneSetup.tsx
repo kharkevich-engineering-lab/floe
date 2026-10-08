@@ -22,61 +22,82 @@ export function CloneSetup({ repo, compact = false }: { repo: string; compact?: 
   const url = `${r.base_url}/${repo}.git`;
   return (
     <div className="clone-setup">
-      <div className="small strong">Run once per machine, then git just works</div>
-      <div className="small muted">
-        Asks for an access token once
-        {r.token_url && (
-          <>
-            {" "}
-            (create one at{" "}
-            <a href={r.token_url} target="_blank" rel="noreferrer">
-              {r.token_url.replace(/^https?:\/\//, "")}
-            </a>
-            )
-          </>
-        )}
-        , stores it in a file only you can read, installs a git credential helper that hands it to git, configures
-        bundle URIs and clones. Idempotent: re-run any time. Needs git ≥ 2.46 and curl.
-      </div>
-      <CodeSample code={r.install} />
-      <div className="small strong">Already set up</div>
-      <CodeSample code={r.plain_clone} />
-      <div className="small strong">CI — no helper, the token from the environment</div>
-      <CodeSample code={r.manual_clone} />
+      <p className="eyebrow">Clone {repo}</p>
+      <CodeSample code={url} />
+      <ol className="list-reset">
+        <li className="clone-step">
+          <span className="clone-step-number" aria-hidden>
+            1
+          </span>
+          <div>
+            <p className="clone-step-title">First time on this machine: run the installer</p>
+            <p className="clone-step-text">
+              It asks for an access token once
+              {r.token_url && (
+                <>
+                  {" "}
+                  (create one at{" "}
+                  <a href={r.token_url} target="_blank" rel="noreferrer">
+                    {r.token_url.replace(/^https?:\/\//, "")}
+                  </a>
+                  )
+                </>
+              )}
+              , stores it in a file only you can read, sets up a git credential helper and bundle URIs, then clones. Safe to re-run. Needs git 2.46 or later and curl.
+            </p>
+          </div>
+          <CodeSample code={r.install} />
+        </li>
+        <li className="clone-step">
+          <span className="clone-step-number" aria-hidden>
+            2
+          </span>
+          <div>
+            <p className="clone-step-title">Already set up: clone as usual</p>
+          </div>
+          <CodeSample code={r.plain_clone} />
+        </li>
+        <li className="clone-step">
+          <span className="clone-step-number" aria-hidden>
+            CI
+          </span>
+          <div>
+            <p className="clone-step-title">In CI: no helper, the token comes from the environment</p>
+          </div>
+          <CodeSample code={r.manual_clone} />
+        </li>
+      </ol>
       <div className="clone-actions">
         <CopyButton text={() => api.installScript(repo)} label="Copy installer script" />
-        <a className="btn btn-small" href={`/services/public/install.sh?repo=${repo}`} download="install.sh">
+        <a className="btn small" href={`/services/public/install.sh?repo=${repo}`} download="install.sh">
           Download install.sh
         </a>
       </div>
       {!compact && (
-        <p className="small muted">
-          Initial clones bootstrap from immutable static bundles (bundle-uri); upload-pack only sends the remainder.
-          Every recipe passes <code>-c fetch.bundleURI=…/bundles/catchup</code> (the list without the fulls: a fetch only
-          ever needs incremental links): git records no list for an advertised
-          bundle-uri clone, and without it later <code>git fetch</code>es would skip the bundles. The installer sets
-          <code>transfer.bundleURI=true</code> and <code>fetch.uriProtocols=https</code> globally. When the server rejects the
-          token (a real 401) git erases it from the helper, which tells you where to get a new one.
-        </p>
-      )}
-      {!compact && (
-        <>
-          <p className="small muted">
+        <details className="notes">
+          <summary>How clones stay fast, and other clone shapes</summary>
+          <p>
+            Initial clones bootstrap from immutable static bundles (bundle-uri); upload-pack only sends the remainder.
+            Every recipe passes <code>-c fetch.bundleURI=…/bundles/catchup</code> (the list without the fulls: a fetch only
+            ever needs incremental links): git records no list for an advertised bundle-uri clone, and without it later{" "}
+            <code>git fetch</code>es would skip the bundles. The installer sets <code>transfer.bundleURI=true</code> and{" "}
+            <code>fetch.uriProtocols=https</code> globally. When the server rejects the token (a real 401) git erases it from
+            the helper, which tells you where to get a new one.
+          </p>
+          <p>
             <strong>Blobless clone</strong> (full history, blobs on demand — the developer shape): git does not match bundle
             filters itself, so point it at the blobless bundle list explicitly. Keep <code>--sparse</code>: a full checkout
-            would ask for every blob of HEAD's tree at once (minutes of server time); add areas with{" "}
+            would ask for every blob of HEAD’s tree at once (minutes of server time); add areas with{" "}
             <code>git sparse-checkout add</code>.
           </p>
           <CodeSample code={r.blobless_clone} />
-          <p className="small muted">
-            <strong>CI / shallow clones</strong> (<code>--depth</code>, <code>--single-branch</code>): pass{" "}
-            <code>-c transfer.bundleURI=false</code> — git otherwise downloads the full weekly bundle first (the whole
-            base pack of a large repository) even though the clone is bounded; upload-pack answers those in seconds.
+          <p>
+            <strong>CI and shallow clones</strong> (<code>--depth</code>, <code>--single-branch</code>): pass{" "}
+            <code>-c transfer.bundleURI=false</code> — git otherwise downloads the full weekly bundle first (the whole base
+            pack of a large repository) even though the clone is bounded; upload-pack answers those in seconds.
           </p>
-        </>
+        </details>
       )}
-      <div className="small muted">Clone URL</div>
-      <CodeSample code={url} />
     </div>
   );
 }

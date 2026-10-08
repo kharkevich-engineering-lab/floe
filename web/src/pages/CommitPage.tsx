@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { parsePatchFiles } from "@pierre/diffs";
 import { FileDiff } from "@pierre/diffs/react";
+import { useTheme } from "../theme";
 import { api } from "../api";
 import { useData } from "../data";
 import { useRepo } from "./RepoLayout";
@@ -15,6 +16,7 @@ export function CommitPage() {
   const { sha = "" } = useParams();
   const data = useData(`commit:${full}:${sha}`, () => api.commit(full, sha), Infinity);
   const [split, setSplit] = useState(false);
+  const { light } = useTheme();
   const files = useMemo(() => {
     if (!data.patch) return [];
     try {
@@ -110,7 +112,7 @@ export function CommitPage() {
 
       {files.map((f, i) => (
         <div key={f.name + i} id={`d-${encodeURIComponent(f.name)}`} className="diff-file">
-          <FileDiff fileDiff={f} options={{ diffStyle: split ? "split" : "unified", themeType: "light", overflow: "scroll" }} />
+          <FileDiff fileDiff={f} options={{ diffStyle: split ? "split" : "unified", themeType: light ? "light" : "dark", overflow: "scroll" }} />
         </div>
       ))}
       {files.length === 0 && stats.length > 0 && (

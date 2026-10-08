@@ -1,3 +1,4 @@
+import { Icon } from "./Icon";
 import { dismissError, useErrors } from "../data";
 
 /** Every error the app knows about, visible (bottom-right), dismissable. */
@@ -11,14 +12,14 @@ export function ErrorTray() {
           <div className="error-text">
             {e.status ? <span className="pill">HTTP {e.status}</span> : null} {e.text}
           </div>
-          <button type="button" className="btn small" onClick={() => dismissError(e.id)} aria-label="Dismiss">
-            ×
+          <button type="button" className="icon-button small" onClick={() => dismissError(e.id)} aria-label="Dismiss this error">
+            <Icon name="close" size={16} />
           </button>
         </div>
       ))}
       {errors.length > 1 && (
         <button type="button" className="btn small dismiss-all" onClick={() => dismissError()}>
-          dismiss all
+          Dismiss all
         </button>
       )}
     </div>
