@@ -30,7 +30,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use aws_credential_types::Credentials;
+/// Re-exported: [`CredentialSource::fixed`] takes it.
+pub use aws_credential_types::Credentials;
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
 use aws_sigv4::http_request::{
     PayloadChecksumKind, PercentEncodingMode, SignableBody, SignableRequest, SigningSettings,

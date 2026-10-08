@@ -64,7 +64,7 @@ function CatalogSummary({ current, saved }: { current: Record<string, unknown>; 
           <Notice tone="ok" title="The catalog answered">
             HTTP {res.status}
             {res.latency_ms !== undefined ? ` in ${res.latency_ms} ms` : ""}.
-            {res.unauthenticated && " The writer signs or exchanges credentials itself; this probe did not authenticate."}
+            {res.unauthenticated && " The writer exchanges credentials itself; this probe did not authenticate."}
           </Notice>
         )}
         {res && !res.ok && (

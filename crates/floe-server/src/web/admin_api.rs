@@ -972,9 +972,12 @@ struct CatalogTestBody {
 /// `GET {uri}/v1/config?warehouse=…` (Iceberg REST). The candidate section
 /// must validate like a published one; env names cannot be changed by a test
 /// (D61); a URI other than the applied one must be https (or loopback http)
-/// and gets no stored bearer. `OAuth2` client credentials and `SigV4` (D63) are
-/// the writer's own seams, so those probes go unauthenticated. The answer is
-/// the status, the latency and a fixed error class — never the response body.
+/// and gets no stored credential. `auth = "sigv4"` (D63) is signed like the
+/// writer signs (`floe_catalog::sigv4`: the applied `s3_*_env` credentials,
+/// D43, generic `SigV4`) and only for the applied URI; `OAuth2` client
+/// credentials are the writer's own seam, so that probe goes unauthenticated.
+/// No redirects are followed. The answer is the status, the latency and a
+/// fixed error class — never the response body.
 async fn catalog_test(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1017,6 +1020,18 @@ async fn catalog_test(
         }
     };
     let mut rq = client.get(&probe.url).header("Accept", "application/json");
+    // A build without the catalog feature has no signer (its writer cannot run either).
+    let unauthenticated =
+        probe.unauthenticated || (probe.sigv4.is_some() && !cfg!(feature = "catalog"));
+    #[cfg(feature = "catalog")]
+    if let Some(sig) = &probe.sigv4 {
+        match sigv4_probe_headers(sig, &probe.url).await {
+            Ok(h) => rq = rq.headers(h),
+            Err(error_class) => {
+                return ok(&json!({"ok": false, "auth": probe.auth, "error_class": error_class}));
+            }
+        }
+    }
     if let Some(var) = &probe.bearer_env {
         match floe_config::secret::env_var(var) {
             Some(t) => rq = rq.header("Authorization", format!("Bearer {}", t.trim())),
@@ -1040,7 +1055,7 @@ async fn catalog_test(
                 "status": status,
                 "latency_ms": latency_ms,
                 "error_class": status_class(status),
-                "unauthenticated": probe.unauthenticated,
+                "unauthenticated": unauthenticated,
             }))
         }
     }
@@ -1053,8 +1068,60 @@ pub(crate) struct CatalogProbe {
     pub auth: &'static str,
     /// The env var whose bearer is sent (the applied one, to the applied URI only).
     pub bearer_env: Option<String>,
-    /// The writer would authenticate (`OAuth2`, `SigV4`) but this probe does not.
+    /// Sign the probe like the writer (`auth = "sigv4"`, to the applied URI only).
+    pub sigv4: Option<SigV4Probe>,
+    /// The writer would authenticate (`OAuth2`) but this probe does not.
     pub unauthenticated: bool,
+}
+
+/// How a `sigv4` probe is signed: the applied env names (a test cannot change
+/// them, D61), the candidate's signing name and region.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SigV4Probe {
+    pub service: String,
+    pub region: String,
+    pub access_key_env: String,
+    pub secret_key_env: String,
+}
+
+/// The headers of a signed probe: `Host` as reqwest sends it (no default
+/// port), `Accept`, then what [`floe_catalog::sigv4::Signer`] adds. `Err` is a
+/// fixed error class (a credential error's text never leaves the server).
+#[cfg(feature = "catalog")]
+async fn sigv4_probe_headers(sig: &SigV4Probe, url: &str) -> Result<HeaderMap, &'static str> {
+    use floe_catalog::sigv4::{CredentialSource, Signer};
+    let creds = CredentialSource::from_env(&sig.access_key_env, &sig.secret_key_env, &sig.region)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "catalog test: no SigV4 credentials");
+            "no_credentials"
+        })?;
+    let signer = Signer::new(Arc::new(creds), &sig.service, &sig.region);
+    signed_probe_headers(&signer, url).await
+}
+
+#[cfg(feature = "catalog")]
+async fn signed_probe_headers(
+    signer: &floe_catalog::sigv4::Signer,
+    url: &str,
+) -> Result<HeaderMap, &'static str> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "bad_uri")?;
+    let host = match (parsed.host_str(), parsed.port()) {
+        (Some(h), Some(p)) => format!("{h}:{p}"),
+        (Some(h), None) => h.to_string(),
+        (None, _) => return Err("bad_uri"),
+    };
+    let mut h = HeaderMap::new();
+    h.insert(
+        header::HOST,
+        HeaderValue::from_str(&host).map_err(|_| "bad_uri")?,
+    );
+    h.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+    signer.sign("GET", url, &mut h, b"").await.map_err(|e| {
+        tracing::warn!(error = %e, "catalog test: signing failed");
+        "no_credentials"
+    })?;
+    Ok(h)
 }
 
 /// The security rules of `catalog/test`, pure (see [`catalog_test`]).
@@ -1092,6 +1159,19 @@ pub(crate) fn catalog_probe(
     } else {
         None
     };
+    let sigv4 = if auth == "sigv4" {
+        if !same {
+            return Err("SigV4 credentials only sign requests to the configured catalog.uri: publish the new uri first".into());
+        }
+        Some(SigV4Probe {
+            service: cat.sigv4_service.clone(),
+            region: cat.sigv4_region().to_string(),
+            access_key_env: applied.s3_access_key_env.clone(),
+            secret_key_env: applied.s3_secret_key_env.clone(),
+        })
+    } else {
+        None
+    };
     let mut url = format!("{}/v1/config", uri.trim_end_matches('/'));
     if let Some(w) = cat.warehouse.as_deref().filter(|w| !w.is_empty()) {
         url.push_str("?warehouse=");
@@ -1101,7 +1181,8 @@ pub(crate) fn catalog_probe(
         url,
         auth,
         bearer_env,
-        unauthenticated: matches!(auth, "oauth2" | "sigv4"),
+        sigv4,
+        unauthenticated: auth == "oauth2",
     })
 }
 
@@ -1232,6 +1313,127 @@ mod tests {
         let mut moved = bearer.clone();
         moved.uri = Some("https://evil.example/iceberg".into());
         assert!(catalog_probe(&bearer, &moved).is_err());
+        // SigV4: signed like the writer, with the applied env names, to the applied URI only.
+        let mut sigv4 = catalog("https://catalog.example/iceberg");
+        sigv4.auth = floe_config::CatalogAuth::Sigv4;
+        sigv4.s3_region = "eu-west-1".into();
+        let p = catalog_probe(&sigv4, &sigv4).unwrap();
+        assert!(!p.unauthenticated);
+        assert_eq!(
+            p.sigv4,
+            Some(SigV4Probe {
+                service: "s3".into(),
+                region: "eu-west-1".into(),
+                access_key_env: "AWS_ACCESS_KEY_ID".into(),
+                secret_key_env: "AWS_SECRET_ACCESS_KEY".into(),
+            })
+        );
+        let mut moved = sigv4.clone();
+        moved.uri = Some("https://evil.example/iceberg".into());
+        assert!(catalog_probe(&sigv4, &moved).unwrap_err().contains("SigV4"));
+        let mut renamed = sigv4.clone();
+        renamed.s3_access_key_env = "FLOE_CONFIG_KEY".into();
+        assert!(catalog_probe(&sigv4, &renamed).is_err());
+    }
+
+    /// The lab bug: the probe went out unsigned and `RustFS` answered 403 while
+    /// the writer was healthy. A mock that verifies `SigV4` (recomputing the
+    /// `Authorization` from the request it received) accepts the signed probe
+    /// and refuses an unsigned or wrongly signed one.
+    #[cfg(feature = "catalog")]
+    #[tokio::test]
+    async fn sigv4_probe_is_signed_like_the_writer() {
+        use floe_catalog::sigv4::{CredentialSource, Signer, SigningInput, sign_headers};
+        let creds = floe_catalog::sigv4::Credentials::new("AKIDTEST", "secret", None, None, "t");
+        let verify_creds = creds.clone();
+        let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+            let creds = verify_creds.clone();
+            async move {
+                let h = req.headers();
+                let Some(got) = h.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
+                    return StatusCode::FORBIDDEN;
+                };
+                let Some(date) = h.get("x-amz-date").and_then(|v| v.to_str().ok()) else {
+                    return StatusCode::FORBIDDEN;
+                };
+                let Ok(at) = chrono::NaiveDateTime::parse_from_str(date, "%Y%m%dT%H%M%SZ") else {
+                    return StatusCode::FORBIDDEN;
+                };
+                let host = h
+                    .get(header::HOST)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                let mut want = HeaderMap::new();
+                want.insert(header::HOST, HeaderValue::from_str(host).unwrap());
+                want.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+                let url = format!("http://{host}{}", req.uri());
+                let input = SigningInput {
+                    method: req.method().as_str(),
+                    url: &url,
+                    body: b"",
+                    service: "s3",
+                    region: "us-east-1",
+                    time: std::time::SystemTime::from(at.and_utc()),
+                    payload_header: true,
+                };
+                if sign_headers(&input, &mut want, &creds).is_err() {
+                    return StatusCode::INTERNAL_SERVER_ERROR;
+                }
+                let ok = want
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    == Some(got)
+                    && req.uri().path() == "/iceberg/v1/config";
+                if ok {
+                    StatusCode::OK
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let mut cat = catalog(&format!("http://{addr}/iceberg"));
+        cat.auth = floe_config::CatalogAuth::Sigv4;
+        let probe = catalog_probe(&cat, &cat).unwrap();
+        let sig = probe.sigv4.as_ref().unwrap();
+        let signer = Signer::new(
+            Arc::new(CredentialSource::fixed(creds)),
+            &sig.service,
+            &sig.region,
+        );
+        let client = test_client().unwrap();
+        let signed = client
+            .get(&probe.url)
+            .headers(signed_probe_headers(&signer, &probe.url).await.unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(signed.status(), 200);
+        let unsigned = client
+            .get(&probe.url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unsigned.status(), 403);
+        let other = Signer::new(
+            Arc::new(CredentialSource::fixed(
+                floe_catalog::sigv4::Credentials::new("AKIDTEST", "wrong", None, None, "t"),
+            )),
+            &sig.service,
+            &sig.region,
+        );
+        let wrong = client
+            .get(&probe.url)
+            .headers(signed_probe_headers(&other, &probe.url).await.unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), 403);
+        server.abort();
     }
 
     #[test]
