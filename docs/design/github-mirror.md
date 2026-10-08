@@ -1150,7 +1150,10 @@ to about 16 repositories per flush. So:
   `ref_events` = webhook events lives in floe-server (`tests/events.rs`).
 - **Cold cursor** (no `catalog/cursor.json` yet). The catalog's first enablement is recorded once in
   `catalog/epoch.json` at the bucket root (`{ "enabled_at": … }`, CAS `Create`; whoever wins, every host then
-  reads the same value). For a repository without a cursor:
+  reads the same value). *As landed (2026-10-08):* the tail reads or creates it **when it starts**, with its start
+  time (`CatalogTail::spawn`, retried with backoff on a bucket error), not on its first catch-up: that first
+  sweep can be a whole `sweep_interval` later, and a repository created in between was taken for a pre-existing
+  one (its first push never reached `ref_events`). For a repository without a cursor:
   - `backfill = true` ⇒ `handle.retained_log_start()` (checkpoint history, D47);
   - else, when the repository's oldest retained log entry was committed at or after `enabled_at` (it was created
     after the catalog was enabled: every mirror-created repository, for instance) ⇒ the retained log start, so
