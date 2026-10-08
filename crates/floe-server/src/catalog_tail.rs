@@ -73,10 +73,27 @@ pub struct CatalogTail {
     wake_tx: mpsc::Sender<RepoId>,
     wake_rx: parking_lot::Mutex<Option<mpsc::Receiver<RepoId>>>,
     epoch: tokio::sync::OnceCell<Epoch>,
+    /// When this tail was built (the catalog enabled on this instance): the
+    /// `enabled_at` it records when `catalog/epoch.json` does not exist yet.
+    started_at: Timestamp,
 }
+
+/// First retry of an epoch read/create that failed (bucket outage); doubles up to [`EPOCH_RETRY_MAX`].
+const EPOCH_RETRY: Duration = Duration::from_secs(1);
+const EPOCH_RETRY_MAX: Duration = Duration::from_mins(1);
 
 impl CatalogTail {
     pub fn new(registry: Arc<Registry>, writer: Arc<CatalogWriter>, backfill: bool) -> Arc<Self> {
+        Self::new_at(registry, writer, backfill, Utc::now())
+    }
+
+    /// [`CatalogTail::new`] with an explicit start time (tests: a deterministic clock).
+    pub fn new_at(
+        registry: Arc<Registry>,
+        writer: Arc<CatalogWriter>,
+        backfill: bool,
+        started_at: Timestamp,
+    ) -> Arc<Self> {
         let (wake_tx, wake_rx) = mpsc::channel(WAKE_QUEUE);
         Arc::new(CatalogTail {
             registry,
@@ -88,6 +105,7 @@ impl CatalogTail {
             wake_tx,
             wake_rx: parking_lot::Mutex::new(Some(wake_rx)),
             epoch: tokio::sync::OnceCell::new(),
+            started_at,
         })
     }
 
@@ -106,11 +124,43 @@ impl CatalogTail {
         }
     }
 
-    /// Start the wake consumer, the sweep (`events.sweep_interval`, 0 = off)
-    /// and the inventory snapshot check. Call once; a second call starts only
-    /// another sweep.
+    /// Record the epoch, then start the wake consumer, the sweep
+    /// (`events.sweep_interval`, 0 = off) and the inventory snapshot check.
+    /// Call once; a second call starts only another sweep.
+    ///
+    /// The epoch (`catalog/epoch.json`, §C.4) is read or created **now**, when
+    /// the catalog starts, not by the first catch-up: a repository created
+    /// between enablement and the first sweep must count as new (its first push
+    /// belongs in `ref_events`), and the first sweep may be a whole
+    /// `sweep_interval` away. A failed attempt (bucket outage) is retried with
+    /// backoff and still records [`Self::started_at`]; catch-ups that run
+    /// before it succeeds share the same once-cell.
     pub fn spawn(self: &Arc<Self>, sweep_every: Duration) {
         let rx = self.wake_rx.lock().take();
+        if rx.is_some() {
+            let tail = self.clone();
+            tokio::spawn(async move {
+                let mut wait = EPOCH_RETRY;
+                loop {
+                    match tail.epoch().await {
+                        Ok(e) => {
+                            tracing::info!(enabled_at = %e.enabled_at, "catalog: epoch recorded");
+                            return;
+                        }
+                        Err(e) => tracing::warn!(
+                            error = format!("{e:#}"),
+                            retry_in = ?wait,
+                            "catalog: reading/creating catalog/epoch.json failed"
+                        ),
+                    }
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(EPOCH_RETRY_MAX);
+                    if floe_wal::tasks::draining() {
+                        return;
+                    }
+                }
+            });
+        }
         if let Some(mut rx) = rx {
             let tail = self.clone();
             tokio::spawn(async move {
@@ -230,12 +280,14 @@ impl CatalogTail {
         Ok(cursor::catch_up(handle.store(), &source, self.writer.as_ref(), &start).await?)
     }
 
-    /// `catalog/epoch.json`, read (or created) once per process.
-    async fn epoch(&self) -> anyhow::Result<Epoch> {
+    /// `catalog/epoch.json`, read (or created with [`Self::started_at`]) once
+    /// per process; [`Self::spawn`] does it at start.
+    pub async fn epoch(&self) -> anyhow::Result<Epoch> {
         let root = self.registry.store().clone();
+        let started_at = self.started_at;
         let epoch = self
             .epoch
-            .get_or_try_init(|| async move { cursor::load_epoch(root.as_ref(), Utc::now()).await })
+            .get_or_try_init(|| async move { cursor::load_epoch(root.as_ref(), started_at).await })
             .await?;
         Ok(*epoch)
     }
@@ -624,5 +676,94 @@ mod tests {
         assert_eq!(m.status.as_deref(), Some("active"));
         assert_eq!(m.private, Some(true));
         assert!(m.pushed_at.is_some());
+    }
+
+    /// A committer that accepts everything (the writer is up at once).
+    struct AcceptAll;
+    #[async_trait::async_trait]
+    impl floe_catalog::Committer for AcceptAll {
+        async fn connect(&self) -> Result<(), floe_catalog::CommitError> {
+            Ok(())
+        }
+        async fn commit(
+            &self,
+            _table: floe_catalog::rows::Table,
+            _rows: &[Row],
+            _ingested_at: Timestamp,
+        ) -> Result<(), floe_catalog::CommitError> {
+            Ok(())
+        }
+    }
+
+    /// Lab bug: the epoch was created by the first sweep (minutes after the
+    /// catalog started), so a repository created in between counted as
+    /// pre-existing and its first push never reached `ref_events`. The epoch
+    /// is now recorded when the tail starts, with the start time.
+    #[tokio::test]
+    async fn the_epoch_is_recorded_at_start_and_a_repository_created_after_it_is_new() {
+        let cache = tempfile::tempdir().unwrap();
+        let mut cfg = floe_config::Config::default();
+        cfg.cache.dir = cache.path().to_path_buf();
+        let store: floe_store::DynStore = Arc::new(floe_store::memory::MemoryStore::new());
+        let registry = Registry::new(store.clone(), Arc::new(cfg));
+        let writer = CatalogWriter::start(
+            Arc::new(AcceptAll),
+            floe_catalog::FlushPolicy {
+                flush_interval: Duration::from_millis(10),
+                flush_rows: 1,
+                max_buffer_rows: 1000,
+                commit_timeout: Duration::from_secs(10),
+            },
+        );
+        // A deterministic clock: the catalog "started" an hour ago.
+        let started = DateTime::parse_from_rfc3339("2026-10-08T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let tail = CatalogTail::new_at(registry.clone(), writer.clone(), false, started);
+        // No sweep, no wake: only the start.
+        tail.spawn(Duration::ZERO);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let epoch: Epoch = loop {
+            if let Some((_, b)) =
+                floe_store::ObjectStoreExt::get_bytes(store.as_ref(), cursor::EPOCH_KEY)
+                    .await
+                    .unwrap()
+            {
+                break serde_json::from_slice(&b).unwrap();
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no epoch after start"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(epoch.enabled_at, started);
+
+        // Created (and pushed to) after the start, before any sweep.
+        let id = RepoId::new("acme", "late").unwrap();
+        let handle = registry
+            .create(&id, floe_git::ObjectFormat::Sha1)
+            .await
+            .unwrap();
+        let txn = floe_proto::v1::RefTransaction {
+            updates: vec![floe_proto::v1::RefUpdate {
+                name: "refs/heads/main".into(),
+                new_oid: "a".repeat(40),
+                ..Default::default()
+            }],
+            atomic: true,
+            ..Default::default()
+        };
+        handle
+            .publish_ref_update(txn, std::collections::HashMap::new())
+            .await
+            .unwrap();
+        while !writer.is_up() {
+            assert!(tokio::time::Instant::now() < deadline, "writer never up");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let c = tail.catch_up(&id).await.unwrap();
+        assert_eq!(c.from_seq, 0, "a new repository starts at its log start");
+        assert_eq!(c.rows, 1, "its first push is a ref_events row: {c:?}");
     }
 }

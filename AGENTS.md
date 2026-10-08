@@ -698,6 +698,17 @@ schema hints the server emits (`x-floe.advanced`, `order`, `when`; section `desc
 are presentation only and change no API shape. Help text in the schema is plain language; config keys and decision
 numbers stay available behind a key toggle, never as the label. Details: `web/README.md` § Design system.
 
+**D66 — A client push adopts the default branch; `PUT …/api/head` changes it (2026-10-08).** When a push
+(receive-pack or the GitHub facade, `RepoHandle::publish_push_synced`) lands on a repository whose HEAD names no
+existing branch before and after the transaction, and the transaction creates branches, the publisher appends a
+`HEAD` symref update to `refs/heads/main` if created, else `refs/heads/master`, else the first created branch by
+name (GitHub's rule) — **to the same PUSH entry**, decided against the refs the manifest CAS commits on and
+re-decided on every CAS retry, so there is no second commit point (principle II) and no added round trip. A HEAD
+that resolves is never moved by a push; follow (D48 has `upstream.head`), import and replay never adopt. Existing
+repositories with a dangling HEAD, and any change of the default branch, go through `PUT /{o}/{r}/api/head`
+(`{"branch": …}`, admin, a HEAD-only PUSH entry; `repo.setHead` in the SDK, "Default branch" in the Settings tab).
+Not a D24 setting: HEAD is a ref, and a setting naming a branch would be a second source for it.
+
 ## 5. Working rules
 
 - **No backwards compatibility (pre-1.0, banner at top):** change the shape and delete the old one in the same

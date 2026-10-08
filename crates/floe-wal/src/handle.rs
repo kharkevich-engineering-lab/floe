@@ -922,22 +922,33 @@ impl RepoHandle {
         txn: floe_proto::v1::RefTransaction,
         meta: HashMap<String, String>,
     ) -> Result<PublishResult, WalError> {
-        self.enqueue_publish(pack, txn, meta, false).await
+        self.enqueue_publish_at(pack, txn, meta, false, false, None)
+            .await
     }
 
-    /// Publish a push when the caller has already completed `sync()`.
+    /// Publish a client's push (receive-pack, the GitHub facade) when the
+    /// caller has already completed `sync()`.
     ///
     /// Receive-pack holds a read guard while parsing and ingesting the pack.
     /// Reusing that freshness check avoids a second conditional manifest GET
     /// before the publisher's first CAS attempt. The publisher still syncs
     /// after every CAS conflict.
+    ///
+    /// A client push also **adopts HEAD** (GitHub's rule): when HEAD names no
+    /// existing branch before and after the transaction and the transaction
+    /// creates branches, the entry gains a `HEAD` symref update to
+    /// `refs/heads/main`, else `refs/heads/master`, else the first created
+    /// branch in sorted order — in the same entry and manifest CAS, decided
+    /// against the refs the CAS commits on. Follow, import and replay
+    /// (`publish_push`, `publish_push_at`) never move HEAD by themselves.
     pub async fn publish_push_synced(
         &self,
         pack: Option<floe_git::IngestedPack>,
         txn: floe_proto::v1::RefTransaction,
         meta: HashMap<String, String>,
     ) -> Result<PublishResult, WalError> {
-        self.enqueue_publish(pack, txn, meta, true).await
+        self.enqueue_publish_at(pack, txn, meta, true, true, None)
+            .await
     }
 
     /// Publish with an explicit entry time (history replay into the WAL): the
@@ -959,19 +970,10 @@ impl RepoHandle {
             txn,
             meta,
             false,
+            false,
             Some(floe_proto::time::from_system(at)),
         )
         .await
-    }
-
-    async fn enqueue_publish(
-        &self,
-        pack: Option<floe_git::IngestedPack>,
-        txn: floe_proto::v1::RefTransaction,
-        meta: HashMap<String, String>,
-        synced: bool,
-    ) -> Result<PublishResult, WalError> {
-        self.enqueue_publish_at(pack, txn, meta, synced, None).await
     }
 
     async fn enqueue_publish_at(
@@ -980,6 +982,7 @@ impl RepoHandle {
         txn: floe_proto::v1::RefTransaction,
         meta: HashMap<String, String>,
         synced: bool,
+        adopt_head: bool,
         created_at: Option<prost_types::Timestamp>,
     ) -> Result<PublishResult, WalError> {
         self.publish_waiters.fetch_add(1, Ordering::Relaxed);
@@ -989,6 +992,7 @@ impl RepoHandle {
             txn,
             meta,
             synced,
+            adopt_head,
             created_at,
             response: tx,
         };

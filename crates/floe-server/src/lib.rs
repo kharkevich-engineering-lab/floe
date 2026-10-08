@@ -519,6 +519,9 @@ pub(crate) async fn dispatch_route(
                 policy::http_put(st, route, &headers, body.take().unwrap_or_default()).await
             }
             (&Method::DELETE, "policy") => policy::http_delete(st, route, &headers).await,
+            (&Method::PUT, "head") => {
+                admin::set_head(st, route, &headers, body.take().unwrap_or_default()).await
+            }
             (&Method::GET, "settings") => settings::http_get(st, route, &headers).await,
             (&Method::GET, "settings/effective") => {
                 settings::http_effective(st, route, &headers).await

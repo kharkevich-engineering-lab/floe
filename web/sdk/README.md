@@ -51,6 +51,7 @@ r.get()                                      → { owner, name, full_name, head,
 r.create()                                   → write permission
 r.delete()                                   → admin permission
 r.refs()                                     → { head: {name, sha} | null }
+r.setHead("master")                          → { head, previous, seq?, unchanged? } (admin: the default branch)
 r.branches({ prefix, q, after, n })          → { refs: [{name, sha}], more }      (one page; tags likewise)
 r.tags({ … })
 r.refStream("branches", q, onRef)            → streams matches as found; resolves { more }

@@ -1150,7 +1150,10 @@ to about 16 repositories per flush. So:
   `ref_events` = webhook events lives in floe-server (`tests/events.rs`).
 - **Cold cursor** (no `catalog/cursor.json` yet). The catalog's first enablement is recorded once in
   `catalog/epoch.json` at the bucket root (`{ "enabled_at": … }`, CAS `Create`; whoever wins, every host then
-  reads the same value). For a repository without a cursor:
+  reads the same value). *As landed (2026-10-08):* the tail reads or creates it **when it starts**, with its start
+  time (`CatalogTail::spawn`, retried with backoff on a bucket error), not on its first catch-up: that first
+  sweep can be a whole `sweep_interval` later, and a repository created in between was taken for a pre-existing
+  one (its first push never reached `ref_events`). For a repository without a cursor:
   - `backfill = true` ⇒ `handle.retained_log_start()` (checkpoint history, D47);
   - else, when the repository's oldest retained log entry was committed at or after `enabled_at` (it was created
     after the catalog was enabled: every mirror-created repository, for instance) ⇒ the retained log start, so
@@ -1314,6 +1317,16 @@ canonicalization: the path as sent, and a signed `x-amz-content-sha256` of the b
 `x-amz-*` headers). The `/_iceberg` alias and AWS S3 Tables use the name `s3tables` (double-encoded,
 normalized path). Sources: docs.rustfs.com `administration/data/s3-tables`, and RustFS's own
 `scripts/table-catalog/pyiceberg_smoke.py` at tag 1.0.1, which signs with botocore `S3SigV4Auth` for `/iceberg`.
+
+*Path encoding, as landed 2026-10-08 (supersedes the S3 canonicalization above):* floe signs every catalog
+request with **generic SigV4** whatever the signing name — the path normalized and percent-encoded a second time
+(`…/namespaces/a%1Fb` is `…/namespaces/a%251Fb` in the canonical request). RustFS verifies its `/iceberg` and
+`/_iceberg` routes that way since rustfs#8291 (2026-10-05, s3s `SigV4PathEncoding::DoubleEncoded`, for both `s3`
+and `s3tables`; its PyIceberg smoke script moved to botocore `SigV4Auth`), AWS S3 Tables always has, and so do
+Java Iceberg's `RESTSigV4AuthSession` and PyIceberg. The single-encoded form failed for any escaped path (a
+multi-level namespace, separator `%1F`). Paths without escapes sign identically either way, so a RustFS ≤ 1.0.1
+still verifies them; escaped paths need a RustFS with #8291. Test vector: RustFS's own
+`iceberg_metadata_probe_passes_sigv4_verification` (`sigv4.rs`, `an_escaped_namespace_matches_rustfs_and_botocore`).
 
 - **Config** (§C.2): `auth = "none" | "bearer" | "sigv4"`, `sigv4_service` (default `"s3"`), `sigv4_region`
   (default `s3_region`, the data-file store's region). `Config::validate` fails closed: `bearer` needs exactly one

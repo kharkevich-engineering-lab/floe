@@ -21,7 +21,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::Next,
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde::Serialize;
 
@@ -60,6 +60,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                 get(repo_admin).put(repo_admin).delete(repo_admin),
             )
             .route(&format!("{base}/policy/{{sub}}"), post(repo_admin_sub))
+            .route(&format!("{base}/head"), put(repo_admin))
             .route(
                 &format!("{base}/settings"),
                 get(repo_admin).put(repo_admin).delete(repo_admin),
@@ -248,6 +249,7 @@ async fn discovery(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respo
             "GET  /{owner}/{repo}/api/tasks[/{id}]",
             "GET  /{owner}/{repo}/api/ops",
             "POST /{owner}/{repo}/api/ops/{op}",
+            "PUT  /{owner}/{repo}/api/head   (admin: the default branch, {\"branch\": \"main\"})",
             "GET|PUT|DELETE /{owner}/{repo}/api/policy",
             "POST /{owner}/{repo}/api/policy/validate | dry-run?last=N",
             "GET|PUT|DELETE /{owner}/{repo}/api/settings",

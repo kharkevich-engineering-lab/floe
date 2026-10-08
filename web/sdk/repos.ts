@@ -39,6 +39,13 @@ export interface RefInfo {
 export interface Refs {
   head: RefInfo | null;
 }
+/** `setHead`: the new and the previous HEAD target (`refs/heads/…`); `seq` of the WAL entry. */
+export interface SetHeadResult {
+  head: string;
+  previous: string;
+  seq?: number;
+  unchanged?: boolean;
+}
 export interface RefPage {
   refs: RefInfo[];
   more: boolean;
@@ -704,6 +711,17 @@ export class RepoClient {
   /** Default branch only — O(1) on any ref count. */
   refs(opts?: CallOptions) {
     return this.client.json<Refs>(`${this.p}/refs`, opts);
+  }
+  /**
+   * Point HEAD (the default branch) at an existing branch (admin). `branch` is a short name or
+   * `refs/heads/…`; 404 when it does not exist. Also the repair for a HEAD that names no branch.
+   */
+  setHead(branch: string, opts?: CallOptions) {
+    return this.client.json<SetHeadResult>(`${this.p}/head`, opts, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branch }),
+    });
   }
   /** One name-sorted page of branches. */
   branches(q: RefListQuery = {}, opts?: CallOptions) {

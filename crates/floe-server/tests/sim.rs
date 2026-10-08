@@ -607,7 +607,13 @@ async fn check_truth(c: &Cluster, pushers: &[Pusher]) -> Result<()> {
     // (errored-but-committed) push moved it further along the same chain.
     for e in &log {
         if let Some(t) = &e.txn {
-            for u in &t.updates {
+            // HEAD symref updates carry no oid: the first push to a repository
+            // whose HEAD names no branch adopts one (D66).
+            for u in t
+                .updates
+                .iter()
+                .filter(|u| u.new_symbolic_target.is_empty())
+            {
                 folded.insert(u.name.clone(), u.new_oid.clone());
             }
         }

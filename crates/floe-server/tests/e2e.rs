@@ -3148,3 +3148,162 @@ async fn empty_pack_push_is_refused_with(check_connectivity: bool) -> TestResult
     );
     Ok(())
 }
+
+// ---- the default branch: a push adopts HEAD when it names no branch ----
+
+/// `git ls-remote --symref <url> HEAD` → the target HEAD points at (`None` = no symref line).
+fn remote_head(url: &str) -> anyhow::Result<Option<String>> {
+    let out = git_in(
+        std::path::Path::new("."),
+        &["ls-remote", "--symref", url, "HEAD"],
+    )?;
+    Ok(out.lines().find_map(|l| {
+        l.strip_prefix("ref: ")
+            .and_then(|r| r.strip_suffix("\tHEAD"))
+            .map(str::to_string)
+    }))
+}
+
+/// A source repository with one commit on each of `branches` (the first one checked out).
+fn repo_with_branches(branches: &[&str]) -> anyhow::Result<TestRepo> {
+    let src = TestRepo::synthetic(2, 1)?;
+    let first = branches.first().copied().unwrap_or("main");
+    if first != "main" {
+        git_in(&src, &["branch", "-M", "main", first])?;
+    }
+    for b in branches.iter().skip(1) {
+        git_in(&src, &["branch", b])?;
+    }
+    Ok(src)
+}
+
+/// The lab bug: an empty repository (HEAD → `refs/heads/main`) receives a push of only
+/// `master` + a tag. GitHub makes the first branch the default; so does floe now, in the same
+/// PUSH entry, so the clone checks out master instead of "remote HEAD refers to nonexistent ref".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn push_of_only_master_makes_it_the_default_branch() -> TestResult {
+    let (a, b) = Server::start_pair().await?;
+    a.put_repo("t", "m").await?;
+    let src = repo_with_branches(&["master"])?;
+    git_in(&src, &["tag", "v1"])?;
+    let url = a.repo_url("t", "m");
+    git_in(&src, &["push", &url, "refs/heads/master", "refs/tags/v1"])?;
+    assert_eq!(remote_head(&url)?.as_deref(), Some("refs/heads/master"));
+    // Another instance replays the same entry from the WAL.
+    assert_eq!(
+        remote_head(&b.repo_url("t", "m"))?.as_deref(),
+        Some("refs/heads/master")
+    );
+
+    let dst = tempfile::tempdir()?;
+    let out = Command::new("git")
+        .args(["clone", &b.repo_url("t", "m"), "c"])
+        .current_dir(dst.path())
+        .output()?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "clone failed: {stderr}");
+    assert!(!stderr.contains("nonexistent ref"), "{stderr}");
+    let clone = dst.path().join("c");
+    assert_eq!(
+        git_in(&clone, &["symbolic-ref", "HEAD"])?.trim(),
+        "refs/heads/master"
+    );
+    assert_eq!(
+        git_in(&clone, &["rev-parse", "HEAD"])?,
+        git_in(&src, &["rev-parse", "master"])?
+    );
+    Ok(())
+}
+
+/// The order of preference: main, then master, then the first created branch by name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn first_push_prefers_main_then_master_then_the_first_branch() -> TestResult {
+    let server = Server::start().await?;
+    for (repo, branches, want) in [
+        ("both", &["master", "main", "dev"][..], "refs/heads/main"),
+        ("mst", &["zeta", "master"][..], "refs/heads/master"),
+        ("other", &["zeta", "alpha"][..], "refs/heads/alpha"),
+    ] {
+        server.put_repo("t", repo).await?;
+        let src = repo_with_branches(branches)?;
+        let url = server.repo_url("t", repo);
+        git_in(&src, &["push", &url, "--all"])?;
+        assert_eq!(remote_head(&url)?.as_deref(), Some(want), "{repo}");
+    }
+    Ok(())
+}
+
+/// Once HEAD names an existing branch, later pushes never move it — not even one creating main.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn later_pushes_do_not_move_an_existing_head() -> TestResult {
+    let server = Server::start().await?;
+    server.put_repo("t", "keep").await?;
+    let src = repo_with_branches(&["master"])?;
+    let url = server.repo_url("t", "keep");
+    git_in(&src, &["push", &url, "master"])?;
+    assert_eq!(remote_head(&url)?.as_deref(), Some("refs/heads/master"));
+    git_in(&src, &["branch", "main"])?;
+    git_in(&src, &["push", &url, "main"])?;
+    assert_eq!(remote_head(&url)?.as_deref(), Some("refs/heads/master"));
+    // A push that creates main *is* the default target from the start: no update needed.
+    server.put_repo("t", "plain").await?;
+    let src = repo_with_branches(&["main"])?;
+    let url = server.repo_url("t", "plain");
+    git_in(&src, &["push", &url, "main"])?;
+    assert_eq!(remote_head(&url)?.as_deref(), Some("refs/heads/main"));
+    Ok(())
+}
+
+/// The repair for a repository whose HEAD already dangles (pushed before adoption existed, or
+/// its default branch deleted): `PUT /{o}/{r}/api/head`, admin, through the WAL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn put_head_repairs_a_dangling_default_branch() -> TestResult {
+    let (a, b) = Server::start_pair().await?;
+    a.put_repo("t", "fix").await?;
+    let src = repo_with_branches(&["main", "dev"])?;
+    let url = a.repo_url("t", "fix");
+    git_in(&src, &["push", &url, "main", "dev"])?;
+    // Deleting the default branch leaves HEAD dangling; a push that creates nothing keeps it so.
+    git_in(&src, &["push", &url, ":main"])?;
+    git_in(&src, &["checkout", "-q", "dev"])?;
+    git_in(&src, &["commit", "-q", "--allow-empty", "-m", "more"])?;
+    git_in(&src, &["push", &url, "dev"])?;
+    assert_eq!(
+        remote_head(&url)?,
+        None,
+        "HEAD → a deleted main is not advertised"
+    );
+
+    let client = reqwest::Client::new();
+    let head_url = format!("{}/t/fix/api/head", a.base_url);
+    let put = |body: serde_json::Value| client.put(&head_url).json(&body).send();
+
+    let missing = put(serde_json::json!({"branch": "nope"})).await?;
+    assert_eq!(missing.status(), 404);
+    let tag = put(serde_json::json!({"branch": "refs/tags/v1"})).await?;
+    assert_eq!(tag.status(), 400);
+    let bad = client.put(&head_url).body("dev").send().await?;
+    assert_eq!(bad.status(), 400);
+
+    let ok = put(serde_json::json!({"branch": "dev"})).await?;
+    assert_eq!(ok.status(), 200);
+    let body: serde_json::Value = ok.json().await?;
+    assert_eq!(body["head"], "refs/heads/dev");
+    assert_eq!(body["previous"], "refs/heads/main");
+    assert!(body["seq"].as_u64().is_some(), "{body}");
+    assert_eq!(remote_head(&url)?.as_deref(), Some("refs/heads/dev"));
+    assert_eq!(
+        remote_head(&b.repo_url("t", "fix"))?.as_deref(),
+        Some("refs/heads/dev")
+    );
+    // The browser lane is the same handler (the SDK's `repo.setHead`).
+    let again = client
+        .put(format!("{}/t/fix/api-browser/head", b.base_url))
+        .json(&serde_json::json!({"branch": "refs/heads/dev"}))
+        .send()
+        .await?;
+    assert_eq!(again.status(), 200);
+    let body: serde_json::Value = again.json().await?;
+    assert_eq!(body["unchanged"], true);
+    Ok(())
+}

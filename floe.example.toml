@@ -409,6 +409,7 @@ read = ["authenticated"]
 ##                                              # "sigv4" (every catalog request signed with the s3_* credentials;
 ##                                              # RustFS and AWS S3 Tables need it)
 # sigv4_service = "s3"                           # signing name: "s3" for RustFS /iceberg, "s3tables" for AWS
+##                                              # (either way the path is signed double-encoded, generic SigV4)
 ## sigv4_region = "us-east-1"                   # unset = s3_region
 ## token_env = "FLOE_CATALOG_TOKEN"             # auth = "bearer": env var with a bearer token
 ## credential_env = "FLOE_CATALOG_CREDENTIAL"   # auth = "bearer": env var with "client_id:client_secret" (OAuth2)
