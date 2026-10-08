@@ -241,16 +241,24 @@ pub struct SigningInput<'a> {
     pub payload_header: bool,
 }
 
-/// The canonical-request rules for `service`: S3 signs the path as sent
-/// (single encoding, no normalization), every other service (`s3tables`
-/// included) double-encodes and normalizes it. Same split as botocore's
-/// `S3SigV4Auth`/`SigV4Auth`, which `RustFS`'s own conformance scripts use.
-pub fn settings_for(service: &str, payload_header: bool) -> SigningSettings {
+/// The canonical-request rules for an Iceberg REST catalog request: generic
+/// `SigV4` for **every** service — the path is normalized and percent-encoded a
+/// second time (`%1F` on the wire is `%251F` in the canonical request), with
+/// `x-amz-content-sha256` when `payload_header`. S3's single-encoding
+/// exception is for object paths, never for a catalog's: AWS S3 Tables
+/// (`s3tables`) and `RustFS`'s `/iceberg` routes (service `s3`; s3s
+/// `SigV4PathEncoding::DoubleEncoded`, rustfs#8291) both verify generic `SigV4`,
+/// as Java Iceberg's `RESTSigV4AuthSession` and `PyIceberg` (botocore
+/// `SigV4Auth`) sign it. Paths without escapes are identical either way; a
+/// multi-level namespace (`a%1Fb`) or an escaped name is not. `service` only
+/// names the credential scope.
+pub fn settings_for(_service: &str, payload_header: bool) -> SigningSettings {
     let mut s = SigningSettings::default();
-    if service == "s3" {
-        s.percent_encoding_mode = PercentEncodingMode::Single;
-        s.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
-    }
+    debug_assert_eq!(s.percent_encoding_mode, PercentEncodingMode::Double);
+    debug_assert_eq!(
+        s.uri_path_normalization_mode,
+        UriPathNormalizationMode::Enabled
+    );
     s.payload_checksum_kind = if payload_header {
         PayloadChecksumKind::XAmzSha256
     } else {
@@ -696,36 +704,67 @@ mod tests {
     }
 
     #[test]
-    fn s3_signs_the_path_as_sent_and_other_services_double_encode() {
-        let s3 = settings_for("s3", true);
-        assert_eq!(s3.percent_encoding_mode, PercentEncodingMode::Single);
-        assert_eq!(
-            s3.uri_path_normalization_mode,
-            UriPathNormalizationMode::Disabled
+    fn catalog_paths_are_double_encoded_for_every_service() {
+        for service in ["s3", "s3tables"] {
+            let s = settings_for(service, true);
+            assert_eq!(s.percent_encoding_mode, PercentEncodingMode::Double);
+            assert_eq!(
+                s.uri_path_normalization_mode,
+                UriPathNormalizationMode::Enabled
+            );
+            assert_eq!(s.payload_checksum_kind, PayloadChecksumKind::XAmzSha256);
+        }
+    }
+
+    /// `RustFS`'s own vector (rustfs/src/admin/router.rs,
+    /// `iceberg_metadata_probe_passes_sigv4_verification`, "captured from
+    /// botocore `SigV4Auth`"): a multi-level namespace (`%1F`) under service
+    /// `s3`. Its canonical URI is `…/namespaces/ods%251Fkfk_log_order/…`; the
+    /// single-encoded one (`%1F`) signs differently and `RustFS` refuses it.
+    #[test]
+    fn an_escaped_namespace_matches_rustfs_and_botocore() {
+        let creds = Credentials::new(
+            "catalog-test-access",
+            "catalog-test-secret",
+            None,
+            None,
+            "test",
         );
-        assert_eq!(s3.payload_checksum_kind, PayloadChecksumKind::XAmzSha256);
-        let tables = settings_for("s3tables", true);
-        assert_eq!(tables.percent_encoding_mode, PercentEncodingMode::Double);
-        assert_eq!(
-            tables.uri_path_normalization_mode,
-            UriPathNormalizationMode::Enabled
-        );
-        // An escaped namespace separator (%1F) signs differently in the two modes.
-        let sig = |service: &str| {
-            let mut h = hdrs(&[("host", "h")]);
-            let input = SigningInput {
-                method: "GET",
-                url: "http://h/iceberg/v1/b/namespaces/a%1Fb",
-                body: b"",
-                service,
-                region: "us-east-1",
-                time: suite_time(),
-                payload_header: true,
-            };
-            sign_headers(&input, &mut h, &suite_creds(None)).unwrap();
-            auth(&h).rsplit("Signature=").next().unwrap().to_string()
+        let mut h = hdrs(&[
+            ("host", "catalog.example:9000"),
+            ("content-type", "application/json"),
+        ]);
+        let input = SigningInput {
+            method: "GET",
+            url: "http://catalog.example:9000/iceberg/v1/warehouse/namespaces/ods%1Fkfk_log_order/tables/files",
+            body: b"",
+            service: "s3",
+            region: "us-east-1",
+            time: UNIX_EPOCH + Duration::from_hours(438_288), // 2020-01-01T00:00:00Z
+            payload_header: true,
         };
-        assert_ne!(sig("s3"), sig("s3tables"));
+        sign_headers(&input, &mut h, &creds).unwrap();
+        assert_eq!(
+            auth(&h),
+            "AWS4-HMAC-SHA256 Credential=catalog-test-access/20200101/us-east-1/s3/aws4_request, \
+             SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, \
+             Signature=38357111b8355d0efdc6746cc5e94930c455d2f6741ea38c65e6556fe45d882d"
+        );
+        // s3tables (AWS) signs the same canonical request under its own scope.
+        let mut h2 = hdrs(&[
+            ("host", "catalog.example:9000"),
+            ("content-type", "application/json"),
+        ]);
+        sign_headers(
+            &SigningInput {
+                service: "s3tables",
+                ..input
+            },
+            &mut h2,
+            &creds,
+        )
+        .unwrap();
+        assert!(auth(&h2).contains("/us-east-1/s3tables/aws4_request"));
     }
 
     #[test]

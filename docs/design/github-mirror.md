@@ -1318,6 +1318,16 @@ canonicalization: the path as sent, and a signed `x-amz-content-sha256` of the b
 normalized path). Sources: docs.rustfs.com `administration/data/s3-tables`, and RustFS's own
 `scripts/table-catalog/pyiceberg_smoke.py` at tag 1.0.1, which signs with botocore `S3SigV4Auth` for `/iceberg`.
 
+*Path encoding, as landed 2026-10-08 (supersedes the S3 canonicalization above):* floe signs every catalog
+request with **generic SigV4** whatever the signing name — the path normalized and percent-encoded a second time
+(`…/namespaces/a%1Fb` is `…/namespaces/a%251Fb` in the canonical request). RustFS verifies its `/iceberg` and
+`/_iceberg` routes that way since rustfs#8291 (2026-10-05, s3s `SigV4PathEncoding::DoubleEncoded`, for both `s3`
+and `s3tables`; its PyIceberg smoke script moved to botocore `SigV4Auth`), AWS S3 Tables always has, and so do
+Java Iceberg's `RESTSigV4AuthSession` and PyIceberg. The single-encoded form failed for any escaped path (a
+multi-level namespace, separator `%1F`). Paths without escapes sign identically either way, so a RustFS ≤ 1.0.1
+still verifies them; escaped paths need a RustFS with #8291. Test vector: RustFS's own
+`iceberg_metadata_probe_passes_sigv4_verification` (`sigv4.rs`, `an_escaped_namespace_matches_rustfs_and_botocore`).
+
 - **Config** (§C.2): `auth = "none" | "bearer" | "sigv4"`, `sigv4_service` (default `"s3"`), `sigv4_region`
   (default `s3_region`, the data-file store's region). `Config::validate` fails closed: `bearer` needs exactly one
   of `token_env`/`credential_env`, `none` and `sigv4` refuse both, the URI must be `http(s)` with no userinfo,
