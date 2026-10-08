@@ -2269,6 +2269,30 @@ details summary {
   .commit-meta .btn {
     display: none;
   }
+  .repo-head {
+    grid-template-columns: 1fr;
+  }
+  .clone-menu {
+    justify-self: start;
+  }
+  .clone-pop {
+    left: 0;
+    right: auto;
+  }
+  .repo-title {
+    flex-wrap: wrap;
+    row-gap: 0;
+    font-size: 20px;
+  }
+  .tree-commit {
+    flex-wrap: wrap;
+  }
+  .tree-commit .spacer {
+    display: none;
+  }
+  .instance {
+    flex-wrap: wrap;
+  }
   table.kv th {
     white-space: normal;
   }
@@ -2296,4 +2320,11 @@ details summary {
   min-width: 26px;
   min-height: 26px;
   padding: 3px 5px;
+}
+/* @pierre/diffs (shadow DOM) reads these: code sits on the panel surface, in the code font. */
+.blob diffs-container,
+.diff-file diffs-container {
+  --diffs-dark-bg: var(--surface) !important;
+  --diffs-light-bg: var(--surface) !important;
+  --diffs-font-family: var(--mono);
 }
