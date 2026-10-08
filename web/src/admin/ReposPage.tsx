@@ -3,6 +3,7 @@ import { useSearchParams, Link } from "react-router-dom";
 import { api, type Policy, type PolicyValidation, type RepoSettings, type SettingsValidation } from "../api";
 import { invalidate, useData } from "../data";
 import { Box } from "../components/Layout";
+import { EmptyState, KeyHint } from "../components/ui";
 import { useUnsavedGuard } from "./useUnsavedGuard";
 import { ListTextarea } from "./ListTextarea";
 import { errorMessage } from "./SectionEditor";
@@ -17,7 +18,7 @@ export function ReposPage() {
   const valid = /^[^/\s]+\/[^/\s]+$/.test(text.trim());
   return (
     <>
-      <Box title="Repository">
+      <Box title={<h2 className="box-title">Choose a repository</h2>}>
         <form
           className="pad secret-row"
           onSubmit={(e) => {
@@ -50,7 +51,9 @@ export function ReposPage() {
           </Suspense>
         </div>
       ) : (
-        <p className="muted pad">Pick a repository to edit its settings and push policy.</p>
+        <EmptyState icon="repo" title="Pick a repository">
+          <p>Its settings (upstream, bundles, compaction) and push policy open here.</p>
+        </EmptyState>
       )}
     </>
   );
@@ -158,8 +161,8 @@ function SettingsForm({ repo }: { repo: string }) {
     <Box
       title={
         <span className="admin-head">
-          <strong>Settings (D24)</strong>
-          <span className="muted">{saved.revision ? `revision ${saved.revision} by ${saved.author}` : "none — the host config applies"}</span>
+          <h2 className="box-title">Settings</h2>
+          <span className="muted">{saved.revision ? `revision ${saved.revision} by ${saved.author}` : "Not set — the host defaults apply"}</span>
           <span className="spacer" />
           <button type="button" className="btn small" onClick={() => setRaw(!raw)} aria-pressed={raw}>
             {raw ? "Form view" : "Raw TOML"}
@@ -244,19 +247,18 @@ function SettingsField({ f, value, onChange }: { f: (typeof SETTINGS_FIELDS)[num
       );
       break;
     default:
-      control = <input id={id} type="text" value={typeof value === "string" ? value : ""} placeholder="(host default)" onChange={(e) => onChange(e.target.value.trim() === "" ? null : e.target.value)} />;
+      control = <input id={id} type="text" value={typeof value === "string" ? value : ""} placeholder="Host default" onChange={(e) => onChange(e.target.value.trim() === "" ? null : e.target.value)} />;
   }
   return (
     <div className="field">
-      <label htmlFor={id}>{f.label}</label>
-      <div className="control">
-        {control}
-        <p className="help">
-          {f.help} <code className="muted">
-            [{f.section}] {f.key}
-          </code>
-        </p>
+      <div className="field-label-row">
+        <label className="field-label" htmlFor={id}>
+          {f.label}
+        </label>
+        <KeyHint path={`[${f.section}] ${f.key}`} />
       </div>
+      <p className="help">{f.help}</p>
+      <div className="control">{control}</div>
     </div>
   );
 }
@@ -338,8 +340,8 @@ function PolicyForm({ repo }: { repo: string }) {
     <Box
       title={
         <span className="admin-head">
-          <strong>Push policy (D16)</strong>
-          <span className="muted">{rules.length} rule(s); empty = anyone with write may move any ref</span>
+          <h2 className="box-title">Push policy</h2>
+          <span className="muted">{rules.length === 0 ? "No rules: anyone who can push may move any ref" : `${rules.length} ${rules.length === 1 ? "rule" : "rules"}`}</span>
           <span className="spacer" />
           <button type="button" className="btn small" onClick={() => setRaw(!raw)} aria-pressed={raw}>
             {raw ? "Form view" : "Raw JSON"}
