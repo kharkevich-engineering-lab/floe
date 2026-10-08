@@ -689,6 +689,15 @@ same bucket. Published by the release workflow to `oci://ghcr.io/kharkevich-engi
 chart version = `appVersion` = the release (set at packaging, never committed); CI lints, renders every `ci/`
 values file through kubeconform and installs the dev values into kind against RustFS.
 
+**D65 — The web UI wears the Kharkevich Engineering Lab design system (2026-10-08).** The SPA's tokens (colour,
+type, radii, shadow), theme key (`kharkevich-theme`, dark default, `html.light`), self-hosted Inter and the Lab mark
+come from `hub.kharkevich.com` (`styles/main.css`, brand page) — copied, never re-invented; product name **floe**.
+Shared primitives live in `web/src/components/ui.tsx`; pages use tokens only. The admin area leads every section
+with its status and primary action, groups settings into steps, folds Advanced and shows conditional fields from
+schema hints the server emits (`x-floe.advanced`, `order`, `when`; section `description` and `groups`) — the hints
+are presentation only and change no API shape. Help text in the schema is plain language; config keys and decision
+numbers stay available behind a key toggle, never as the label. Details: `web/README.md` § Design system.
+
 ## 5. Working rules
 
 - **No backwards compatibility (pre-1.0, banner at top):** change the shape and delete the old one in the same

@@ -1,34 +1,40 @@
 import { useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
+import { Icon } from "./Icon";
+import { useTheme } from "../theme";
 
 const ARCH_POST = "https://cursor.com/blog/git-at-any-scale";
 const TURBOPUFFER = "https://turbopuffer.com/blog/turbopuffer";
 
 /** Landing banner: what this is, with an animated commit-DAG backdrop. */
 export function Hero() {
+  const { light } = useTheme();
   return (
     <section className="hero" aria-labelledby="hero-title">
-      <DagCanvas />
+      <DagCanvas key={light ? "light" : "dark"} />
       <div className="hero-body">
-        <h1 id="hero-title">floe</h1>
-        <p className="hero-lede">A git server that is a single binary in front of an object store.</p>
+        <p className="hero-lede">Git hosting · object storage · single binary</p>
+        <h1 id="hero-title">
+          floe<span>.</span>
+        </h1>
         <p className="hero-text">
-          floe is an implementation of the ideas in the{" "}
+          A git server that is a single binary in front of an object store. floe implements the ideas in the{" "}
           <a href={ARCH_POST} target="_blank" rel="noreferrer" className="hero-link">
             git hosting architecture of Origin (Cursor)
           </a>{" "}
-          and our friends at{" "}
+          and of our friends at{" "}
           <a href={TURBOPUFFER} target="_blank" rel="noreferrer" className="hero-link">
             Turbopuffer
-          </a>{" "}
-          who have pioneered GCS/S3 based share-nothing infrastructure to scale.
+          </a>
+          , who pioneered share-nothing infrastructure on GCS and S3 to scale.
         </p>
         <div className="hero-actions">
           <Link to="/api" className="btn btn-primary">
-            Explore the API
+            Explore the API <Icon name="arrow-right" />
           </Link>
           <a href={ARCH_POST} target="_blank" rel="noreferrer" className="btn">
-            Read “Git at any scale” ↗
+            Read “Git at any scale” <Icon name="external-link" />
+            <span className="sr-only">(opens in a new tab)</span>
           </a>
         </div>
       </div>
@@ -49,10 +55,10 @@ function DagCanvas() {
     const ctx = canvas.getContext("2d")!;
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const styles = getComputedStyle(canvas);
-    const accent = styles.getPropertyValue("--accent").trim() || "#0969da";
-    const add = styles.getPropertyValue("--add").trim() || "#1a7f37";
-    const del = styles.getPropertyValue("--del").trim() || "#cf222e";
-    const palette = [accent, add, "#8250df", del, "#bf8700"];
+    const token = (name: string, fallback: string) => styles.getPropertyValue(name).trim() || fallback;
+    const blue = token("--blue", "#1683ff");
+    const palette = [token("--blue2", "#70c1ff"), blue, token("--brand-accent", "#38bdf8"), token("--ok", "#10b981"), token("--muted", "#a3b3c6")];
+    const ring = token("--surface", "#0b1a2c");
 
     type Node = { x: number; y: number; lane: number; r: number; c: string; parents: Node[]; born: number };
     let w = 0;
@@ -135,16 +141,16 @@ function DagCanvas() {
         ctx.beginPath();
         ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
         ctx.fill();
-        ctx.strokeStyle = "rgba(255,255,255,0.9)";
+        ctx.strokeStyle = ring;
         ctx.lineWidth = 1.25;
         ctx.stroke();
       }
       // The pulse itself.
       if (pulseX >= 0) {
         const g = ctx.createLinearGradient(pulseX - 120, 0, pulseX + 20, 0);
-        g.addColorStop(0, "rgba(9,105,218,0)");
-        g.addColorStop(0.8, "rgba(9,105,218,0.10)");
-        g.addColorStop(1, "rgba(9,105,218,0)");
+        g.addColorStop(0, hexA(blue, 0));
+        g.addColorStop(0.8, hexA(blue, 0.12));
+        g.addColorStop(1, hexA(blue, 0));
         ctx.fillStyle = g;
         ctx.fillRect(pulseX - 120, 0, 140, h);
       }

@@ -1,7 +1,7 @@
 // Runs under `node --experimental-strip-types --test` (part of `pnpm run build`); no test framework.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { docsDiffer, errorsFor, listText, nextDraft, parseList, testToken, fieldsOf, fromInput, globMatch, groupFields, secretInput, secretState, setIn, toInput, unclaimedErrors } from "./schema-form.ts";
+import { changedFields, displayGroups, fieldVisible, fieldsAt, sectionMeta, docsDiffer, errorsFor, listText, nextDraft, parseList, testToken, fieldsOf, fromInput, globMatch, groupFields, secretInput, secretState, setIn, toInput, unclaimedErrors } from "./schema-form.ts";
 
 const schema = {
   properties: {
@@ -125,4 +125,67 @@ test("documents and globs", () => {
   assert.ok(!globMatch("acme/*", "acme/a/b"));
   assert.ok(globMatch("*/*", "x/y"));
   assert.ok(!globMatch("acme/w.dgets", "acme/widgets"), "dots are literal");
+});
+
+const catalog = {
+  properties: {
+    catalog: {
+      type: "object",
+      title: "Catalog (Iceberg audit tables)",
+      description: "Writes an audit trail.",
+      "x-floe": { live: false, groups: ["General", "Connection", "Authentication", "Advanced"] },
+      properties: {
+        auth: { type: "string", enum: ["none", "bearer", "sigv4"], default: "none", "x-floe": { group: "Authentication", live: false, order: 4 } },
+        enabled: { type: "boolean", default: false, "x-floe": { group: "General", live: false, order: 0 } },
+        flush_rows: { type: "integer", default: 5000, "x-floe": { group: "Advanced", live: false, advanced: true, order: 9 } },
+        sigv4_region: { type: ["string", "null"], default: null, "x-floe": { group: "Authentication", live: false, order: 6, when: { auth: ["sigv4"] } } },
+        token_env: { type: ["string", "null"], default: null, "x-floe": { group: "Authentication", live: false, order: 5, when: { auth: ["bearer"] } } },
+        uri: { type: ["string", "null"], default: null, "x-floe": { group: "Connection", live: false, order: 1 } },
+        nested: { type: "object", properties: {} },
+      },
+    },
+  },
+};
+
+test("fields follow x-floe.order; nested tables are not fields", () => {
+  assert.deepEqual(
+    fieldsOf(catalog, "catalog").map((f) => f.key),
+    ["enabled", "uri", "auth", "token_env", "sigv4_region", "flush_rows"],
+  );
+  // No order: schema order is kept.
+  assert.deepEqual(fieldsOf(schema, "github_mirror").map((f) => f.key)[0], "enabled");
+});
+
+test("section meta carries the plain-language description and group order", () => {
+  const m = sectionMeta(catalog, "catalog");
+  assert.equal(m.description, "Writes an audit trail.");
+  assert.equal(m.live, false);
+  assert.deepEqual(m.groups, ["General", "Connection", "Authentication", "Advanced"]);
+  assert.equal(sectionMeta(schema, "github_mirror").live, true);
+});
+
+test("conditional fields show only for the matching sibling value", () => {
+  const f = fieldsOf(catalog, "catalog");
+  const token = f.find((x) => x.key === "token_env")!;
+  assert.equal(fieldVisible(token, { auth: "none" }), false);
+  assert.equal(fieldVisible(token, { auth: "bearer" }), true);
+  assert.equal(fieldVisible(f.find((x) => x.key === "uri")!, {}), true);
+  const groups = (auth: string) => displayGroups(f, sectionMeta(catalog, "catalog").groups, { auth }).map((g) => [g.name, g.advanced, g.fields.map((x) => x.key)]);
+  assert.deepEqual(groups("sigv4"), [
+    ["General", false, ["enabled"]],
+    ["Connection", false, ["uri"]],
+    ["Authentication", false, ["auth", "sigv4_region"]],
+    ["Advanced", true, ["flush_rows"]],
+  ]);
+  assert.deepEqual(groups("none")[2], ["Authentication", false, ["auth"]]);
+});
+
+test("changed fields and pending restarts name their fields", () => {
+  const f = fieldsOf(catalog, "catalog");
+  assert.deepEqual(
+    changedFields(f, { uri: "https://x", auth: "none", enabled: false }, { uri: null, auth: "none", enabled: false }).map((x) => x.key),
+    ["uri"],
+  );
+  assert.deepEqual(fieldsAt(f, ["catalog.uri", "events.webhook_url"]).map((x) => x.key), ["uri"]);
+  assert.equal(fieldsAt(f, ["catalog"]).length, f.length);
 });

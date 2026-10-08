@@ -324,7 +324,7 @@ Both lanes: `/api/v1/admin/…` (bearer or same-origin session) and `/api-browse
 | `GET /api/v1/admin/config` | `admin.config.get()` | `{revision, updated_at, author, message, document (redacted), history_mode, store}`; `ETag: "<revision>"` |
 | `PUT /api/v1/admin/config` | `admin.config.put(doc, {base_revision, message})` | 200 `{revision, diff, restart_required}`, 400 `{error, errors[]}`, 409 `{error, revision}` |
 | `POST /api/v1/admin/config/validate` | `admin.config.validate(doc)` | `{ok, errors[], diff, restart_required}` |
-| `GET /api/v1/admin/config/schema` | `admin.config.schema()` | JSON Schema (draft 2020-12) with `x-floe` annotations: `format` (`duration`, `bytesize`, `secret`, `glob`), `live`, `group` |
+| `GET /api/v1/admin/config/schema` | `admin.config.schema()` | JSON Schema (draft 2020-12) with `x-floe` annotations: `format` (`duration`, `bytesize`, `secret`, `glob`), `live`, `group`, presentation hints `advanced` (folded by default), `order` and `when` (`{sibling: [values]}`: shown only then); sections carry a plain-language `description` and `x-floe.groups` in display order |
 | `GET /api/v1/admin/config/history?before=&n=` | `admin.config.history()` | newest first, ≤ 50 |
 | `GET /api/v1/admin/config/revisions/{n}` | `admin.config.revision(n)` | one record, redacted document; 410 when expired |
 | `POST /api/v1/admin/config/rollback` | `admin.config.rollback(n, {base_revision, message})` | as PUT |

@@ -2,6 +2,7 @@ import { Suspense, useState } from "react";
 import { api, ApiError, type AdminConfig, type ConfigHistoryEntry, type ConfigRevision } from "../api";
 import { invalidate, useData } from "../data";
 import { Box } from "../components/Layout";
+import { EmptyState } from "../components/ui";
 import { relTime } from "../format";
 import { ConfigDiff } from "./ConfigDiff";
 import { errorMessage } from "./SectionEditor";
@@ -16,14 +17,27 @@ export function HistoryPage() {
   const last = entries[entries.length - 1];
   if (config.revision === 0) {
     return (
-      <Box title="Config history">
-        <p className="muted pad">No revisions yet: the built-in runtime defaults apply. The first publish (or `floe config import`) creates revision 1.</p>
+      <Box>
+        <EmptyState icon="history" title="No changes yet">
+          <p>
+            The built-in defaults apply. The first save (or <code>floe config import</code>) creates revision 1.
+          </p>
+        </EmptyState>
       </Box>
     );
   }
   return (
     <div className="admin-cols">
-      <Box title={`Revisions (current: ${config.revision}, history in ${config.history_mode === "versions" ? "bucket object versions" : "floe records"})`}>
+      <Box
+        title={
+          <>
+            <h2 className="box-title">Revisions</h2>
+            <span className="muted small">
+              Current: {config.revision} · kept as {config.history_mode === "versions" ? "bucket object versions" : "floe history records"}
+            </span>
+          </>
+        }
+      >
         <table className="grid">
           <thead>
             <tr>
@@ -125,7 +139,7 @@ function RevisionDetail({ n, current }: { n: number; current: number }) {
         <div className="save-bar">
           <input type="text" className="text" placeholder="Why roll back" aria-label="Rollback message" value={message} onChange={(e) => setMessage(e.target.value)} />
           <button type="button" className="btn danger" disabled={busy} onClick={rollback}>
-            {busy ? "Publishing…" : `Roll back to revision ${n}`}
+            {busy ? "Saving…" : `Roll back to revision ${n}`}
           </button>
         </div>
       )}

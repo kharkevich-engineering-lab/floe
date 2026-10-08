@@ -23,6 +23,12 @@ export interface Field {
   live: boolean;
   default: unknown;
   options: string[];
+  /** Folded away by default (`x-floe.advanced`). */
+  advanced: boolean;
+  /** Display order within the section (`x-floe.order`; schema order when absent). */
+  order: number;
+  /** Shown only while each named sibling key holds one of the values (`x-floe.when`). */
+  when: Record<string, unknown[]> | null;
 }
 
 function kindOf(node: JsonSchema): FieldKind {
@@ -48,7 +54,10 @@ function kindOf(node: JsonSchema): FieldKind {
 export function fieldsOf(schema: JsonSchema, section: string): Field[] {
   const sec = schema.properties?.[section];
   const props = sec?.properties ?? {};
-  return Object.entries(props).map(([key, node]) => ({
+  return Object.entries(props)
+    // Nested tables (a sub-object without a secret's oneOf) are not form fields.
+    .filter(([, node]) => node.type !== "object" || node.oneOf !== undefined)
+    .map(([key, node], i) => ({
     path: `${section}.${key}`,
     section,
     key,
@@ -60,7 +69,54 @@ export function fieldsOf(schema: JsonSchema, section: string): Field[] {
     live: node["x-floe"]?.live ?? true,
     default: node.default,
     options: node.enum ?? [],
-  }));
+    advanced: node["x-floe"]?.advanced ?? false,
+    order: node["x-floe"]?.order ?? 10_000 + i,
+    when: node["x-floe"]?.when ?? null,
+  }))
+    .toSorted((a, b) => a.order - b.order);
+}
+
+/** A section's own presentation: title, plain-language summary, whether it applies live, its group order. */
+export function sectionMeta(schema: JsonSchema, section: string): { title: string; description: string; live: boolean; groups: string[] } {
+  const sec = schema.properties?.[section];
+  return {
+    title: sec?.title ?? section,
+    description: sec?.description ?? "",
+    live: sec?.["x-floe"]?.live ?? true,
+    groups: sec?.["x-floe"]?.groups ?? [],
+  };
+}
+
+/** Whether a field applies to the values being edited (its `when` conditions hold). */
+export function fieldVisible(field: Field, values: Record<string, unknown>): boolean {
+  if (!field.when) return true;
+  return Object.entries(field.when).every(([key, allowed]) => allowed.some((v) => !docsDiffer(v, values[key])));
+}
+
+/**
+ * Fields grouped for display: groups in the section's declared order (then
+ * first appearance), advanced groups last, and fields hidden by their `when`
+ * left out.
+ */
+export function displayGroups(fields: Field[], order: string[], values: Record<string, unknown>): { name: string; advanced: boolean; fields: Field[] }[] {
+  const rank = (g: string) => {
+    const i = order.indexOf(g);
+    return i < 0 ? order.length : i;
+  };
+  return groupFields(fields)
+    .map(([name, fs]) => ({ name, advanced: fs.every((f) => f.advanced), fields: fs.filter((f) => fieldVisible(f, values)) }))
+    .filter((g) => g.fields.length > 0)
+    .toSorted((a, b) => Number(a.advanced) - Number(b.advanced) || rank(a.name) - rank(b.name));
+}
+
+/** The fields whose value differs between two versions of a section. */
+export function changedFields(fields: Field[], current: Record<string, unknown>, saved: Record<string, unknown>): Field[] {
+  return fields.filter((f) => docsDiffer(current[f.key], saved[f.key]));
+}
+
+/** Of `paths` (e.g. the instance's pending restarts), the fields of this section they name. */
+export function fieldsAt(fields: Field[], paths: string[]): Field[] {
+  return fields.filter((f) => paths.some((p) => p === f.path || p === f.section || p.startsWith(`${f.path}.`)));
 }
 
 /** Fields grouped by `x-floe.group`, groups in order of first appearance. */
@@ -196,7 +252,7 @@ export function errorsFor(errors: ConfigFieldError[], path: string): string[] {
   return errors.filter((e) => e.path === path || (e.path ?? "").startsWith(`${path}.`) || (e.path ?? "").startsWith(`${path}[`)).map((e) => e.message);
 }
 
-/** Errors that no field claims (shown above the form). */
+/** Errors that no (shown) field claims — displayed above the form so none is lost. */
 export function unclaimedErrors(errors: ConfigFieldError[], fields: Field[]): string[] {
   return errors.filter((e) => !e.path || !fields.some((f) => e.path === f.path || e.path?.startsWith(`${f.path}.`))).map((e) => e.message);
 }

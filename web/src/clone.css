@@ -1,83 +1,122 @@
-/* clone dropdown + copyable code samples */
-.btn-primary {
-  background: #1f883d;
-  color: #fff;
-  border-color: rgba(31, 35, 40, 0.15);
-}
-.btn-primary:hover {
-  background: #1a7f37;
-}
+/* Clone popover and copyable code samples (tokens: styles.css). */
 .clone-menu {
   position: relative;
-  float: right;
-  margin-top: -34px;
+  align-self: center;
 }
 .clone-pop {
   position: absolute;
   right: 0;
-  top: 36px;
-  z-index: 20;
-  width: min(720px, 90vw);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  top: calc(100% + 6px);
+  z-index: 45;
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(70vh, 640px);
+  overflow: auto;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--s-4);
+  box-shadow: var(--shadow-pop);
 }
-.clone-pop .small {
-  margin-top: 10px;
+.clone-setup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
 }
-.clone-pop .small:first-child {
-  margin-top: 0;
+.clone-step {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: var(--s-1) var(--s-3);
+  align-items: start;
+}
+.clone-step + .clone-step {
+  border-top: 1px solid var(--line);
+  padding-top: var(--s-3);
+  margin-top: var(--s-1);
+}
+.clone-step-number {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  color: var(--blue2);
+  font-size: 12px;
+  font-weight: 700;
+}
+.clone-step-title {
+  font-weight: 600;
+  margin: 1px 0 2px;
+}
+.clone-step-text {
+  color: var(--muted);
+  font-size: var(--fs-small);
+  margin: 0 0 var(--s-1);
+}
+.clone-step .code-sample {
+  grid-column: 2;
+}
+.clone-setup .notes {
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+.clone-setup .notes summary {
+  font-weight: 600;
+  color: var(--text);
+  padding: var(--s-1) 0;
+}
+.clone-setup .notes p {
+  margin: var(--s-2) 0;
 }
 .code-sample {
   position: relative;
+  min-width: 0;
 }
 .code-sample .code-block {
-  padding-right: 64px;
+  padding-right: 48px;
   white-space: pre-wrap;
   word-break: break-all;
-  font-size: 12px;
+  margin: 0;
 }
 .copy-btn {
   position: absolute;
-  top: 10px;
-  right: 8px;
+  top: 6px;
+  right: 6px;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
+  min-width: 30px;
+  min-height: 30px;
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 600;
   line-height: 1;
-  padding: 5px 6px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--fg);
+  padding: 5px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
   cursor: pointer;
+}
+.copy-btn:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
 }
 .copy-btn-labelled,
 .clone-actions .copy-btn {
   position: static;
   padding: 5px 10px;
+  color: var(--text);
 }
 .clone-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  margin: 6px 0 10px;
+  gap: var(--s-2);
 }
-.clone-setup .small.strong {
-  margin-top: 12px;
-}
-.clone-setup .small.strong:first-child {
-  margin-top: 0;
-}
-.btn-small {
-  font-size: 11px;
-  padding: 5px 10px;
-}
-.copy-btn:hover {
-  background: var(--bg3);
+.list-reset {
+  list-style: none;
+  margin: var(--s-2) 0 0;
+  padding: 0;
 }

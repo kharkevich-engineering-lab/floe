@@ -16,70 +16,70 @@ const ANNOTATIONS: &[(&str, &str, &str, &str, &str)] = &[
     (
         "github_mirror.enabled",
         "Mirror GitHub",
-        "Run the mirror on the fleet's maintain hosts (one at a time, under a bucket lease).",
+        "Copy repositories from GitHub into floe and keep them up to date. Runs on one maintenance host at a time.",
         "",
         "General",
     ),
     (
         "github_mirror.api_url",
         "API URL",
-        "REST base: https://api.github.com, or https://ghe.example.com/api/v3 for GitHub Enterprise Server.",
+        "Where floe asks GitHub which repositories exist: https://api.github.com, or https://ghe.example.com/api/v3 for GitHub Enterprise Server.",
         "url",
         "Credential",
     ),
     (
         "github_mirror.git_url",
         "Git URL",
-        "Base of clone and LFS URLs; follow sends the token only to this host.",
+        "Where repositories are cloned from. The token is only ever sent to this host.",
         "url",
         "Credential",
     ),
     (
         "github_mirror.token",
         "Token",
-        "A PAT (classic `repo`, or fine-grained Contents:read + Metadata:read). Entered values are sealed and never shown again; an env reference keeps it out of the bucket.",
+        "A personal access token: classic with the repo scope, or fine-grained with read access to contents and metadata. A typed value is encrypted on save and never shown again; an environment variable keeps it out of storage entirely.",
         "secret",
         "Credential",
     ),
     (
         "github_mirror.users",
         "Users",
-        "Owners whose repositories are mirrored; \"@me\" = the token's user (private included).",
+        "GitHub users whose repositories are copied. Use @me for the token’s own account, private repositories included.",
         "",
         "Sources",
     ),
     (
         "github_mirror.orgs",
-        "Organisations",
-        "Every repository the token can see in these organisations.",
+        "Organizations",
+        "Every repository the token can see in these organizations.",
         "",
         "Sources",
     ),
     (
         "github_mirror.starred",
         "Starred by",
-        "Users whose stars are mirrored (\"@me\" allowed).",
+        "Copy the repositories these users have starred (@me allowed).",
         "",
         "Sources",
     ),
     (
         "github_mirror.repos",
         "Explicit repositories",
-        "owner/name entries that bypass include and the archived/fork skips.",
+        "Always copied, one owner/name per line — even if archived, a fork or outside the include patterns.",
         "",
         "Sources",
     ),
     (
         "github_mirror.include",
         "Include",
-        "owner/name globs (`*` stops at `/`); case-insensitive.",
+        "Only repositories matching one of these owner/name patterns are copied. * matches within one path segment; case does not matter.",
         "glob",
         "Selection",
     ),
     (
         "github_mirror.exclude",
         "Exclude",
-        "Same syntax; wins over everything. An exact owner/name here is a paused repository.",
+        "Never copied, whatever else matches. An exact owner/name here pauses that repository.",
         "glob",
         "Selection",
     ),
@@ -107,247 +107,247 @@ const ANNOTATIONS: &[(&str, &str, &str, &str, &str)] = &[
     (
         "github_mirror.private_visible_to_all_readers",
         "Private repositories are readable by every floe reader",
-        "floe has no per-repository read ACL: acknowledge that every reader of this floe reads every mirrored private repository.",
+        "floe has no per-repository read permissions: confirm that everyone who can read this floe may read every copied private repository.",
         "",
         "Selection",
     ),
     (
         "github_mirror.max_repo_size",
         "Max repository size",
-        "Larger repositories are never auto-created (handoff to floe import). 0 = no limit.",
+        "Larger repositories are skipped (import them by hand). 0 means no limit.",
         "bytesize",
         "Selection",
     ),
     (
         "github_mirror.lfs",
         "LFS read-through",
-        "Write upstream.lfs so LFS objects read through from GitHub.",
+        "Fetch missing Git LFS files from GitHub on demand.",
         "",
         "Repositories",
     ),
     (
         "github_mirror.follow",
         "Followed refs",
-        "Ref patterns written into each repository's upstream.follow.",
+        "Which branches and tags are kept in sync, as ref patterns.",
         "refpattern",
         "Repositories",
     ),
     (
         "github_mirror.on_rewrite",
         "On rewrite",
-        "archive = keep rewritten tips under refs/archive/; refuse = fast-forward only.",
+        "When GitHub history is rewritten (a force push): archive keeps the old commits under refs/archive/; refuse accepts fast-forwards only.",
         "",
         "Repositories",
     ),
     (
         "github_mirror.read_only",
         "Read-only",
-        "Publish a deny-all policy so only follow moves refs.",
+        "Refuse pushes to copied repositories, so they only change by syncing from GitHub.",
         "",
         "Repositories",
     ),
     (
         "github_mirror.interval",
         "Discovery interval",
-        "How often the mirror lists GitHub. 0 = only at startup.",
+        "How often floe looks for new repositories on GitHub. 0 means only at startup.",
         "duration",
-        "Schedule",
+        "Advanced",
     ),
     (
         "github_mirror.follow_interval",
         "Follow backstop",
-        "Written into upstream.follow_interval; pushes are nudged sooner.",
+        "Longest time between syncs of one repository; GitHub pushes trigger a sync sooner.",
         "duration",
-        "Schedule",
+        "Advanced",
     ),
     (
         "github_mirror.max_new_per_pass",
         "New repositories per pass",
-        "Bound on creations per pass.",
+        "At most this many repositories are added per discovery run.",
         "",
-        "Schedule",
+        "Advanced",
     ),
     (
         "github_mirror.min_rate_remaining",
         "Rate-limit floor",
-        "Stop a pass when x-ratelimit-remaining drops below this.",
+        "Pause discovery when fewer GitHub API requests than this remain.",
         "",
-        "Schedule",
+        "Advanced",
     ),
     (
         "github_mirror.gone_after",
         "Gone after",
-        "How long a repository must be missing before it is frozen as gone/forbidden.",
+        "How long a repository must be missing on GitHub before floe stops syncing it.",
         "duration",
-        "Schedule",
+        "Advanced",
     ),
     (
         "github_mirror.lease_ttl",
         "Lease TTL",
-        "TTL of the fleet-wide mirror lease.",
+        "How long one host holds the right to run the mirror before another may take over.",
         "duration",
-        "Schedule",
+        "Advanced",
     ),
     // --- catalog ---
     (
         "catalog.enabled",
         "Write audit tables",
-        "Iceberg tables from the WAL (needs a binary built with --features catalog).",
+        "Record every push and ref change in Apache Iceberg audit tables. Needs a floe build with the catalog feature.",
         "",
         "General",
     ),
     (
         "catalog.uri",
         "Catalog URI",
-        "Iceberg REST catalog base URL.",
+        "The base URL of your Iceberg REST catalog.",
         "url",
         "Connection",
     ),
     (
         "catalog.warehouse",
         "Warehouse",
-        "Warehouse identifier (S3 Tables: the table bucket).",
+        "The warehouse to write to. For AWS S3 Tables, the table bucket ARN.",
         "",
         "Connection",
     ),
     (
         "catalog.namespace",
         "Namespace",
-        "Created when absent (create_tables).",
+        "The namespace the audit tables live in; created if it does not exist.",
         "",
         "Connection",
     ),
     (
         "catalog.auth",
         "Authentication",
-        "none; bearer (token_env or credential_env); sigv4 (every request signed with the s3_* credentials, D63).",
+        "How floe signs in to the catalog: none, a bearer token or OAuth2 client credentials, or AWS Signature V4 using the storage credentials below.",
         "",
         "Authentication",
     ),
     (
         "catalog.sigv4_service",
         "SigV4 service",
-        "Signing name: s3 for RustFS /iceberg, s3tables for AWS S3 Tables.",
+        "The service name to sign for: s3 for RustFS, s3tables for AWS S3 Tables.",
         "",
         "Authentication",
     ),
     (
         "catalog.sigv4_region",
         "SigV4 region",
-        "Unset = s3_region.",
+        "Leave empty to use the storage region.",
         "",
         "Authentication",
     ),
     (
         "catalog.token_env",
         "Bearer token env var",
-        "auth = bearer: env var holding a bearer token (never the value).",
+        "The environment variable that holds the bearer token on every host — never the token itself.",
         "env",
         "Authentication",
     ),
     (
         "catalog.credential_env",
         "OAuth2 credential env var",
-        "auth = bearer: env var holding client_id:client_secret.",
+        "Alternatively, the environment variable that holds OAuth2 client credentials as client_id:client_secret.",
         "env",
         "Authentication",
     ),
     (
         "catalog.s3_endpoint",
         "Data-file S3 endpoint",
-        "When the catalog does not vend credentials.",
+        "Only needed when the catalog does not hand out storage credentials itself.",
         "url",
-        "Data files",
+        "Storage",
     ),
     (
         "catalog.s3_region",
         "Data-file S3 region",
+        "Region of the storage that holds the table data files.",
         "",
-        "",
-        "Data files",
+        "Storage",
     ),
     (
         "catalog.s3_access_key_env",
         "Access key env var",
-        "",
+        "The environment variable that holds the storage access key ID.",
         "env",
-        "Data files",
+        "Storage",
     ),
     (
         "catalog.s3_secret_key_env",
         "Secret key env var",
-        "",
+        "The environment variable that holds the storage secret access key.",
         "env",
-        "Data files",
+        "Storage",
     ),
     (
         "catalog.s3_path_style",
         "Path-style addressing",
-        "RustFS / MinIO.",
+        "Turn on for RustFS and MinIO.",
         "",
-        "Data files",
+        "Storage",
     ),
     (
         "catalog.flush_interval",
         "Flush interval",
-        "Max age of buffered rows before a commit.",
+        "Buffered rows are written at least this often.",
         "duration",
-        "Tuning",
+        "Advanced",
     ),
     (
         "catalog.flush_rows",
         "Flush rows",
-        "Commit a table once this many rows are buffered.",
+        "Write a table as soon as this many rows are waiting.",
         "",
-        "Tuning",
+        "Advanced",
     ),
     (
         "catalog.max_buffer_rows",
         "Max buffered rows",
-        "Beyond it durable appends fail fast and telemetry is dropped.",
+        "Beyond this, audit writes fail fast and telemetry rows are dropped.",
         "",
-        "Tuning",
+        "Advanced",
     ),
     (
         "catalog.commit_timeout",
         "Commit timeout",
-        "",
+        "Give up on a table write after this long.",
         "duration",
-        "Tuning",
+        "Advanced",
     ),
     (
         "catalog.backfill",
         "Backfill",
-        "A repository that predates the catalog starts at its retained log start instead of its head.",
+        "Record the retained history of repositories that existed before the catalog was turned on, not just new changes.",
         "",
-        "Tuning",
+        "Advanced",
     ),
     (
         "catalog.create_tables",
         "Create tables",
-        "Create the namespace and tables when missing.",
+        "Create the namespace and tables if they do not exist.",
         "",
-        "Tuning",
+        "Advanced",
     ),
     // --- events ---
     (
         "events.webhook_url",
         "Webhook URL",
-        "Each batch of ref events is POSTed as a JSON array (docs/EVENTS.md).",
+        "Every batch of ref changes is sent here as a JSON array in a POST request.",
         "url",
         "Webhook",
     ),
     (
         "events.webhook_secret",
         "Webhook secret",
-        "X-Floe-Signature: sha256=<HMAC>. Entered values are sealed and never shown again.",
+        "Used to sign each delivery (the X-Floe-Signature header), so the receiver can verify it came from floe. A typed value is encrypted on save and never shown again.",
         "secret",
         "Webhook",
     ),
     (
         "events.sweep_interval",
         "Sweep interval",
-        "Backstop sweep over every repository. 0 = off.",
+        "How often floe re-checks every repository for changes it might have missed. 0 turns it off.",
         "duration",
         "Webhook",
     ),
@@ -433,7 +433,7 @@ const ANNOTATIONS: &[(&str, &str, &str, &str, &str)] = &[
     (
         "mcp.snapshot_ttl",
         "Snapshot lifetime",
-        "Lifetime of a pinned snapshot handle (D57).",
+        "Lifetime of a pinned snapshot handle.",
         "duration",
         "Handles",
     ),
@@ -463,6 +463,50 @@ const NULLABLE_STRINGS: &[&str] = &[
     "catalog.sigv4_region",
     "events.webhook_url",
 ];
+
+/// Groups the admin UI folds away by default (`x-floe.advanced`).
+const ADVANCED_GROUPS: &[&str] = &["Advanced"];
+
+/// Fields that only apply for some values of a sibling key (`x-floe.when`:
+/// `{sibling: [values…]}`), so the admin UI shows them only then.
+fn show_when(path: &str) -> Option<Value> {
+    match path {
+        "catalog.token_env" | "catalog.credential_env" => Some(json!({"auth": ["bearer"]})),
+        "catalog.sigv4_service" | "catalog.sigv4_region" => Some(json!({"auth": ["sigv4"]})),
+        "github_mirror.private_visible_to_all_readers" => Some(json!({"include_private": [true]})),
+        _ => None,
+    }
+}
+
+/// A one-sentence, plain-language summary of a section (the schema's `description`).
+fn section_description(section: &str) -> Option<&'static str> {
+    match section {
+        "github_mirror" => Some(
+            "Copies repositories from GitHub or GitHub Enterprise into floe and keeps them in sync.",
+        ),
+        "catalog" => Some(
+            "Writes an audit trail of every push and ref change to Apache Iceberg tables in your catalog.",
+        ),
+        "events" => Some(
+            "Sends every ref change to a webhook of your choice, signed so the receiver can verify it.",
+        ),
+        "codeintel" => Some("Indexes hosted code for navigation and search."),
+        "mcp" => Some("Serves the code index to agents over the Model Context Protocol."),
+        _ => None,
+    }
+}
+
+/// The section's groups in annotation order (the order the UI presents them in).
+fn section_groups(section: &str) -> Vec<&'static str> {
+    let prefix = format!("{section}.");
+    let mut groups: Vec<&'static str> = Vec::new();
+    for a in ANNOTATIONS {
+        if a.0.strip_prefix(&prefix).is_some_and(|k| !k.contains('.')) && !groups.contains(&a.4) {
+            groups.push(a.4);
+        }
+    }
+    groups
+}
 
 fn live(path: &str) -> bool {
     !RESTART_ONLY
@@ -498,13 +542,17 @@ fn object_schema(path: &str, body: &Value) -> Value {
             props.insert(key.clone(), schema);
         }
     }
-    json!({
+    let mut node = json!({
         "type": "object",
         "title": section_title(path),
         "additionalProperties": false,
         "properties": props,
-        "x-floe": {"live": live(path)},
-    })
+        "x-floe": {"live": live(path), "groups": section_groups(path)},
+    });
+    if let (Some(obj), Some(d)) = (node.as_object_mut(), section_description(path)) {
+        obj.insert("description".into(), json!(d));
+    }
+    node
 }
 
 fn property(path: &str, default: &Value) -> Value {
@@ -539,10 +587,17 @@ fn property(path: &str, default: &Value) -> Value {
         } else {
             format
         };
-        obj.insert(
-            "x-floe".into(),
-            json!({"format": fmt, "group": group, "live": live(path)}),
-        );
+        let mut x = json!({
+            "format": fmt,
+            "group": group,
+            "live": live(path),
+            "advanced": ADVANCED_GROUPS.contains(&group),
+            "order": ANNOTATIONS.iter().position(|a| a.0 == path).unwrap_or(ANNOTATIONS.len()),
+        });
+        if let (Some(xo), Some(w)) = (x.as_object_mut(), show_when(path)) {
+            xo.insert("when".into(), w);
+        }
+        obj.insert("x-floe".into(), x);
     }
     p
 }
@@ -559,7 +614,7 @@ pub fn document_schema() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "floe:config-document",
-        "title": "floe runtime configuration (D60)",
+        "title": "floe runtime configuration",
         "type": "object",
         "additionalProperties": false,
         "properties": sections,
@@ -647,5 +702,36 @@ mod tests {
             s["properties"]["catalog"]["properties"]["uri"]["type"][1],
             "null"
         );
+        // Presentation hints for the admin UI: conditional fields, folded groups, order.
+        let cat = &s["properties"]["catalog"];
+        assert_eq!(
+            cat["properties"]["token_env"]["x-floe"]["when"]["auth"][0],
+            "bearer"
+        );
+        assert_eq!(
+            cat["properties"]["sigv4_region"]["x-floe"]["when"]["auth"][0],
+            "sigv4"
+        );
+        assert_eq!(cat["properties"]["flush_rows"]["x-floe"]["advanced"], true);
+        assert_eq!(cat["properties"]["uri"]["x-floe"]["advanced"], false);
+        assert_eq!(cat["x-floe"]["groups"][0], "General");
+        assert!(cat["description"].is_string());
+        // Help text is plain language: no decision numbers.
+        let text = s.to_string();
+        assert!(
+            !regex_like_decision(&text),
+            "a help text cites a decision number"
+        );
+    }
+
+    /// Whether `text` contains a decision reference such as `D63`.
+    fn regex_like_decision(text: &str) -> bool {
+        let b = text.as_bytes();
+        b.windows(3).enumerate().any(|(i, w)| {
+            w[0] == b'D'
+                && w[1].is_ascii_digit()
+                && w[2].is_ascii_digit()
+                && (i == 0 || !b[i - 1].is_ascii_alphanumeric())
+        })
     }
 }

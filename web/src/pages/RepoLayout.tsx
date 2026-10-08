@@ -5,6 +5,7 @@ import { useData } from "../data";
 import { RouteBoundary, Skeleton } from "../components/Loading";
 import { CloneSetup } from "../components/CloneSetup";
 import { TasksOverlay } from "../components/TasksOverlay";
+import { Icon } from "../components/Icon";
 import "../clone.css";
 
 /** "Clone" dropdown: recipes come from `/services/setup.json` (cached after the first open). */
@@ -16,16 +17,26 @@ function CloneMenu({ full }: { full: string }) {
     const onDoc = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setOpen(false);
+        ref.current?.querySelector("button")?.focus();
+      }
+    };
     document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [open]);
   return (
     <div className="clone-menu" ref={ref}>
-      <button type="button" className="btn btn-primary" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        Clone
+      <button type="button" className="btn btn-primary" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-controls="clone-pop">
+        <Icon name="code" /> Clone <Icon name="chevron" size={14} />
       </button>
       {open && (
-        <div className="clone-pop">
+        <div className="clone-pop" id="clone-pop" role="dialog" aria-label={`Clone ${full}`}>
           <Suspense fallback={<Skeleton title={false} rows={4} />}>
             <CloneSetup repo={full} compact />
           </Suspense>
@@ -66,35 +77,33 @@ export function RepoLayout() {
   const walActive = pathname.endsWith("/wal");
   const settingsActive = pathname.endsWith("/settings");
   const codeActive = !walActive && !settingsActive && !/\/commits?(\/|$)/.test(pathname);
+  const commitsActive = !codeActive && !walActive && !settingsActive;
   return (
     <>
       <div className="repo-head">
         <h1 className="repo-title">
-          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden className="muted">
-            <path
-              fill="currentColor"
-              d="M2 2.5A2.5 2.5 0 0 1 4.5 0h8.75a.75.75 0 0 1 .75.75v12.5a.75.75 0 0 1-.75.75h-2.5a.75.75 0 0 1 0-1.5h1.75v-2h-8a1 1 0 0 0-.714 1.7.75.75 0 1 1-1.072 1.05A2.495 2.495 0 0 1 2 11.5Zm10.5-1h-8a1 1 0 0 0-1 1v6.708A2.486 2.486 0 0 1 4.5 9h8ZM5 12.25a.25.25 0 0 1 .25-.25h3.5a.25.25 0 0 1 .25.25v3.25a.25.25 0 0 1-.4.2l-1.45-1.087a.25.25 0 0 0-.3 0L5.4 15.7a.25.25 0 0 1-.4-.2Z"
-            />
-          </svg>
-          <Link to={`/${owner}`}>{owner}</Link>
-          <span className="muted">/</span>
-          <Link to={`/${full}`} className="strong">
-            {repo}
+          <Icon name="repo" size={20} />
+          <Link to={`/${owner}`} className="owner">
+            {owner}
           </Link>
+          <span className="muted" aria-hidden>
+            /
+          </span>
+          <Link to={`/${full}`}>{repo}</Link>
         </h1>
         <CloneMenu full={full} />
-        <nav className="tabs">
-          <NavLink to={`/${full}`} className={() => (codeActive ? "tab active" : "tab")} end>
-            Code
+        <nav className="tabs" aria-label="Repository">
+          <NavLink to={`/${full}`} className={() => (codeActive ? "tab active" : "tab")} aria-current={codeActive ? "page" : undefined} end>
+            <Icon name="code" /> Code
           </NavLink>
-          <NavLink to={`/${full}/commits`} className={() => (codeActive || walActive || settingsActive ? "tab" : "tab active")}>
-            Commits
+          <NavLink to={`/${full}/commits`} className={() => (commitsActive ? "tab active" : "tab")} aria-current={commitsActive ? "page" : undefined}>
+            <Icon name="commit" /> Commits
           </NavLink>
           <NavLink to={`/${full}/wal`} className={() => (walActive ? "tab active" : "tab")}>
-            WAL
+            <Icon name="pulse" /> WAL
           </NavLink>
           <NavLink to={`/${full}/settings`} className={() => (settingsActive ? "tab active" : "tab")}>
-            Settings
+            <Icon name="settings" /> Settings
           </NavLink>
           <TasksOverlay repo={full} />
         </nav>

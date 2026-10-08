@@ -995,7 +995,19 @@ export interface JsonSchema {
   items?: JsonSchema;
   oneOf?: JsonSchema[];
   minimum?: number;
-  "x-floe"?: { format?: string; group?: string; live?: boolean };
+  "x-floe"?: {
+    format?: string;
+    group?: string;
+    live?: boolean;
+    /** Folded away by default in the admin UI. */
+    advanced?: boolean;
+    /** Display order within the section. */
+    order?: number;
+    /** Shown only while each named sibling key holds one of the values. */
+    when?: Record<string, unknown[]>;
+    /** On a section: its groups in display order. */
+    groups?: string[];
+  };
   [k: string]: unknown;
 }
 export interface InstanceStatus {

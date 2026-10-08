@@ -1,5 +1,6 @@
 import { Component, Suspense, type ErrorInfo, type ReactNode } from "react";
-import { useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
+import { EmptyState, Notice } from "./ui";
 import { ApiError } from "../api";
 import { useActivity, usePending } from "../data";
 
@@ -35,7 +36,7 @@ export function TopProgress() {
 /** Grey placeholder blocks shaped like the page that is about to render. */
 export function Skeleton({ rows = 6, title = true }: { rows?: number; title?: boolean }) {
   return (
-    <div className="skeleton" aria-busy="true" aria-live="polite" aria-label="Loading">
+    <div className="skeleton" role="status" aria-busy="true" aria-label="Loading">
       {title && <div className="sk sk-title" />}
       <div className="box">
         {Array.from({ length: rows }, (_, i) => (
@@ -49,10 +50,18 @@ export function Skeleton({ rows = 6, title = true }: { rows?: number; title?: bo
 function ErrorBox({ error }: { error: unknown }) {
   const e = error instanceof Error ? error : new Error(String(error));
   const status = e instanceof ApiError ? e.status : undefined;
+  if (status === 404) {
+    return (
+      <EmptyState icon="info" title="Not found" action={<Link className="btn" to="/">Back to repositories</Link>}>
+        <p>{e.message}</p>
+      </EmptyState>
+    );
+  }
   return (
-    <div className="flash error" role="alert">
-      <strong>{status === 404 ? "Not found" : status ? `Error ${status}` : "Error"}:</strong> {e.message}
-    </div>
+    <Notice tone="danger" title={status ? `Something went wrong (HTTP ${status})` : "Something went wrong"}>
+      <p>{e.message}</p>
+      <p className="muted small">Reload the page to try again. If it keeps failing, the server log has the details.</p>
+    </Notice>
   );
 }
 

@@ -7,18 +7,21 @@ import { fmtSize, relTime } from "../format";
 import { RefBar } from "../components/RefBar";
 import { Markdown } from "../components/Markdown";
 import { Avatar } from "../components/CommitRow";
+import { Icon } from "../components/Icon";
+import { EmptyState } from "../components/ui";
+import { CodeSample } from "../components/CopyButton";
 
 export function TreePage() {
   const { full, refs } = useRepo();
   const rest = useParams()["*"] ?? "";
   if (!refs.head) {
     return (
-      <Box title="Setup">
-        <div className="pad">
-          <p>This repository is empty. Push to <code>{full}.git</code>:</p>
-          <pre className="code-block">
-            git remote add origin {location.origin}/{full}.git{"\n"}git push -u origin HEAD
-          </pre>
+      <Box>
+        <EmptyState icon="repo" title="This repository is empty">
+          <p>Push your first commit to start it:</p>
+        </EmptyState>
+        <div className="pad" style={{ paddingTop: 0, maxWidth: 720, margin: "0 auto" }}>
+          <CodeSample code={`git remote add origin ${location.origin}/${full}.git\ngit push -u origin HEAD`} />
         </div>
       </Box>
     );
@@ -53,10 +56,11 @@ function TreeView({ full, rest }: { full: string; rest: string }) {
         }
       >
         <table className="files">
+          <caption className="sr-only">Files in {t.path || "the repository root"}</caption>
           <tbody>
             {t.path && (
               <tr>
-                <td className="icon" />
+                <td className="icon" aria-hidden />
                 <td colSpan={2}>
                   <Link to={`${base}/tree/${t.ref}${up ? "/" + up : ""}`}>..</Link>
                 </td>
@@ -64,7 +68,7 @@ function TreeView({ full, rest }: { full: string; rest: string }) {
             )}
             {t.entries.map((e) => (
               <tr key={e.name}>
-                <td className="icon">{e.type === "tree" ? <DirIcon /> : e.type === "commit" ? "⧉" : <FileIcon />}</td>
+                <td className="icon">{e.type === "tree" ? <DirIcon /> : e.type === "commit" ? <Icon name="submodule" /> : <FileIcon />}</td>
                 <td>
                   {e.type === "commit" ? (
                     <span title={`submodule @ ${e.sha}`}>{e.name}</span>
@@ -92,23 +96,9 @@ function TreeView({ full, rest }: { full: string; rest: string }) {
 }
 
 function DirIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden className="dir">
-      <path
-        fill="currentColor"
-        d="M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5a.25.25 0 0 1-.2-.1l-.9-1.2C6.07 1.26 5.55 1 5 1H1.75Z"
-      />
-    </svg>
-  );
+  return <Icon name="folder" className="icon dir" />;
 }
 
 function FileIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden className="muted">
-      <path
-        fill="currentColor"
-        d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 9 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688l-.011-.013-2.914-2.914-.013-.011Z"
-      />
-    </svg>
-  );
+  return <Icon name="file" />;
 }

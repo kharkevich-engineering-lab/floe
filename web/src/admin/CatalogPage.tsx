@@ -1,21 +1,27 @@
 import { useState } from "react";
 import { api, type CatalogStatus, type CatalogTest } from "../api";
 import { useData } from "../data";
-import { Box } from "../components/Layout";
-import { SectionEditor, errorMessage } from "./SectionEditor";
+import { Notice, StatusBadge } from "../components/ui";
+import { catalogState } from "./status";
+import { Facts, SectionEditor, errorMessage, focusForm } from "./SectionEditor";
 
-/** Page 3: the `catalog` section (auth fields are plain env references, so new schemes render without UI work), a connection test, writer status. */
+/** The `catalog` section: status first (from `GET …/admin/catalog`), then connection, authentication, storage, advanced. */
 export function CatalogPage() {
-  return <SectionEditor section="catalog" title="Catalog (Iceberg audit tables)" header={catalogHeader} />;
+  return <SectionEditor section="catalog" icon="database" title="Audit catalog" summary={catalogSummary} />;
 }
 
-const catalogHeader = (current: Record<string, unknown>) => <CatalogStatusBox current={current} />;
+const catalogSummary = (current: Record<string, unknown>, saved: Record<string, unknown>) => <CatalogSummary current={current} saved={saved} />;
 
-function CatalogStatusBox({ current }: { current: Record<string, unknown> }) {
+const AUTH_LABEL: Record<string, string> = { none: "None", bearer: "Bearer token or OAuth2", sigv4: "AWS Signature V4" };
+
+function CatalogSummary({ current, saved }: { current: Record<string, unknown>; saved: Record<string, unknown> }) {
   const s: CatalogStatus = useData("admin:catalog", () => api.admin.catalog.status(), 10_000);
   const [busy, setBusy] = useState(false);
   const [res, setRes] = useState<CatalogTest | null>(null);
   const [err, setErr] = useState("");
+  const state = catalogState(s);
+  const configured = typeof saved.uri === "string" && saved.uri !== "";
+  const canTest = typeof current.uri === "string" && current.uri !== "";
   const test = async () => {
     setBusy(true);
     setErr("");
@@ -29,45 +35,46 @@ function CatalogStatusBox({ current }: { current: Record<string, unknown> }) {
     }
   };
   return (
-    <Box title="Status">
-      {!s.compiled && <div className="notice warn">This binary was built without the catalog feature: enabling the catalog is refused at publish.</div>}
-      {s.restart_required && <div className="notice warn">The catalog section changed since this instance started: restart it to apply.</div>}
-      <table className="kv">
-        <tbody>
-          <tr>
-            <th scope="row">Writer on this instance</th>
-            <td>{s.running ? (s.up === false ? "running, catalog unreachable" : "running") : "not running"}</td>
-          </tr>
-          <tr>
-            <th scope="row">WAL tail (events role)</th>
-            <td>{s.tail ? "running" : "not on this instance"}</td>
-          </tr>
-          <tr>
-            <th scope="row">Authentication</th>
-            <td>{s.auth}</td>
-          </tr>
-        </tbody>
-      </table>
-      <div className="pad secret-row">
-        <button type="button" className="btn small" onClick={test} disabled={busy}>
-          {busy ? "Testing…" : "Test connection"}
-        </button>
-        <span role="status" aria-live="polite" className="small">
-          {res?.ok && (
-            <span className="pill live">
-              OK (HTTP {res.status}
-              {res.latency_ms !== undefined ? `, ${res.latency_ms} ms` : ""})
-            </span>
-          )}
-          {res && !res.ok && (
-            <span className="field-error">
-              Failed{res.status ? ` (HTTP ${res.status})` : ""}: {res.error_class ?? "no details"}
-            </span>
-          )}
-          {res?.unauthenticated && <span className="muted"> The writer signs or exchanges credentials; this probe did not authenticate.</span>}
-          {err && <span className="field-error">{err}</span>}
-        </span>
+    <div className="section-status">
+      <div className="section-status-head">
+        <StatusBadge tone={state.tone}>{state.label}</StatusBadge>
+        <span className="muted">{state.detail}</span>
+        <span className="spacer" />
+        {!configured && s.compiled ? (
+          <button type="button" className="btn primary" onClick={() => focusForm("catalog")}>
+            Configure the catalog
+          </button>
+        ) : (
+          <button type="button" className="btn primary" onClick={test} disabled={busy || !canTest} title={canTest ? undefined : "Set a catalog URI first"}>
+            {busy ? "Testing…" : "Test connection"}
+          </button>
+        )}
       </div>
-    </Box>
+      <Facts
+        rows={[
+          ["Catalog", s.uri ? <code key="u">{s.uri}</code> : <span key="u" className="muted">Not set</span>],
+          ["Warehouse · namespace", s.warehouse || s.namespace ? `${s.warehouse ?? "—"} · ${s.namespace}` : "—"],
+          ["Sign-in", AUTH_LABEL[s.auth] ?? s.auth],
+          ["Writer on this instance", s.running ? (s.up === false ? "Running, catalog unreachable" : "Running") : "Not running"],
+          ["WAL tail", s.tail ? "Running" : "Not on this instance (events role)"],
+        ]}
+      />
+      <div aria-live="polite">
+        {res?.ok && (
+          <Notice tone="ok" title="The catalog answered">
+            HTTP {res.status}
+            {res.latency_ms !== undefined ? ` in ${res.latency_ms} ms` : ""}.
+            {res.unauthenticated && " The writer signs or exchanges credentials itself; this probe did not authenticate."}
+          </Notice>
+        )}
+        {res && !res.ok && (
+          <Notice tone="danger" title="Connection failed">
+            {res.status ? `HTTP ${res.status}: ` : ""}
+            {res.error_class ?? "no details"}
+          </Notice>
+        )}
+        {err && <Notice tone="danger" title="Could not run the test">{err}</Notice>}
+      </div>
+    </div>
   );
 }
