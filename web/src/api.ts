@@ -109,6 +109,8 @@ export const api = {
   owners: () => authRedirect(client.owners.list()),
   repos: (owner: string) => authRedirect(client.owners.repos(owner)),
   refs: (repo: string) => authRedirect(client.repo(repo).refs()),
+  /** Change (or repair) the default branch; admin. */
+  setHead: (repo: string, branch: string) => client.repo(repo).setHead(branch),
   refList: (repo: string, kind: "branches" | "tags", q: { q?: string; prefix?: string; after?: string; n?: number } = {}) =>
     authRedirect(kind === "branches" ? client.repo(repo).branches(q) : client.repo(repo).tags(q)),
   resolve: (repo: string, rest: string) => authRedirect(client.repo(repo).resolve(rest)),

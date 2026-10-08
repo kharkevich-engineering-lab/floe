@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, type Overview, type PolicyDryRun, type PolicyValidation, type SettingsDescribe, type SettingsHistory, type SettingsValidation } from "../api";
+import { api, type Refs, type RefPage, type Overview, type PolicyDryRun, type PolicyValidation, type SettingsDescribe, type SettingsHistory, type SettingsValidation } from "../api";
 import { invalidate, useData } from "../data";
 import { Box } from "../components/Layout";
 import { Maintainers } from "../components/Maintainers";
@@ -38,6 +38,7 @@ export function SettingsPage() {
   const [section, setSection] = useState<"tasks" | "policy" | "config">("tasks");
   return (
     <div className="settings">
+      <DefaultBranch full={full} />
       <nav className="subtabs" aria-label="Settings sections">
         {(
           [
@@ -55,6 +56,58 @@ export function SettingsPage() {
       {section === "policy" && <PolicyEditor full={full} />}
       {section === "config" && <EffectiveConfig d={d} full={full} />}
     </div>
+  );
+}
+
+// ---- default branch ----------------------------------------------------------------
+
+/** HEAD's target (`PUT …/api/head`, admin): change it, or repair a HEAD that names no branch. */
+function DefaultBranch({ full }: { full: string }) {
+  const refs: Refs = useData(`refs:${full}`, () => api.refs(full), 5_000);
+  const page: RefPage = useData(`default-branch-choices:${full}`, () => api.refList(full, "branches", { n: 200 }), 10_000);
+  const current = refs.head?.name ?? "";
+  // What the select shows: the admin's pick, else the current target.
+  const [picked, setPicked] = useState<string | null>(null);
+  const choice = picked ?? current;
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const names = page.refs.map((r) => r.name);
+  if (current && !names.includes(current)) names.unshift(current);
+  const save = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      await api.setHead(full, choice);
+      setPicked(null);
+      invalidate(`refs:${full}`);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Box title="Default branch">
+      <div className="editor-actions">
+        <label className="small">
+          HEAD →{" "}
+          <select value={choice} onChange={(e) => setPicked(e.target.value)} aria-label="Default branch" disabled={names.length === 0}>
+            {!current && <option value="">(none — HEAD names no existing branch)</option>}
+            {names.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="button" className="btn small primary" disabled={busy || !choice || choice === current} onClick={save}>
+          {busy ? "saving…" : "Set default branch"}
+        </button>
+        {names.length === 0 && <span className="muted">no branches yet: the first push sets it</span>}
+        {page.more && <span className="muted">first {page.refs.length} branches shown</span>}
+        {err && <span className="errors">{err}</span>}
+      </div>
+    </Box>
   );
 }
 

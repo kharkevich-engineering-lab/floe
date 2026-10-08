@@ -287,6 +287,14 @@ index, URLs. `404` for an unknown repo. Cache: SWR + `ETag: "<head sha>"`.
 removes it (admin permission) — the same handlers as `PUT|DELETE /{owner}/{repo}`.
 `GET|PUT|DELETE …/policy` is the push policy document (`docs/POLICY.md`).
 
+`PUT /{o}/{r}/api/head` (D66) sets the **default branch**: body `{"branch": "master"}` (short name or
+`refs/heads/…`) → `200 {head, previous, seq}` (`refs/heads/…` names; `{head, previous, unchanged: true}` when HEAD
+already points there), `400` for a name that is not a branch, `404` for a branch that does not exist. **Admin**,
+like settings and policy. Published through the WAL as a `HEAD` symref update, so every instance sees it on its next
+refs-level sync. Pushes set it by themselves when HEAD names no existing branch (`main`, else `master`, else the
+first branch the push creates, by name); this route changes it, and repairs a repository whose HEAD dangles (`head:
+null` with branches present). SDK: `repo.setHead(branch)`; the UI: the Settings tab's "Default branch".
+
 `GET|PUT|DELETE /{o}/{r}/api/settings` (D24, 2026-08-21) is the repository's **settings in the WAL**: a TOML document
 restricted to `[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`, and `[integrations]`, merged over the
 host's config (`effective config`).
@@ -577,6 +585,7 @@ GET /api/v1/… (Origin ∉ cors_origins)           → 200, no CORS headers; DE
 GET /repos.js                                   → 200 text/javascript; ETag; no-cache; unauthenticated
 GET /o/r/api/refs                               → 200 {head:{name,sha}|null}; ETag; If-None-Match → 304   (browser lane: /o/r/api-browser/refs)
 GET /o/r/api/refs/branches?n=3                  → 200 {refs:[3],more}; SWR
+PUT /o/r/api/head {"branch":"dev"}              → 200 {head:"refs/heads/dev",previous,seq} (admin) | 400 | 404 unknown branch
 GET /o/r/api/refs/branches?q=stab&after=1-x&n=2 → filtered, after cursor
 GET /o/r/api/refs/tags   (Accept: text/event-stream) → event: ref … event: done
 GET /o/r/api/resolve/feature/x/dir              → 200 {ref:"feature/x",sha,path:"dir",kind:"branch"}; SWR+ETag

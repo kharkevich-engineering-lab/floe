@@ -61,6 +61,8 @@ pub(crate) struct PublishRequest {
     pub(crate) meta: HashMap<String, String>,
     /// True when receive-pack already performed the request freshness check.
     pub(crate) synced: bool,
+    /// A client push: point a dangling HEAD at a branch it creates ([`adopt_head`]).
+    pub(crate) adopt_head: bool,
     /// Explicit entry time (history replay); None = now. Validated monotonic
     /// (>= the head entry's `created_at`) before the batch is written.
     pub(crate) created_at: Option<prost_types::Timestamp>,
@@ -365,13 +367,52 @@ pub(crate) fn is_null_oid(hex: &str) -> bool {
 pub(crate) fn apply_txn_to_map(txn: &RefTransaction, refs: &mut floe_git::RefView) {
     for u in &txn.updates {
         if !u.new_symbolic_target.is_empty() {
-            refs.set(&u.name, u.new_symbolic_target.clone());
+            // Only HEAD may be symbolic (`validate_ref_update`).
+            refs.set_head_target(u.new_symbolic_target.clone());
         } else if is_null_oid(&u.new_oid) {
             refs.remove(&u.name);
         } else {
             refs.set(&u.name, u.new_oid.clone());
         }
     }
+}
+
+/// True when HEAD names no existing ref (unborn, or its branch never existed / was deleted).
+fn head_dangles(refs: &floe_git::RefView) -> bool {
+    refs.head_oid().is_none()
+}
+
+/// GitHub's rule for the default branch of a repository whose HEAD names no
+/// branch: a push that creates branches points HEAD at `refs/heads/main` if it
+/// creates it, else `refs/heads/master`, else the first branch it creates in
+/// sorted order. `None` when the transaction sets HEAD itself or creates no
+/// branch. `after` is the working view with `txn` applied: the chosen branch
+/// must exist there.
+pub(crate) fn adopt_head(txn: &RefTransaction, after: &floe_git::RefView) -> Option<String> {
+    if txn
+        .updates
+        .iter()
+        .any(|u| !u.new_symbolic_target.is_empty())
+    {
+        return None;
+    }
+    let mut created: Vec<&str> = txn
+        .updates
+        .iter()
+        .filter(|u| {
+            u.name.starts_with("refs/heads/")
+                && is_null_oid(&u.old_oid)
+                && !is_null_oid(&u.new_oid)
+                && after.get(&u.name).is_some()
+        })
+        .map(|u| u.name.as_str())
+        .collect();
+    created.sort_unstable();
+    ["refs/heads/main", "refs/heads/master"]
+        .into_iter()
+        .find(|n| created.contains(n))
+        .or_else(|| created.first().copied())
+        .map(str::to_string)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -462,6 +503,9 @@ pub(crate) async fn publisher_task(
 struct Verified {
     per_ref: Vec<(String, Result<(), RefError>)>,
     valid: bool,
+    /// The transaction with an adopted `HEAD` update appended ([`adopt_head`]);
+    /// `None` = the request's own. Recomputed on every CAS attempt.
+    adopted: Option<RefTransaction>,
 }
 
 /// Process a batch of publish requests through the full CAS loop.
@@ -530,12 +574,28 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                 }
             }
             let all_ok = per_ref.iter().all(|(_, r)| r.is_ok());
+            let mut adopted = None;
             if all_ok {
+                let dangling = req.adopt_head && head_dangles(&working_refs);
                 apply_txn_to_map(&req.txn, &mut working_refs);
+                if dangling
+                    && head_dangles(&working_refs)
+                    && let Some(target) = adopt_head(&req.txn, &working_refs)
+                {
+                    let mut txn = req.txn.clone();
+                    txn.updates.push(floe_proto::v1::RefUpdate {
+                        name: "HEAD".to_string(),
+                        new_symbolic_target: target.clone(),
+                        ..Default::default()
+                    });
+                    working_refs.set_head_target(target);
+                    adopted = Some(txn);
+                }
             }
             verified.push(Verified {
                 per_ref,
                 valid: all_ok,
+                adopted,
             });
         }
 
@@ -568,8 +628,10 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
         let build = |first_seq: u64| -> (Vec<LogEntry>, Vec<PackRef>) {
             let mut entries = Vec::with_capacity(valid_indices.len());
             let mut new_packs = Vec::new();
-            let valid_reqs = valid_indices.iter().filter_map(|&idx| batch.get(idx));
-            for (offset, req) in valid_reqs.enumerate() {
+            let valid_reqs = valid_indices
+                .iter()
+                .filter_map(|&idx| Some((batch.get(idx)?, verified.get(idx)?)));
+            for (offset, (req, v)) in valid_reqs.enumerate() {
                 let seq = first_seq + offset as u64;
                 let pack_ref = req.pack.as_ref().map(|p| pack_ref_from_ingested(p, seq));
                 if let Some(pr) = &pack_ref {
@@ -579,7 +641,7 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                     seq,
                     EntryKind::Push,
                     pack_ref,
-                    Some(&req.txn),
+                    Some(v.adopted.as_ref().unwrap_or(&req.txn)),
                     Vec::new(),
                     &req.meta,
                     &writer,
@@ -755,8 +817,12 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                 handle.sync_mutex.lock(),
             )
             .await;
-            for req in valid_indices.iter().filter_map(|&idx| batch.get(idx)) {
-                if let Err(e) = handle.local.apply_ref_txn(&req.txn, false) {
+            let valid_txns = valid_indices.iter().filter_map(|&idx| {
+                let req = batch.get(idx)?;
+                Some(verified.get(idx)?.adopted.as_ref().unwrap_or(&req.txn))
+            });
+            for txn in valid_txns {
+                if let Err(e) = handle.local.apply_ref_txn(txn, false) {
                     tracing::warn!(repo = %handle.id, seq = last_seq, error = %e, "published (CAS ok), but applying the ref txn to the local copy failed; the next sync replays it");
                     metrics::counter!("floe_publish_local_apply_failed_total").increment(1);
                     local_ok = false;
@@ -1398,5 +1464,97 @@ pub(crate) async fn publish_settings_impl(
             }
             Err(e) => return Err(WalError::Store(e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod adopt_head_tests {
+    use super::*;
+    use floe_proto::v1::RefUpdate;
+
+    fn view(head: &str, refs: &[&str]) -> floe_git::RefView {
+        let mut refs: Vec<floe_git::Ref> = refs
+            .iter()
+            .map(|n| floe_git::Ref {
+                name: (*n).to_string(),
+                oid: "a".repeat(40),
+                peeled: String::new(),
+            })
+            .collect();
+        refs.sort_by(|a, b| a.name.cmp(&b.name));
+        floe_git::RefView::new(Arc::new(floe_git::RefSnapshotData {
+            refs,
+            head_target: head.to_string(),
+        }))
+    }
+
+    fn create(names: &[&str]) -> RefTransaction {
+        RefTransaction {
+            updates: names
+                .iter()
+                .map(|n| RefUpdate {
+                    name: (*n).to_string(),
+                    old_oid: "0".repeat(40),
+                    new_oid: "b".repeat(40),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn adopted(head: &str, existing: &[&str], pushed: &[&str]) -> Option<String> {
+        let mut v = view(head, existing);
+        let txn = create(pushed);
+        if !head_dangles(&v) {
+            return None;
+        }
+        apply_txn_to_map(&txn, &mut v);
+        if !head_dangles(&v) {
+            return None;
+        }
+        adopt_head(&txn, &v)
+    }
+
+    #[test]
+    fn github_rule_main_then_master_then_first_by_name() {
+        let main = "refs/heads/main";
+        let master = "refs/heads/master";
+        assert_eq!(
+            adopted(main, &[], &[master, "refs/tags/v1"]).as_deref(),
+            Some(master)
+        );
+        assert_eq!(
+            adopted("refs/heads/trunk", &[], &["refs/heads/zeta", main, master]).as_deref(),
+            Some(main)
+        );
+        assert_eq!(
+            adopted(main, &[], &["refs/heads/zeta", "refs/heads/alpha"]).as_deref(),
+            Some("refs/heads/alpha")
+        );
+        // Tags only: nothing to point at.
+        assert_eq!(adopted(main, &[], &["refs/tags/v1"]), None);
+        // HEAD resolves (before, or through this very push): never moved.
+        assert_eq!(adopted(master, &[master], &[main]), None);
+        assert_eq!(adopted(main, &[], &[main, master]), None);
+        // A dangling HEAD with other branches present is adopted only by a push creating one.
+        assert_eq!(
+            adopted(main, &["refs/heads/dev"], &["refs/heads/x"]).as_deref(),
+            Some("refs/heads/x")
+        );
+    }
+
+    #[test]
+    fn a_transaction_that_sets_head_itself_is_left_alone() {
+        let mut txn = create(&["refs/heads/master"]);
+        txn.updates.push(RefUpdate {
+            name: "HEAD".into(),
+            new_symbolic_target: "refs/heads/dev".into(),
+            ..Default::default()
+        });
+        let mut v = view("refs/heads/main", &[]);
+        apply_txn_to_map(&txn, &mut v);
+        assert_eq!(v.head_target(), "refs/heads/dev");
+        assert_eq!(adopt_head(&txn, &v), None);
     }
 }
