@@ -100,7 +100,11 @@ while read -r src; do
             packs="$state/$name.packs"
             rm -rf "$packs"; mkdir -p "$packs"
             # One pack with a bitmap, every ref's closure (what `import --direct` publishes best).
-            git -C "$gd" pack-objects --all --write-bitmap-index --threads=0 "$packs/pack" < /dev/null > /dev/null &&
+            # windowMemory bounds the delta search per thread: a repository of large binaries
+            # otherwise needs window × blob size × threads of RAM (a 4 GiB pod was OOM-killed
+            # packing 100 MB blobs).
+            git -C "$gd" -c pack.windowMemory=256m pack-objects --all --write-bitmap-index --threads=0 \
+                "$packs/pack" < /dev/null > /dev/null &&
                 "$floe" import --direct --from "$src" --packs "$packs" "$id" || result=import-failed
         else
             "$floe" import --from "$src" "$id" || result=import-failed

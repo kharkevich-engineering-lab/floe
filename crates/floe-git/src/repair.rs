@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use crate::GitError;
+use crate::{GitError, ge};
 
 pub struct RepairPack {
     /// Scratch directory holding the repo and the pack; the caller removes it after publishing.
@@ -137,8 +137,7 @@ pub async fn fetch_objects_as_pack(
         .map_err(GitError::Io)?
         .len();
     // Every requested object must be in the pack (a want the server refused is a hole left open).
-    let index = gix_pack::index::File::at(&idx, gix_hash::Kind::Sha1)
-        .map_err(|e| GitError::Gix(Box::new(e)))?;
+    let index = gix_pack::index::File::at(&idx, gix_hash::Kind::Sha1).map_err(ge)?;
     let mut objects = 0u64;
     let mut first_missing = None;
     for o in oids {

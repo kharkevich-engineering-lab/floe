@@ -763,11 +763,7 @@ identity. `scripts/migrate-archive.sh` runs both per repository. `docs/MIGRATION
   `just test-slow` (ignored benches); `tests/e2e.sh` against a running server (`FLOE_E2E_BASE_URL`,
   `FLOE_TOKEN`). Never `cargo test --workspace --no-fail-fast` in a session; wrap ad-hoc cargo in `timeout`.
 - Known flaky (find the cause, not the assertion): `fetch_from_front_that_serves_the_base_remotely` (~1 in 3
-  under the full e2e suite: base published without `has_commit_graph`) and
-  `sim::base_rebuild_resumes_after_a_kill_between_any_two_phases` (~1 in 4–7; fails even with `just sim`'s
-  one-test-at-a-time, "copying the serving copy to the scratch dir: No such file", #14), and
-  `sim::sim_cache_pressure_keeps_pinned_repos_and_refuses_too_large` (a cold refs read > 1 s on CI runners, #12).
-  The PR gate skips the two sim tests; the nightly runs them.
+  under the full e2e suite: base published without `has_commit_graph`).
 - **CI runs what a change needs** (`.github/workflows/ci.yml`; a `changes` job reads the PR's file list). Push
   to `main` and a manual run run everything. On a pull request:
 

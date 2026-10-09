@@ -237,11 +237,10 @@ pub async fn compose_full_from_base(
     } else {
         base.clone()
     };
-    let pack_path = handle
-        .local()
-        .pack_path(&floe_git::gix_hash::ObjectId::from_hex(
-            pack.checksum.as_bytes(),
-        )?);
+    let pack_path = handle.local().pack_path(
+        &floe_git::gix_hash::ObjectId::from_hex(pack.checksum.as_bytes())
+            .map_err(floe_git::Exn::into_error)?,
+    );
     let entry = floe_bundle::ops::compose_full(
         store,
         &pack.checksum,

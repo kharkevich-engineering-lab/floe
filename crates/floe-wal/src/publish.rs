@@ -911,7 +911,9 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
             }
         }
         // Fold the pushed packs' commits into the local commit-graph
-        // chain (cheap, incremental; off the client's critical path).
+        // chain (cheap, incremental; off the client's critical path). The
+        // chain is the serving copy's object store: rewritten under
+        // `pack_mutex`, like every other change to it.
         if !new_packs.is_empty()
             && let Some(arc) = handle.self_arc.get().cloned()
         {
@@ -921,7 +923,7 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
                 // waits for before it moves the copy aside, and never on a deleted handle —
                 // `git commit-graph write` creates missing leading directories, so a late run
                 // would recreate the path of a deleted repository (#15).
-                let _packs = arc.pack_mutex.lock().await;
+                let _packs = arc.lock_packs().await;
                 if arc.is_deleted() {
                     return;
                 }

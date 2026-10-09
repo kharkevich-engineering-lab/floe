@@ -128,7 +128,22 @@ pub async fn verify(
     let manifest = handle.manifest();
     report.head_seq = manifest.head_seq;
     if manifest.head_seq == 0 {
-        report.problems.push(format!("{id} has no WAL entries"));
+        // Created, never pushed: no refs and no objects is the whole state. It is the
+        // source's state too only if the source has no refs either.
+        println!("cold refs: {id} is empty (created, nothing published)");
+        if let Some(src) = &opts.against {
+            let src = resolve_git_dir(src)?;
+            let (source_all, source_head) = git_refs(&src)?;
+            let filter = RefFilter::new(opts.refs.clone());
+            for (name, oid) in source_all
+                .iter()
+                .filter(|(n, _)| filter.keep(n, &source_head))
+            {
+                report.problems.push(format!(
+                    "ref {name} ({oid}) is in the source, floe is empty"
+                ));
+            }
+        }
         return Ok(report);
     }
     let served = handle.local().refs()?;
@@ -841,6 +856,29 @@ mod tests {
         let m =
             <floe_proto::v1::Manifest as floe_proto::prost::Message>::decode(m.as_ref()).unwrap();
         assert_eq!(m.head_seq, 0, "an incomplete import published refs");
+    }
+
+    /// A repository created and never pushed is verified (empty), unless its source has refs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_created_never_pushed_repository_is_verified_empty() {
+        let store: floe_store::DynStore = floe_store::memory::MemoryStore::shared();
+        let cache = tempfile::tempdir().unwrap();
+        let cfg = config(cache.path());
+        let registry = Registry::new(store.clone(), cfg.clone());
+        let id = floe_git::RepoId::new("arch", "one").unwrap();
+        registry
+            .create(&id, floe_git::ObjectFormat::Sha1)
+            .await
+            .unwrap();
+        let mut o = opts(Path::new("/nonexistent"), LfsCheck::Off);
+        o.against = None;
+        let r = verify(store.clone(), &o, &cfg).await.unwrap();
+        assert!(r.problems.is_empty(), "{:#?}", r.problems);
+        let (src, _) = archive_repo();
+        let r = verify(store.clone(), &opts(src.path(), LfsCheck::Off), &cfg)
+            .await
+            .unwrap();
+        assert_eq!(r.problems.len(), 4, "{:#?}", r.problems);
     }
 
     #[test]

@@ -405,7 +405,10 @@ async fn verify_closure(
     let tips: Vec<floe_git::gix_hash::ObjectId> = updates
         .iter()
         .filter(|u| u.new_symbolic_target.is_empty() && !u.new_oid.is_empty())
-        .map(|u| floe_git::gix_hash::ObjectId::from_hex(u.new_oid.as_bytes()))
+        .map(|u| {
+            floe_git::gix_hash::ObjectId::from_hex(u.new_oid.as_bytes())
+                .map_err(floe_git::Exn::into_error)
+        })
         .collect::<Result<_, _>>()
         .context("ref with a malformed object id")?;
     let started = Instant::now();
@@ -535,6 +538,7 @@ async fn import_reusing_packs(
         let stem = pack_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let hex = stem.strip_prefix("pack-").unwrap_or(stem);
         let checksum = floe_git::gix_hash::ObjectId::from_hex(hex.as_bytes())
+            .map_err(floe_git::Exn::into_error)
             .with_context(|| format!("pack name is not a checksum: {stem}"))?;
         let pack_size = std::fs::metadata(pack_path)?.len();
         let idx_size = std::fs::metadata(&idx_path)?.len();

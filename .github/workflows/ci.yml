@@ -305,17 +305,12 @@ jobs:
         shell: bash
         run: just e2e 2>&1 | tee git-contracts.log
       # Principle IV's check (AGENTS.md §3): crash, partition, stale, lost-response and orphan
-      # scenarios over one truth store, with the default seeds (~25 s). Random seeds and the two
-      # skipped flaky tests run nightly; drop each --skip when its issue (#12, #14) is fixed.
+      # scenarios over one truth store, with the default seeds (~25 s). Random seeds run nightly.
       - name: Simulation suite
         if: ${{ !cancelled() && steps.contracts.outcome == 'success' }}
         timeout-minutes: 10
         shell: bash
-        run: |
-          just sim \
-            --skip sim_cache_pressure_keeps_pinned_repos_and_refuses_too_large \
-            --skip base_rebuild_resumes_after_a_kill_between_any_two_phases \
-            2>&1 | tee sim-contracts.log
+        run: just sim 2>&1 | tee sim-contracts.log
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

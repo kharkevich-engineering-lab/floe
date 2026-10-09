@@ -673,7 +673,7 @@ async fn check_truth(c: &Cluster, pushers: &[Pusher]) -> Result<()> {
     // can materialize (full sync through a clean link).
     let _g = handle.sync_full().await.context("observer sync_full")?;
     for (name, oid) in &folded {
-        let id = gix_hash::ObjectId::from_hex(oid.as_bytes())?;
+        let id = gix_hash::ObjectId::from_hex(oid.as_bytes()).map_err(floe_git::Exn::into_error)?;
         ensure!(
             handle.local().has_object(&id),
             "observer lacks tip {oid} of {name} after full sync"
@@ -1461,7 +1461,8 @@ async fn liveness_cold_start_through_truncated_pack_reads() -> Result<()> {
     }
     // Objects really are there.
     for a in &p.acked {
-        let id = gix_hash::ObjectId::from_hex(a.new.as_bytes())?;
+        let id =
+            gix_hash::ObjectId::from_hex(a.new.as_bytes()).map_err(floe_git::Exn::into_error)?;
         ensure!(h.local().has_object(&id), "cold instance lacks {}", a.new);
     }
     // Compaction on the healed instance works on what it downloaded.
@@ -2146,8 +2147,10 @@ async fn seed_base_and_history(
         .iter()
         .find(|x| x.kind == floe_proto::v1::PackKind::History as i32)
         .ok_or_else(|| anyhow!("no history pack: {m:?}"))?;
-    let base = gix_hash::ObjectId::from_hex(base.checksum.as_bytes())?;
-    let hist = gix_hash::ObjectId::from_hex(hist.checksum.as_bytes())?;
+    let base = gix_hash::ObjectId::from_hex(base.checksum.as_bytes())
+        .map_err(floe_git::Exn::into_error)?;
+    let hist = gix_hash::ObjectId::from_hex(hist.checksum.as_bytes())
+        .map_err(floe_git::Exn::into_error)?;
     for _ in 0..fresh {
         ensure!(
             p.push_once(&c.instances[i], &c.id, Duration::from_secs(10))
@@ -2220,14 +2223,13 @@ async fn geometric_fold_never_touches_the_base_or_the_history_pack() -> Result<(
         after
             .packs
             .iter()
-            .any(|x| x.checksum == base.to_hex().to_string() && x.tier == 2)
+            .any(|x| x.checksum == base && x.tier == 2)
     );
     ensure!(
         after
             .packs
             .iter()
-            .any(|x| x.checksum == hist.to_hex().to_string()
-                && x.kind == floe_proto::v1::PackKind::History as i32)
+            .any(|x| x.checksum == hist && x.kind == floe_proto::v1::PackKind::History as i32)
     );
     for f in &fresh {
         ensure!(
@@ -2244,7 +2246,7 @@ async fn geometric_fold_never_touches_the_base_or_the_history_pack() -> Result<(
     for new in &packs {
         let objs = pack_objects(
             h.local().path(),
-            &gix_hash::ObjectId::from_hex(new.as_bytes())?,
+            &gix_hash::ObjectId::from_hex(new.as_bytes()).map_err(floe_git::Exn::into_error)?,
         );
         ensure!(
             objs.is_disjoint(&base_objects),
@@ -2339,7 +2341,8 @@ async fn full_rebuild_leaves_exactly_one_base_even_with_a_retained_pack() -> Res
         before.len()
     );
     // The surviving base's checksum must at least parse as an object id.
-    let _ = gix_hash::ObjectId::from_hex(fulls[0].checksum.as_bytes())?;
+    let _ = gix_hash::ObjectId::from_hex(fulls[0].checksum.as_bytes())
+        .map_err(floe_git::Exn::into_error)?;
     check_truth(&c, std::slice::from_ref(&p)).await?;
     Ok(())
 }
@@ -2369,6 +2372,56 @@ async fn rebuild_attempt(
     )
     .await;
     (out, lines.into_inner().unwrap())
+}
+
+/// The commit-graph update a push starts in the background rewrites the serving copy's chain
+/// (`commit-graph write --split` deletes merged layers) only under the pack lock: a base
+/// rebuild copying the serving copy under that lock never sees a layer vanish (#14).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_push_commit_graph_update_waits_for_the_pack_lock() -> Result<()> {
+    let mut c = Cluster::new(34, 1).await?;
+    let i = c.add_instance("ssd", &|cfg| {
+        cfg.cache.mode = floe_config::CacheMode::Disk;
+        cfg.git.commit_graph = true;
+    });
+    let mut p = Pusher::new(0);
+    ensure!(
+        p.push_once(&c.instances[i], &c.id, Duration::from_secs(10))
+            .await?
+    );
+    let h = c.instances[i].open(&c.id).await?;
+    let graphs = h.local().path().join("objects/info/commit-graphs");
+    let chain = || std::fs::read(graphs.join("commit-graph-chain")).unwrap_or_default();
+    // The first push's update has landed once its chain exists.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while chain().is_empty() {
+        ensure!(
+            Instant::now() < deadline,
+            "no commit-graph after the first push"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let before = chain();
+    let held = h.lock_packs().await;
+    ensure!(
+        p.push_once(&c.instances[i], &c.id, Duration::from_secs(10))
+            .await?
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    ensure!(
+        chain() == before,
+        "the commit-graph chain changed under the pack lock"
+    );
+    drop(held);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while chain() == before {
+        ensure!(
+            Instant::now() < deadline,
+            "the commit-graph update never ran after the lock was released"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Ok(())
 }
 
 /// A deploy (D31) kills the rebuild after any phase: the next unit resumes from the marker —
@@ -2530,7 +2583,8 @@ async fn base_rebuild_resumes_after_a_kill_between_any_two_phases() -> Result<()
         .unwrap();
     let objs = pack_objects(
         h.local().path(),
-        &gix_hash::ObjectId::from_hex(base.checksum.as_bytes())?,
+        &gix_hash::ObjectId::from_hex(base.checksum.as_bytes())
+            .map_err(floe_git::Exn::into_error)?,
     );
     ensure!(
         objs.contains(&p.tip),

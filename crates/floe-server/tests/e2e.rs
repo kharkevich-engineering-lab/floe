@@ -1303,7 +1303,10 @@ async fn fetch_from_front_that_serves_the_base_remotely() -> TestResult {
     assert_eq!(sh.remote_served(), vec![base.checksum.clone()]);
     assert!(
         !sh.local()
-            .pack_path(&gix_hash::ObjectId::from_hex(base.checksum.as_bytes())?)
+            .pack_path(
+                &gix_hash::ObjectId::from_hex(base.checksum.as_bytes())
+                    .map_err(floe_git::Exn::into_error)?
+            )
             .exists()
     );
 
@@ -1919,9 +1922,9 @@ async fn history_pack_install_does_not_stall_the_runtime() -> TestResult {
         .find(|p| p.kind == floe_proto::v1::PackKind::History as i32)
         .unwrap()
         .clone();
-    let hp_path = sh
-        .local()
-        .pack_path(&gix_hash::ObjectId::from_hex(hp.checksum.as_bytes())?);
+    let hp_path = sh.local().pack_path(
+        &gix_hash::ObjectId::from_hex(hp.checksum.as_bytes()).map_err(floe_git::Exn::into_error)?,
+    );
     let install = tokio::spawn(async move {
         let t = std::time::Instant::now();
         // The Serve sync itself returns without the history pack; the
