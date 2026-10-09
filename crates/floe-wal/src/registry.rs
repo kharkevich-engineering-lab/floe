@@ -39,6 +39,12 @@ pub struct Registry {
 /// created on another host appears within this on every instance (on this one immediately).
 const LIST_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long `delete` waits for work already inside the old handle's locks.
+const DELETE_QUIESCE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Suffix of a local copy moved aside by [`discard_local_copy`].
+const TOMBSTONE_MARK: &str = ".deleted-";
+
 #[derive(Default, Debug)]
 pub struct EvictReport {
     pub evicted: usize,
@@ -48,6 +54,7 @@ pub struct EvictReport {
 impl Registry {
     pub fn new(store: DynStore, cfg: Arc<floe_config::Config>) -> Arc<Self> {
         let cache_root = cfg.cache.dir.clone();
+        sweep_tombstones(cache_root.clone());
         let blocks = crate::remote::BlockCache::new(cfg.cache.remote_block_bytes.as_u64());
         Arc::new(Registry {
             store,
@@ -101,9 +108,19 @@ impl Registry {
         };
 
         // Open or init local repo (LocalRepo joins owner/name.git onto the root).
-        let local = if let Some(l) = LocalRepo::open(&self.cache_root, id)? {
+        // A local copy that is not a repository (a straggler recreated part of
+        // a deleted one) or that applied more of the log than the bucket holds
+        // (a previous incarnation of this name, deleted on another host) is
+        // not this repository's: discard it and start clean (#15).
+        let local_dir = id.local_dir(&self.cache_root);
+        let local = match LocalRepo::open(&self.cache_root, id)? {
+            Some(l) if load_state(l.path()).applied_seq <= manifest.head_seq => Some(l),
+            _ => None,
+        };
+        let local = if let Some(l) = local {
             l
         } else {
+            discard_local_copy(&local_dir).await;
             let format = parse_object_format(&manifest.object_format);
             LocalRepo::init(&self.cache_root, id, format)?
         };
@@ -144,7 +161,19 @@ impl Registry {
     /// Delete a repository: every object under its store prefix, the cached
     /// handle and the local copy. Err(NotFound) if the manifest does not exist.
     /// Other instances notice on their next freshness check (manifest GET -> 404).
+    ///
+    /// The bucket is the repository: once its objects are gone the delete has
+    /// happened. The local copy is a cache (principle I) and is discarded best
+    /// effort — moved aside to a tombstone and removed in the background — so a
+    /// writer still holding the old handle never turns the answer into an error
+    /// (#15) and never repopulates the path a re-created repository will use.
     pub async fn delete(&self, id: &RepoId) -> Result<(), WalError> {
+        // Exclude open/create of this name on this instance for the whole
+        // delete: a create between the manifest DELETE and the prefix sweep
+        // would lose its objects, one before the local copy is moved aside
+        // would lose its local copy.
+        let gate = self.opening.entry(id.clone()).or_default().clone();
+        let _g = gate.lock().await;
         let prefixed = Prefixed::new(self.store.clone(), id.store_prefix());
         if get_message::<Manifest>(&prefixed, keys::MANIFEST)
             .await?
@@ -154,11 +183,16 @@ impl Registry {
         }
         // Drop the handle first so no request on this instance publishes into a
         // prefix that is being removed; in-flight requests hold their own Arc.
-        self.repos.remove(id);
+        let old = self.repos.remove(id).map(|(_, h)| h);
         self.invalidate_listing();
         // Manifest first: it is the linearization point, so the repo disappears
         // atomically for readers; remaining objects are unreferenced garbage.
         prefixed.delete(keys::MANIFEST, None).await?;
+        // From here every sync on the old handle answers NotFound: no new
+        // refs/pack work writes into the local copy.
+        if let Some(h) = &old {
+            h.mark_deleted();
+        }
         let mut after: Option<String> = None;
         loop {
             let mut stream = prefixed.list("", after.as_deref());
@@ -173,12 +207,20 @@ impl Registry {
                 None => break,
             }
         }
-        let local_dir = id.local_dir(&self.cache_root);
-        if local_dir.exists() {
-            tokio::fs::remove_dir_all(&local_dir)
-                .await
-                .map_err(WalError::Io)?;
+        // Let work that was already inside the old handle's locks (a refs sync
+        // writing packed-refs, a prefetch installing packs) finish its step,
+        // bounded: after the move below a straggler's writes land in the
+        // tombstone or fail, never in the live path.
+        if let Some(h) = &old {
+            let quiesce = async {
+                let _sync = h.sync_mutex.lock().await;
+                let _packs = h.pack_mutex.lock().await;
+            };
+            if tokio::time::timeout(DELETE_QUIESCE, quiesce).await.is_err() {
+                tracing::warn!(repo = %id, "repository deleted while its local copy was still being written; discarding it anyway");
+            }
         }
+        discard_local_copy(&id.local_dir(&self.cache_root)).await;
         Ok(())
     }
 
@@ -227,7 +269,9 @@ impl Registry {
             .await
         {
             Ok(meta) => {
-                // Init local repo
+                // A new repository starts from an empty local copy: whatever
+                // is at the path belongs to a deleted incarnation of the name.
+                discard_local_copy(&id.local_dir(&self.cache_root)).await;
                 let local = LocalRepo::init(&self.cache_root, id, format)?;
 
                 let state = RepoState::default();
@@ -449,6 +493,67 @@ impl Registry {
             evicted,
             remaining_bytes: total_bytes,
         })
+    }
+}
+
+/// Move a repository's local copy aside to a unique sibling tombstone
+/// (`<name>.git.deleted-<uuid>`) and remove that in the background. The rename
+/// is atomic, so the live path is empty the moment this returns: a writer that
+/// still holds the old path gets ENOENT (or writes into the tombstone through an
+/// open directory) instead of making the removal fail with ENOTEMPTY, and a
+/// re-created repository starts clean. Never fails: the local copy is a cache,
+/// and a leftover tombstone is swept at the next start.
+async fn discard_local_copy(path: &std::path::Path) {
+    let Some(file_name) = path.file_name() else {
+        return;
+    };
+    let mut tomb_name = file_name.to_os_string();
+    tomb_name.push(format!("{TOMBSTONE_MARK}{}", uuid::Uuid::new_v4().simple()));
+    let tomb = path.with_file_name(tomb_name);
+    match tokio::fs::rename(path, &tomb).await {
+        Ok(()) => {
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = std::fs::remove_dir_all(&tomb) {
+                    tracing::warn!(path = %tomb.display(), error = %e, "removing a discarded local copy failed; swept at the next start");
+                }
+            });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "moving a discarded local copy aside failed; removing it in place");
+            let path = path.to_path_buf();
+            let removed = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&path)).await;
+            if let Ok(Err(e)) = removed
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(error = %e, "removing a discarded local copy in place failed");
+            }
+        }
+    }
+}
+
+/// Remove tombstones a previous process left behind (`<cache>/<owner>/<name>.git.deleted-*`),
+/// off the caller's thread. Best effort: they are only disk, never state.
+fn sweep_tombstones(cache_root: std::path::PathBuf) {
+    let spawned = std::thread::Builder::new()
+        .name("floe-tombstones".into())
+        .spawn(move || {
+            let Ok(owners) = std::fs::read_dir(&cache_root) else {
+                return;
+            };
+            for owner in owners.flatten() {
+                let Ok(entries) = std::fs::read_dir(owner.path()) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    if entry.file_name().to_string_lossy().contains(TOMBSTONE_MARK) {
+                        let _ = std::fs::remove_dir_all(entry.path());
+                    }
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::debug!(error = %e, "tombstone sweep not started");
     }
 }
 

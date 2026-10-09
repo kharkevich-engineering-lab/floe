@@ -917,6 +917,14 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
         {
             let packs = new_packs.clone();
             tokio::spawn(async move {
+                // Pack-level work on the local copy: under `pack_mutex`, which `Registry::delete`
+                // waits for before it moves the copy aside, and never on a deleted handle —
+                // `git commit-graph write` creates missing leading directories, so a late run
+                // would recreate the path of a deleted repository (#15).
+                let _packs = arc.pack_mutex.lock().await;
+                if arc.is_deleted() {
+                    return;
+                }
                 let manifest = arc.manifest();
                 crate::sync::maintain_commit_graph(&arc, &manifest, &packs).await;
             });

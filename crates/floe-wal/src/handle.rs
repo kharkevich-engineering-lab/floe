@@ -110,6 +110,11 @@ pub struct RepoHandle {
     // Remote object access (pack set too large to materialize).
     pub(crate) blocks: Arc<BlockCache>,
     pub(crate) remote: PLMutex<Option<Arc<RemotePacks>>>,
+    /// Set by `Registry::delete` before the local copy is moved away (#15): a
+    /// handle that outlived its repository's deletion (an in-flight request, a
+    /// background prefetch or history install) starts no sync and no pack work,
+    /// so nothing it does writes into the local path again.
+    pub(crate) deleted: std::sync::atomic::AtomicBool,
 }
 
 /// How a request may read objects after [`RepoHandle::sync_objects`].
@@ -173,6 +178,7 @@ impl RepoHandle {
             active_reporter: PLMutex::new(None),
             blocks,
             remote: PLMutex::new(None),
+            deleted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -346,6 +352,23 @@ impl RepoHandle {
         let _ = self.self_arc.set(arc);
     }
 
+    /// Whether `Registry::delete` removed this handle's repository. Every sync
+    /// on such a handle answers `NotFound`.
+    pub fn is_deleted(&self) -> bool {
+        self.deleted.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_deleted(&self) {
+        self.deleted.store(true, Ordering::Release);
+    }
+
+    fn refuse_if_deleted(&self) -> Result<(), WalError> {
+        if self.is_deleted() {
+            return Err(WalError::NotFound);
+        }
+        Ok(())
+    }
+
     // ---- public API ----
 
     pub fn id(&self) -> &RepoId {
@@ -467,7 +490,7 @@ impl RepoHandle {
     /// from the base meanwhile and switches to the local history pack once
     /// the midx is in place.
     pub(crate) fn spawn_history_pack_install(&self, packs: Vec<PackRef>) {
-        if self.history_install_inflight.swap(true, Ordering::AcqRel) {
+        if self.is_deleted() || self.history_install_inflight.swap(true, Ordering::AcqRel) {
             return;
         }
         let Some(arc) = self.self_arc.get().cloned() else {
@@ -486,6 +509,7 @@ impl RepoHandle {
                     arc.pack_mutex.lock(),
                 )
                 .await;
+                arc.refuse_if_deleted()?;
                 let manifest = arc.manifest();
                 let task = match arc.begin_task("history-pack", HashMap::new()) {
                     Begin::Started(t) => Some(t),
@@ -545,7 +569,7 @@ impl RepoHandle {
     }
 
     fn spawn_pack_prefetch(&self) {
-        if self.prefetch_inflight.swap(true, Ordering::AcqRel) {
+        if self.is_deleted() || self.prefetch_inflight.swap(true, Ordering::AcqRel) {
             return;
         }
         let Some(arc) = self.self_arc.get().cloned() else {
@@ -602,6 +626,7 @@ impl RepoHandle {
     /// Manifest freshness check + ref state apply (never packs, never
     /// `rw.write()`: ref files and the gix handle are replaced atomically).
     async fn sync_refs_phase(&self, span: &tracing::Span) -> Result<(), WalError> {
+        self.refuse_if_deleted()?;
         if self.freshness_ttl_active() {
             return Ok(());
         }
@@ -613,6 +638,7 @@ impl RepoHandle {
             self.sync_mutex.lock(),
         )
         .await;
+        self.refuse_if_deleted()?;
         if self.freshness_ttl_active() {
             return Ok(());
         }
@@ -640,6 +666,7 @@ impl RepoHandle {
             self.pack_mutex.lock(),
         )
         .await;
+        self.refuse_if_deleted()?;
         if self.level_satisfied(level) {
             return Ok(());
         }
@@ -896,6 +923,7 @@ impl RepoHandle {
             self.pack_mutex.lock(),
         )
         .await;
+        self.refuse_if_deleted()?;
 
         // Read manifest fresh
         let Some((meta, manifest)) =
