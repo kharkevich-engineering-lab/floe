@@ -58,6 +58,10 @@ pub struct FaultPlan {
     pub p_err_after: f64,
     /// Conditional PUT/DELETE answers `PreconditionFailed` without applying.
     pub p_cas_fail: f64,
+    /// Conditional PUT applied, then answered `PreconditionFailed`: what an SDK that
+    /// retries a request whose response was lost reports (the retry fails its
+    /// precondition against the first attempt's own write).
+    pub p_cas_fail_after: f64,
     /// `get` with `if_none_match` answers `NotModified` regardless of the
     /// real version (a replica that never sees anyone else's writes).
     pub p_stale_304: f64,
@@ -194,6 +198,7 @@ enum Decision {
     ErrBefore,
     ErrAfter,
     CasFail,
+    CasFailAfter,
     Stale,
     Truncate(usize),
     Hang,
@@ -313,7 +318,15 @@ impl FaultStore {
         let (roll, cut) = {
             let mut r = self.rng.lock();
             (
-                [r.f64(), r.f64(), r.f64(), r.f64(), r.f64(), r.f64()],
+                [
+                    r.f64(),
+                    r.f64(),
+                    r.f64(),
+                    r.f64(),
+                    r.f64(),
+                    r.f64(),
+                    r.f64(),
+                ],
                 // below(2^20) always fits in usize.
                 usize::try_from(r.below(1 << 20)).unwrap_or(0),
             )
@@ -327,6 +340,9 @@ impl FaultStore {
         } else if mutation && conditional && roll[2] < plan.p_cas_fail {
             self.stats.cas_fail.fetch_add(1, Ordering::Relaxed);
             Decision::CasFail
+        } else if mutation && conditional && roll[6] < plan.p_cas_fail_after {
+            self.stats.cas_fail.fetch_add(1, Ordering::Relaxed);
+            Decision::CasFailAfter
         } else if mutation && roll[3] < plan.p_err_after {
             self.stats.err_after.fetch_add(1, Ordering::Relaxed);
             Decision::ErrAfter
@@ -344,6 +360,7 @@ impl FaultStore {
                 Decision::Hang => "hang",
                 Decision::ErrBefore => "err-before",
                 Decision::CasFail => "cas-fail",
+                Decision::CasFailAfter => "cas-fail-after (applied)",
                 Decision::ErrAfter => "err-after",
                 Decision::Stale => "stale-304",
                 Decision::Truncate(_) => "truncate",
@@ -444,6 +461,13 @@ impl ObjectStore for FaultStore {
             Decision::ErrAfter => {
                 let _ = self.inner.put(key, body, opts).await?;
                 Err(self.retryable("put", key, "after (applied)"))
+            }
+            Decision::CasFailAfter => {
+                let _ = self.inner.put(key, body, opts).await?;
+                Err(StoreError::PreconditionFailed {
+                    key: key.into(),
+                    current: None,
+                })
             }
             _ => self.inner.put(key, body, opts).await,
         }
@@ -579,7 +603,7 @@ impl FaultStore {
                 }
                 r @ GetResult::NotModified { .. } => Ok(r),
             },
-            Decision::Proceed | Decision::ErrAfter | Decision::CasFail => {
+            Decision::Proceed | Decision::ErrAfter | Decision::CasFail | Decision::CasFailAfter => {
                 self.inner.get(key, opts).await
             }
         }

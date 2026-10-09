@@ -184,7 +184,7 @@ trigger_packs = 16                # compact when this many tier-0 packs exist
 trigger_bytes = "1GiB"            # or when tier-0 pack bytes exceed this (either way: at least 2 fresh packs; the base/history
                                   # pack are never folded; a base is rebuilt only by the weekly unit / `floe compact --base`)
 lease_ttl = "10m"                 # compaction lease TTL
-retention_superseded = "7d"       # keep old packs for provenance / rewind
+retention_superseded = "7d"       # reserved: nothing deletes superseded packs from the bucket today (docs/INTEGRITY.md §6)
 engine = "git"                    # "git" (gix cannot delta-compress)
 
 # ---------------------------------------------------------------------------

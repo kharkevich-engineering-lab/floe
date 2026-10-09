@@ -73,3 +73,33 @@ finishes without redoing finished work; running it again on a completed import c
   phase in turn and resumed — every object uploaded exactly once across all runs, no second closure walk / history
   pack, one CAS, marker gone, then a second full run = no-op; a moved target → refused, `--force` → fresh start
   reusing the uploads.
+
+## 6. Recoverability: what the bucket keeps, and what fails loudly (D67, 2026-10-08)
+The guarantees an archive migration relies on (`docs/MIGRATION.md`); each has a test that fails without it.
+- **No pack is ever deleted from the bucket.** Superseding is bookkeeping in the manifest; instances drop their
+  *local* copies, the bytes under `wal/` stay (`compaction.retention_superseded` is reserved and unread). With
+  the log segments and checkpoints D47 keeps, `floe wal materialize <o>/<r> --at-seq N` rebuilds every state the
+  log records, on any machine with bucket access — the provenance a force-push or a ref delete would otherwise
+  take. The only delete of git data is an admin's `DELETE /{o}/{r}` of a whole repository.
+- **A full repack keeps unreachable objects** (`RepackMode::Full` = `repack -a -d --keep-unreachable`: the base
+  rebuild and the post-import base). A full repack is published as a COMPACT that supersedes every pack it read,
+  so it must hold every object they held: a ref published while a 16–30 min rebuild ran may point at an object
+  that was unreachable when it started (the facade's `create_ref`, a push whose closure check passed against a
+  superseded local pack), and force-pushed history stays in the live set. Test:
+  `floe-git/tests/repack.rs::a_full_repack_keeps_objects_no_ref_reaches`.
+- **A 412 on the manifest CAS is checked before our log segment is deleted** (`publish.rs::after_lost_cas`).
+  The S3 SDK retries a conditional PUT whose response was lost; the retry answers 412 against the first
+  attempt's own write. The old code took that for a lost race and deleted the segment the committed manifest
+  points at: the push's ref transaction lost and every cold sync of the repository failing (`object not found:
+  …/log/….pb`). Sim: `a_retried_cas_that_answers_412_on_its_own_write_keeps_the_segment`
+  (`FaultPlan::p_cas_fail_after`).
+- **Cold sync refuses an incomplete WAL** instead of serving less of it: a checkpoint whose `refs.pb` is missing
+  (the tail alone would be served, the instance recorded as caught up) and a log segment holding fewer entries
+  than the manifest says (a truncated object; `decode_entries` stops quietly at a partial frame) are
+  `WalError::Corrupt`. Tests: `floe-wal/tests/wal.rs::cold_sync_refuses_a_missing_checkpoint_ref_snapshot`,
+  `cold_sync_refuses_a_truncated_log_segment`.
+- **Content is verified where it enters and by `floe verify`, not on every download.** index-pack hashes every
+  pushed/imported object (`wal.fsck_objects`), LFS PUTs and `floe import`'s LFS copy hash before storing, and
+  `floe verify` rebuilds from the bucket and runs `git fsck --full`. A pack downloaded by a serving instance is
+  not re-hashed (that is the object store's job — out of scope here); git notices a corrupt object when it
+  inflates it.
