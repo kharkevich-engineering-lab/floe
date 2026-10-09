@@ -193,7 +193,7 @@ jobs:
           cache-on-failure: true
           # Written from main only, restored everywhere (see the header).
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: just
 
@@ -280,7 +280,7 @@ jobs:
           cache-on-failure: true
           # Written from main only, restored everywhere (see the header).
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: just
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -369,7 +369,7 @@ jobs:
           cache-on-failure: true
           # Written from main only, restored everywhere (see the header).
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: just
       - name: Compile the catalog feature build before timed checks
@@ -429,7 +429,7 @@ jobs:
           cache-on-failure: true
           # Written from main only, restored everywhere (see the header).
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: just
       - name: Compile the codeintel feature build before timed checks
@@ -606,7 +606,7 @@ jobs:
       # The image ships rustup; rust-toolchain.toml pins the toolchain and lists rustfmt.
       - name: Install the pinned Rust toolchain
         run: rustup show && cargo fmt --version
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: just
       - run: just fmt-check
@@ -635,7 +635,7 @@ jobs:
           key: msrv-v1
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: just
       - run: just msrv
@@ -650,7 +650,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: just,cargo-deny@0.20.2
       - run: just deny

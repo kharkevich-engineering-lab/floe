@@ -12,7 +12,7 @@
     "test": "node --experimental-strip-types --test src/admin/schema-form.test.ts src/admin/toml-lines.test.ts"
   },
   "dependencies": {
-    "@pierre/diffs": "^1.5.1",
+    "@pierre/diffs": "^1.5.2",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
@@ -22,9 +22,9 @@
   "devDependencies": {
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.1.1",
-    "oxlint": "^1.86.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "oxlint": "^1.87.0",
     "typescript": "^7.0.2",
-    "vite": "^8.3.2"
+    "vite": "^8.3.3"
   }
 }
