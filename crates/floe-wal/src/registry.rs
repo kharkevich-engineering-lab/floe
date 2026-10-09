@@ -111,18 +111,22 @@ impl Registry {
         // A local copy that is not a repository (a straggler recreated part of
         // a deleted one) or that applied more of the log than the bucket holds
         // (a previous incarnation of this name, deleted on another host) is
-        // not this repository's: discard it and start clean (#15).
+        // not this repository's: discard it and start clean (#15). Open and
+        // init are blocking git work: off the runtime.
         let local_dir = id.local_dir(&self.cache_root);
-        let local = match LocalRepo::open(&self.cache_root, id)? {
-            Some(l) if load_state(l.path()).applied_seq <= manifest.head_seq => Some(l),
-            _ => None,
+        let format = parse_object_format(&manifest.object_format);
+        let opened = {
+            let (root, id) = (self.cache_root.clone(), id.clone());
+            tokio::task::spawn_blocking(move || LocalRepo::open(&root, &id))
+                .await
+                .map_err(|e| WalError::Corrupt(format!("local repository task: {e}")))??
         };
-        let local = if let Some(l) = local {
-            l
-        } else {
-            discard_local_copy(&local_dir).await;
-            let format = parse_object_format(&manifest.object_format);
-            LocalRepo::init(&self.cache_root, id, format)?
+        let local = match opened {
+            Some(l) if load_state(l.path()).applied_seq <= manifest.head_seq => l,
+            _ => {
+                discard_local_copy(&local_dir).await;
+                self.local_repo(id, format, true).await?
+            }
         };
 
         // Load state
@@ -272,7 +276,7 @@ impl Registry {
                 // A new repository starts from an empty local copy: whatever
                 // is at the path belongs to a deleted incarnation of the name.
                 discard_local_copy(&id.local_dir(&self.cache_root)).await;
-                let local = LocalRepo::init(&self.cache_root, id, format)?;
+                let local = self.local_repo(id, format, true).await?;
 
                 let state = RepoState::default();
                 save_state(local.path(), &state)?;
@@ -387,6 +391,27 @@ impl Registry {
                 .then_with(|| a.name().cmp(b.name()))
         });
         Ok(repos)
+    }
+
+    /// The serving copy of `id` under the cache root: opened, or created (`git init`, a
+    /// subprocess) when absent or when `fresh`. Filesystem and process work, so it runs off the
+    /// async runtime: a cold open on the request path must not stall a worker (#12: a cold
+    /// refs read took 1.1 s, all of it here, on a loaded runner).
+    async fn local_repo(
+        &self,
+        id: &RepoId,
+        format: ObjectFormat,
+        fresh: bool,
+    ) -> Result<LocalRepo, WalError> {
+        let (root, id) = (self.cache_root.clone(), id.clone());
+        tokio::task::spawn_blocking(move || -> Result<LocalRepo, WalError> {
+            if !fresh && let Some(l) = LocalRepo::open(&root, &id)? {
+                return Ok(l);
+            }
+            Ok(LocalRepo::init(&root, &id, format)?)
+        })
+        .await
+        .map_err(|e| WalError::Corrupt(format!("local repository task: {e}")))?
     }
 
     /// Disk cache maintenance: evict idle repos beyond `cache.max_bytes` / `evict_idle_after`.

@@ -102,31 +102,66 @@ fn write_marker(path: &Path, m: &Marker) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Recursive copy. `std::fs::copy` uses `copy_file_range` on Linux, which XFS/btrfs satisfy
-/// with a reflink when source and destination share a filesystem (seconds for 40 GB, no
-/// bytes duplicated until written) and which degrades to a plain copy elsewhere.
+/// Recursive copy of a **live** serving copy. `std::fs::copy` uses `copy_file_range` on Linux,
+/// which XFS/btrfs satisfy with a reflink when source and destination share a filesystem
+/// (seconds for 40 GB, no bytes duplicated until written) and which degrades to a plain copy
+/// elsewhere.
+///
+/// The caller holds the serving copy's pack lock (`RepoHandle::lock_packs`), so nothing under
+/// `objects/` is added, removed or rewritten meanwhile: an entry there that vanishes means an
+/// unsynchronized writer, and the copy fails naming it. Outside `objects/`, refs-level syncs go
+/// on (they never take that lock): a ref or state file they replace between `read_dir` and the
+/// copy is skipped — the rebuild trusts the marker's `head_seq`, not the scratch copy's refs.
+/// Transient entries are never copied: git's `*.lock` files, our `*.tmp` renames, per-ingest
+/// scratch dirs (`floe-ingest-*`) and the download dir (`.floe-tmp`) belong to work in flight
+/// in the serving copy, not to the repository.
 fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<u64> {
+    copy_tree_in(src, dst, false)
+}
+
+fn copy_tree_in(src: &Path, dst: &Path, under_objects: bool) -> std::io::Result<u64> {
     std::fs::create_dir_all(dst)?;
     let mut bytes = 0u64;
     for ent in std::fs::read_dir(src)? {
         let ent = ent?;
-        // Locks belong to the live Git process, not the copied repository.
-        // A copied lock has no owner in this isolated scratch directory.
-        if ent.file_name().to_string_lossy().ends_with(".lock") {
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".lock")
+            || name.ends_with(".tmp")
+            || name.starts_with("floe-ingest-")
+            || name == ".floe-tmp"
+        {
             continue;
         }
+        let objects = under_objects || name == "objects";
         let from = ent.path();
         let to = dst.join(ent.file_name());
-        let ft = ent.file_type()?;
-        if ft.is_dir() {
-            bytes += copy_tree(&from, &to)?;
-        } else if ft.is_file() {
-            bytes += std::fs::copy(&from, &to)?;
-        } else if ft.is_symlink() {
-            // A mount-linked base (`pack-<sha>.pack` → store mount) is never rebuilt here:
-            // the rebuild needs real files (compact_repo syncs Full first).
-            let target = std::fs::read_link(&from)?;
-            std::os::unix::fs::symlink(target, &to)?;
+        let copied = (|| -> std::io::Result<u64> {
+            let ft = ent.file_type()?;
+            if ft.is_dir() {
+                copy_tree_in(&from, &to, objects)
+            } else if ft.is_file() {
+                std::fs::copy(&from, &to)
+            } else if ft.is_symlink() {
+                // A mount-linked base (`pack-<sha>.pack` → store mount) is never rebuilt here:
+                // the rebuild needs real files (compact_repo syncs Full first).
+                let target = std::fs::read_link(&from)?;
+                std::os::unix::fs::symlink(target, &to)?;
+                Ok(0)
+            } else {
+                Ok(0)
+            }
+        })();
+        match copied {
+            Ok(n) => bytes += n,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !objects => {}
+            Err(e) if ent.file_type().is_ok_and(|t| t.is_dir()) => return Err(e),
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("{}: {e}", from.display()),
+                ));
+            }
         }
     }
     Ok(bytes)
@@ -213,11 +248,11 @@ pub async fn rebuild_base(
             ));
             let _ = std::fs::remove_dir_all(&scratch_dir);
             let _ = std::fs::remove_file(&marker_path);
-            start_scratch(handle, cfg, &manifest, &scratch_dir, &marker_path, log)?
+            start_scratch(handle, cfg, &manifest, &scratch_dir, &marker_path, log).await?
         }
         None => {
             let _ = std::fs::remove_dir_all(&scratch_dir);
-            start_scratch(handle, cfg, &manifest, &scratch_dir, &marker_path, log)?
+            start_scratch(handle, cfg, &manifest, &scratch_dir, &marker_path, log).await?
         }
     };
     let resumed = marker.phase > Phase::Copied;
@@ -398,7 +433,7 @@ pub async fn rebuild_base(
     })
 }
 
-fn start_scratch(
+async fn start_scratch(
     handle: &RepoHandle,
     cfg: &Config,
     manifest: &floe_proto::v1::Manifest,
@@ -424,8 +459,20 @@ fn start_scratch(
         );
     }
     let t = Instant::now();
-    let bytes = copy_tree(handle.local().path(), scratch_dir)
-        .context("copying the serving copy to the scratch dir")?;
+    // The serving copy is live: hold its pack set and commit-graph chain still while copying
+    // (a push's background `commit-graph write --split` deleted a layer mid-copy, #14). The
+    // copy itself is blocking file work: off the async runtime.
+    let bytes = {
+        let _packs = handle.lock_packs().await;
+        let (from, to) = (
+            handle.local().path().to_path_buf(),
+            scratch_dir.to_path_buf(),
+        );
+        tokio::task::spawn_blocking(move || copy_tree(&from, &to))
+            .await
+            .context("scratch copy task")?
+            .context("copying the serving copy to the scratch dir")?
+    };
     log(format!(
         "scratch copy of the serving copy at {} ({} in {:.1}s; reflinked where the filesystem allows)",
         scratch_dir.display(),
@@ -462,6 +509,29 @@ mod copy_tests {
             b"committed"
         );
         assert!(graphs.join("commit-graph-chain.lock").exists());
+        Ok(())
+    }
+
+    /// Work in flight in the serving copy (a push's per-ingest scratch dir, a pack download, a
+    /// state file being renamed into place) is not part of the repository.
+    #[test]
+    fn scratch_copy_excludes_work_in_flight() -> anyhow::Result<()> {
+        let source = tempfile::tempdir()?;
+        let target = tempfile::tempdir()?;
+        let s = source.path();
+        std::fs::create_dir_all(s.join("floe-ingest-1234/objects/pack"))?;
+        std::fs::write(s.join("floe-ingest-1234/HEAD"), b"ref: refs/heads/main\n")?;
+        std::fs::create_dir_all(s.join(".floe-tmp"))?;
+        std::fs::write(s.join(".floe-tmp/pack-ab.pack"), b"partial")?;
+        std::fs::write(s.join("floe-state.json.tmp"), b"{}")?;
+        std::fs::create_dir_all(s.join("objects/pack"))?;
+        std::fs::write(s.join("objects/pack/pack-ab.pack"), b"PACK")?;
+        super::copy_tree(s, target.path())?;
+        let t = target.path();
+        assert!(!t.join("floe-ingest-1234").exists());
+        assert!(!t.join(".floe-tmp").exists());
+        assert!(!t.join("floe-state.json.tmp").exists());
+        assert_eq!(std::fs::read(t.join("objects/pack/pack-ab.pack"))?, b"PACK");
         Ok(())
     }
 }

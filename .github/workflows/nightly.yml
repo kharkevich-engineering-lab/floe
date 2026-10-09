@@ -94,17 +94,13 @@ jobs:
         timeout-minutes: 60
         env:
           SEEDS: ${{ inputs.sim_seeds || '4' }}
-          # A PR that edits this workflow tests the workflow, not the known flakes (#12, #14);
-          # scheduled and manual runs keep the full suite.
-          SKIP: ${{ github.event_name == 'pull_request' && '--skip sim_cache_pressure_keeps_pinned_repos_and_refuses_too_large --skip base_rebuild_resumes_after_a_kill_between_any_two_phases' || '' }}
         run: |
           set -uo pipefail
           failed=()
           for _ in $(seq 1 "$SEEDS"); do
             seed="$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')"
             echo "::group::FLOE_SIM_SEED=${seed}"
-            # shellcheck disable=SC2086 # SKIP is a list of harness arguments
-            if ! FLOE_SIM_SEED="$seed" just sim $SKIP; then failed+=("$seed"); fi
+            if ! FLOE_SIM_SEED="$seed" just sim; then failed+=("$seed"); fi
             echo "::endgroup::"
           done
           if [ "${#failed[@]}" -gt 0 ]; then

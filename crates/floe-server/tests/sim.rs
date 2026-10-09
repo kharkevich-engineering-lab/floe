@@ -2374,6 +2374,56 @@ async fn rebuild_attempt(
     (out, lines.into_inner().unwrap())
 }
 
+/// The commit-graph update a push starts in the background rewrites the serving copy's chain
+/// (`commit-graph write --split` deletes merged layers) only under the pack lock: a base
+/// rebuild copying the serving copy under that lock never sees a layer vanish (#14).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_push_commit_graph_update_waits_for_the_pack_lock() -> Result<()> {
+    let mut c = Cluster::new(34, 1).await?;
+    let i = c.add_instance("ssd", &|cfg| {
+        cfg.cache.mode = floe_config::CacheMode::Disk;
+        cfg.git.commit_graph = true;
+    });
+    let mut p = Pusher::new(0);
+    ensure!(
+        p.push_once(&c.instances[i], &c.id, Duration::from_secs(10))
+            .await?
+    );
+    let h = c.instances[i].open(&c.id).await?;
+    let graphs = h.local().path().join("objects/info/commit-graphs");
+    let chain = || std::fs::read(graphs.join("commit-graph-chain")).unwrap_or_default();
+    // The first push's update has landed once its chain exists.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while chain().is_empty() {
+        ensure!(
+            Instant::now() < deadline,
+            "no commit-graph after the first push"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let before = chain();
+    let held = h.lock_packs().await;
+    ensure!(
+        p.push_once(&c.instances[i], &c.id, Duration::from_secs(10))
+            .await?
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    ensure!(
+        chain() == before,
+        "the commit-graph chain changed under the pack lock"
+    );
+    drop(held);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while chain() == before {
+        ensure!(
+            Instant::now() < deadline,
+            "the commit-graph update never ran after the lock was released"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Ok(())
+}
+
 /// A deploy (D31) kills the rebuild after any phase: the next unit resumes from the marker —
 /// across every phase boundary there is exactly **one** `git repack` in total — the serving copy
 /// is never rewritten (its pack files before publish are exactly the pre-rebuild ones), and the
