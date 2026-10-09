@@ -1,4 +1,4 @@
-//! `floe` (full CLI: serve | compact | bundle | repo | wal | synth | import | mirror | github | config)
+//! `floe` (full CLI: serve | compact | bundle | repo | wal | synth | import | verify | mirror | github | config)
 //! and `floe-server` (`floe serve` under the name a standalone deployment expects, D39),
 //! both thin bins over this library.
 //!
@@ -19,9 +19,11 @@ mod compact;
 mod github_cmd;
 mod import;
 mod import_direct;
+mod lfs_import;
 mod mirror;
 mod repo;
 mod serve;
+mod verify;
 mod wal_cmd;
 
 use std::path::PathBuf;
@@ -163,6 +165,38 @@ enum Command {
         /// uploading (ref tips are always checked). `--verify-closure=false` to skip the walk.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         verify_closure: bool,
+        /// Also copy the source's Git LFS objects (`.git/lfs/objects`) into the bucket, each
+        /// sha256-checked before upload, create-if-absent (a re-run copies only what is missing).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        lfs: bool,
+    },
+    /// Prove a repository can be rebuilt from the bucket alone and, with --against, that it
+    /// equals the repository it was imported from (refs, HEAD, every reachable object, LFS).
+    /// Reads through a fresh, empty cache; exit 1 on any difference. docs/MIGRATION.md.
+    Verify {
+        /// `owner/name`.
+        repo: String,
+        /// The source `.git` directory or working tree to compare with.
+        #[arg(long)]
+        against: Option<PathBuf>,
+        /// The ref globs the import used (`floe import --refs`); default heads, tags and HEAD's target.
+        #[arg(long = "refs")]
+        refs: Vec<String>,
+        /// `git fsck --connectivity-only` instead of `--full` (presence, not content hashes).
+        #[arg(long)]
+        quick: bool,
+        /// Check that every reachable LFS pointer has its object in the bucket at its size.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        lfs: bool,
+        /// Download every LFS object and check its sha256 (implies --lfs).
+        #[arg(long)]
+        lfs_content: bool,
+        /// Where the scratch copy goes (needs room for the whole pack set). Default: cache.dir.
+        #[arg(long)]
+        work_dir: Option<PathBuf>,
+        /// Keep the rebuilt copy instead of deleting it.
+        #[arg(long)]
+        keep: bool,
     },
     /// Keep refs of a repository on a floe host equal to the same refs on another git host
     /// (e.g. a GitHub repository's main → this floe), through a local bare buffer repo.
@@ -588,6 +622,34 @@ async fn dispatch(command: Command, cfg: Config) -> Result<()> {
         } => compact::run(repo, all, once, base, &cfg).await,
         Command::Bundle { action } => bundle_cmd::run(action, &cfg).await,
         Command::Repo { action } => repo::run(action, &cfg).await,
+        Command::Verify {
+            repo,
+            against,
+            refs,
+            quick,
+            lfs,
+            lfs_content,
+            work_dir,
+            keep,
+        } => {
+            verify::run(
+                verify::VerifyOptions {
+                    repo,
+                    against,
+                    refs,
+                    quick,
+                    lfs: match (lfs, lfs_content) {
+                        (_, true) => verify::LfsCheck::Content,
+                        (true, false) => verify::LfsCheck::Presence,
+                        (false, false) => verify::LfsCheck::Off,
+                    },
+                    work_dir,
+                    keep,
+                },
+                &cfg,
+            )
+            .await
+        }
         Command::Wal { action } => wal_cmd::run(action, &cfg).await,
         Command::Github { action } => github_cmd::run(action, &cfg).await,
         Command::Mirror {
@@ -629,8 +691,11 @@ async fn dispatch(command: Command, cfg: Config) -> Result<()> {
             refs,
             history_pack,
             verify_closure,
+            lfs,
         } => {
-            if direct {
+            let lfs_source = lfs.then(|| from.clone());
+            let lfs_repo = repo.clone();
+            let imported = if direct {
                 import_direct::run(
                     import_direct::DirectOptions {
                         from,
@@ -651,6 +716,11 @@ async fn dispatch(command: Command, cfg: Config) -> Result<()> {
                 .await
             } else {
                 import::run(from, repo, reuse_packs, refs, &cfg).await
+            };
+            imported?;
+            match lfs_source {
+                Some(from) => import::import_lfs(&from, &lfs_repo, &cfg).await,
+                None => Ok(()),
             }
         }
     }

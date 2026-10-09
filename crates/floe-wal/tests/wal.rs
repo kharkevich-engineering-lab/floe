@@ -639,6 +639,109 @@ async fn test_checkpoint_materialize() {
     );
 }
 
+/// Three pushes, a checkpoint at seq 3, one more push: a repo whose cold state needs both
+/// the checkpoint's ref snapshot and the tail segment.
+async fn checkpoint_and_tail(store: &Arc<MemoryStore>, cache: &Path, name: &str) -> RepoId {
+    let mut cfg = make_config(cache, 0);
+    cfg.wal.snapshot_every_entries = 0;
+    let registry = Registry::new(store.clone(), Arc::new(cfg));
+    let id = repo_id("test", name);
+    let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+    let work = WorkRepo::new();
+    let mut prev = String::new();
+    for i in 0..4 {
+        let c = work.commit(&format!("t_{i}"), &format!("data_{i}"));
+        let pack = if prev.is_empty() {
+            work.create_pack()
+        } else {
+            work.create_incremental_pack(&c, &prev)
+        };
+        let ingested = ingest_pack_data(&handle, pack).await.unwrap();
+        let txn = make_txn(vec![("refs/heads/main", &prev, &c)]);
+        handle
+            .publish_push(Some(ingested), txn, HashMap::new())
+            .await
+            .unwrap();
+        prev = c;
+        if i == 2 {
+            assert_eq!(handle.write_checkpoint().await.unwrap().seq, 3);
+        }
+    }
+    assert_eq!(handle.manifest().head_seq, 4);
+    id
+}
+
+/// A checkpoint folds every entry at or before it out of the live log: if its ref
+/// snapshot is gone, a cold instance must fail loudly, not serve the tail's refs alone
+/// and record itself as caught up.
+#[tokio::test]
+async fn cold_sync_refuses_a_missing_checkpoint_ref_snapshot() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let id = checkpoint_and_tail(&store, cache.path(), "cp-missing").await;
+    let key = format!(
+        "repos/test/cp-missing/{}",
+        floe_proto::keys::checkpoint_refs_key(3)
+    );
+    assert!(store.head(&key).await.unwrap().is_some(), "{key}");
+    store.delete(&key, None).await.unwrap();
+
+    let cache2 = tempfile::tempdir().unwrap();
+    let registry2 = Registry::new(store.clone(), Arc::new(make_config(cache2.path(), 0)));
+    let err = registry2
+        .open(&id)
+        .await
+        .err()
+        .expect("a cold open must fail");
+    assert!(
+        err.to_string().contains("checkpoint ref snapshot"),
+        "unexpected error: {err}"
+    );
+}
+
+/// A log segment that holds fewer entries than the manifest says (a truncated object)
+/// must fail the sync, not replay fewer ref updates.
+#[tokio::test]
+async fn cold_sync_refuses_a_truncated_log_segment() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let id = checkpoint_and_tail(&store, cache.path(), "seg-cut").await;
+    let mkey = "repos/test/seg-cut/manifest.pb";
+    let (_, mbytes) = floe_store::ObjectStoreExt::get_bytes(&*store, mkey)
+        .await
+        .unwrap()
+        .unwrap();
+    let manifest =
+        <floe_proto::v1::Manifest as floe_proto::prost::Message>::decode(mbytes.as_ref()).unwrap();
+    let tail = manifest
+        .log_segments
+        .iter()
+        .find(|s| s.first_seq == 4)
+        .expect("tail segment");
+    let key = format!("repos/test/seg-cut/{}", tail.key);
+    let (_, bytes) = floe_store::ObjectStoreExt::get_bytes(&*store, &key)
+        .await
+        .unwrap()
+        .unwrap();
+    let cut = bytes.slice(..bytes.len() - 5);
+    store
+        .put(&key, cut.into(), floe_store::PutMode::Overwrite.into())
+        .await
+        .unwrap();
+
+    let cache2 = tempfile::tempdir().unwrap();
+    let registry2 = Registry::new(store.clone(), Arc::new(make_config(cache2.path(), 0)));
+    let err = registry2
+        .open(&id)
+        .await
+        .err()
+        .expect("a cold open must fail");
+    assert!(
+        err.to_string().contains("incomplete log segment"),
+        "unexpected error: {err}"
+    );
+}
+
 #[tokio::test]
 async fn test_compact_replays_on_other_registry() {
     let cache = tempfile::tempdir().unwrap();

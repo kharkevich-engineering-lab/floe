@@ -66,11 +66,12 @@ right shape. This document is the thinking tool; apply it to every protocol chan
 | Config publish (D60, admin rate) | current GET → history Create (heal) → current CAS → history Create | 4 | `config_store/mod.rs::publish` |
 | Mirror supervisor (D60) | one HEAD/conditional GET of `mirror/github/sync-request.json` per `config_store.ttl` (≥ 5 s) on maintain hosts | 1 per ttl | `mirror.rs::watch_for_restart` |
 | Orphan log slot (failure path only) | +1 fresh manifest GET, +HEAD per probe, +Create at next seq | — | `publish.rs::claim_log_slot` |
+| Manifest CAS answered 412 (contention path only, D67, 2026-10-08) | +1 fresh manifest GET before the segment is CAS-deleted (was: the delete alone). Our segment listed → committed, no retry; head at or past our seq → segment kept, retry | +1 per lost race | `publish.rs::after_lost_cas` |
 
 `healthy_request_round_trip_budgets` in `crates/floe-server/tests/sim.rs` pins the healthy MemoryStore
 counts at push **5**, warm refs **1**, cold refs with one tail segment **2**, and checkpoint **4**. Cold open used to spend an
 extra unconditional manifest GET (3 requests, 3 sequential rounds); it now applies the manifest it already
-fetched directly (2 requests, 2 rounds). `claim_log_slot`, `cas_landed`, and `put_immutable_create` add probes
+fetched directly (2 requests, 2 rounds). `claim_log_slot`, `cas_landed`, `after_lost_cas` and `put_immutable_create` add probes
 only after Create/CAS failure, so the measured happy-path counts remain unchanged.
 
 Keep this table current; when you change a protocol, update the row and put the before/after depth in the
@@ -84,7 +85,8 @@ link, so a scenario can assert "a push on a healthy link is ≤ N requests" as a
   "someone moved it" and GCS tells you the current generation. Don't GET to decide what a conditional write will
   tell you for free.
 - **Verification goes on the failure path.** e.g. `put_immutable_create` HEADs only after a 412; `cas_landed`
-  re-reads the manifest only after a non-412 error. The happy path must not pay for rare cases.
+  re-reads the manifest only after a non-412 error, `after_lost_cas` only after a 412 (an SDK retry of a landed
+  CAS answers 412 on its own write). The happy path must not pay for rare cases.
 - **Carry state in the object you already fetch.** The manifest is the one GET every request makes: anything a
   reader needs at refs level (pack set + side-file inventory, checkpoint pointer, log segments, revision, writer)
   belongs in it, so no second request is needed to know *what* to fetch.

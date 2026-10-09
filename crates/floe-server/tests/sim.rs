@@ -1273,6 +1273,57 @@ async fn liveness_after_a_lost_cas_response() -> Result<()> {
     Ok(())
 }
 
+/// Safety: the bucket applies the manifest CAS, the response is lost, and the client's
+/// retry of the same conditional PUT answers 412 against the first attempt's own write
+/// (the S3 SDK's retry). That 412 is not a lost race: deleting "our" log segment then
+/// would leave the committed manifest pointing at a missing object (the push's ref
+/// transaction gone, every cold sync failing). The push must be acknowledged and the
+/// truth must replay on a cold instance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retried_cas_that_answers_412_on_its_own_write_keeps_the_segment() -> Result<()> {
+    let mut c = Cluster::new(21, 2).await?;
+    let mut p = Pusher::new(0);
+    ensure!(
+        p.push_once(&c.instances[0], &c.id, Duration::from_secs(10))
+            .await?
+    );
+    c.instances[0].link.set(
+        FaultPlan {
+            p_cas_fail_after: 1.0,
+            ..Default::default()
+        }
+        .with_only(&["manifest.pb"]),
+    );
+    let acked = p
+        .push_once(&c.instances[0], &c.id, Duration::from_secs(10))
+        .await?;
+    c.instances[0].link.heal();
+    ensure!(
+        acked,
+        "a push whose CAS landed was not acknowledged: {:?}",
+        p.errors.last()
+    );
+    let truth = c.truth_manifest().await?;
+    for seg in &truth.log_segments {
+        ensure!(
+            c.truth
+                .head(&format!("{}{}", c.repo_prefix(), seg.key))
+                .await?
+                .is_some(),
+            "committed log segment {} was deleted",
+            seg.key
+        );
+    }
+    let cold = c.add_instance("cold", &|_| {});
+    let h = c.instances[cold].open(&c.id).await?;
+    tokio::time::timeout(Duration::from_secs(10), h.sync_full())
+        .await
+        .map_err(|_| anyhow!("cold sync hung"))??;
+    ensure!(h.applied_seq() == truth.head_seq);
+    check_truth(&c, std::slice::from_ref(&p)).await?;
+    Ok(())
+}
+
 /// Liveness 7 (found by `sim_safety_then_liveness`): a writer crashes between
 /// its log PUT and its manifest CAS, leaving `log/<head+1>.pb` orphaned. Every
 /// later writer used to 412 on that key forever ("retry exhausted"): one crash

@@ -269,7 +269,7 @@ pub async fn materialize_at(
     // Replay (start_seq, at_seq]: pack set + ref transactions. Entries
     // older than the manifest's log window (folded into a checkpoint) are
     // probed directly as `log/<seq>.pb` objects — they stay in the store
-    // until GC'd, so a cold rewind usually still works.
+    // (nothing deletes them, D67), so a cold rewind works.
     let entries = if manifest.min_seq > 0 && start_seq + 1 < manifest.min_seq {
         let mut found = Vec::new();
         let mut seq = start_seq + 1;
@@ -334,7 +334,7 @@ pub async fn materialize_at(
             );
             handle.fetch_pack_into(p, &tmp).await.map_err(|e| {
                 anyhow::anyhow!(
-                    "pack {} is not in the store any more (superseded and past retention?): {e}",
+                    "pack {} is not in the store (nothing deletes packs — a lost object; docs/INTEGRITY.md): {e}",
                     p.checksum
                 )
             })?;

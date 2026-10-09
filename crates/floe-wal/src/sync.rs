@@ -443,10 +443,16 @@ pub(crate) async fn apply_delta(
     handle.learn_checkpoint_times().await?;
     if need_checkpoint_load {
         let refs_key = keys::checkpoint_refs_key(checkpoint_seq);
-        if let Some((_, snap)) = get_message::<RefSnapshot>(store, &refs_key).await? {
-            local.load_ref_snapshot(&snap)?;
-            handle.state.lock().applied_seq = checkpoint_seq;
-        }
+        // A checkpoint folds every entry at or before its seq out of the live log, so its
+        // ref snapshot is the only record of those refs: without it this host would serve
+        // the tail alone (fewer refs, silently) and record itself as caught up.
+        let Some((_, snap)) = get_message::<RefSnapshot>(store, &refs_key).await? else {
+            return Err(WalError::Corrupt(format!(
+                "checkpoint ref snapshot {refs_key} is missing"
+            )));
+        };
+        local.load_ref_snapshot(&snap)?;
+        handle.state.lock().applied_seq = checkpoint_seq;
     }
 
     // Replay log entries (refs, and superseded-pack bookkeeping) from
@@ -857,7 +863,9 @@ pub(crate) async fn replay_log(
     // test/refs500k: 2 tail entries = 1 s of every cold refs sync). One
     // rewrite per sync, and the tail's GETs overlap instead of serializing.
     let keys: Vec<String> = segments.iter().map(|s| s.key.clone()).collect();
-    let mut fetched: Vec<Option<bytes::Bytes>> = Vec::with_capacity(keys.len());
+    let mut fetched: Vec<Option<(&floe_proto::v1::LogSegmentRef, bytes::Bytes)>> =
+        Vec::with_capacity(keys.len());
+    let mut segment_refs = segments.iter();
     for chunk in keys.chunks(16) {
         let futs: Vec<_> = chunk
             .iter()
@@ -877,16 +885,26 @@ pub(crate) async fn replay_log(
             })
             .collect();
         for r in futures::future::join_all(futs).await {
-            fetched.push(r?);
+            let seg = segment_refs.next().copied();
+            fetched.push(r?.zip(seg).map(|(bytes, seg)| (seg, bytes)));
         }
     }
 
     let mut all: Vec<LogEntry> = Vec::new();
-    for bytes in fetched {
-        let Some(bytes) = bytes else { continue };
-        // Decode frames (tolerate partial trailing frame)
+    for (seg, bytes) in fetched.into_iter().flatten() {
         let (entries, _) = floe_proto::frame::decode_entries(&bytes)
             .map_err(|e| WalError::Corrupt(format!("log segment decode: {e}")))?;
+        // A segment is immutable and written whole: one that does not hold every entry the
+        // manifest says it does (a truncated object, a partial trailing frame) would replay
+        // fewer ref updates without a word — the same check the retained reader makes.
+        if entries.first().map(|e| e.seq) != Some(seg.first_seq)
+            || entries.last().is_none_or(|e| e.seq < seg.last_seq)
+        {
+            return Err(WalError::Corrupt(format!(
+                "incomplete log segment {} (manifest: seq {}..={})",
+                seg.key, seg.first_seq, seg.last_seq
+            )));
+        }
         // Only the oldest live segment witnesses the repository's first state.
         if entries
             .first()
