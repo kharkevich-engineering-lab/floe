@@ -2112,6 +2112,125 @@ async fn test_history_pack_keeps_tree_walks_local() {
     assert_eq!(faulter2.stats().0, 0, "no base reads for a tree-only fetch");
 }
 
+/// Faulting large objects holds a bounded amount of decoded data: a batch admits objects up
+/// to its byte bound (one alone when it is bigger), so a clone of a repository of large
+/// binaries through the remote reader cannot hold 32 of them at once (a 2 GiB server was
+/// OOM-killed serving 100 MB blobs).
+#[tokio::test]
+async fn faulting_large_objects_holds_one_bounded_batch_at_a_time() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let registry = Registry::new(store.clone(), Arc::new(make_config(cache.path(), 0)));
+    let id = repo_id("test", "faultbudget");
+    let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+    let work = WorkRepo::new();
+    let mut prev = String::new();
+    let mut x: u64 = 0x0bad_c0de_dead_beef;
+    for i in 0..8 {
+        let mut body = String::new();
+        for _ in 0..1024 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let _ = write!(body, "{x:016x}");
+        }
+        let c = work.commit(&format!("blob_{i}"), &body);
+        let pack = if prev.is_empty() {
+            work.create_pack()
+        } else {
+            work.create_incremental_pack(&c, &prev)
+        };
+        let ingested = ingest_pack_data(&handle, pack).await.unwrap();
+        handle
+            .publish_push(
+                Some(ingested),
+                make_txn(vec![("refs/heads/main", &prev, &c)]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        prev = c;
+    }
+    let repack = handle
+        .local()
+        .repack(floe_git::RepackOptions {
+            mode: floe_git::RepackMode::Full,
+            write_bitmap: true,
+            write_midx: false,
+            keep: vec![],
+        })
+        .await
+        .unwrap();
+    let base = repack.new_packs[0].clone();
+    handle
+        .publish_compact(base.clone(), repack.removed.clone(), 2)
+        .await
+        .unwrap();
+
+    let cache2 = tempfile::tempdir().unwrap();
+    let mut cfg2 = make_config(cache2.path(), 0);
+    cfg2.cache.max_bytes = floe_config::ByteSize::b(base.pack_size / 2);
+    let registry2 = Registry::new(store.clone(), Arc::new(cfg2));
+    let handle2 = registry2.open(&id).await.unwrap();
+    let reader = handle2.remote_reader().await.unwrap();
+
+    let out = std::process::Command::new("git")
+        .current_dir(work.path())
+        .args([
+            "rev-list",
+            "--objects",
+            "--all",
+            "--filter=object:type=blob",
+        ])
+        .output()
+        .unwrap();
+    let blobs: Vec<gix_hash::ObjectId> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|l| l.split(' ').next())
+        .filter(|h| {
+            let size = std::process::Command::new("git")
+                .current_dir(work.path())
+                .args(["cat-file", "-s", h])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&size.stdout).trim() == "16384"
+        })
+        .map(|h| gix_hash::ObjectId::from_hex(h.as_bytes()).unwrap())
+        .collect();
+    assert_eq!(blobs.len(), 8, "the eight 16 KiB blobs");
+    for oid in &blobs {
+        assert!(!handle2.local().has_object(oid));
+    }
+
+    // 16 KiB blobs (deltas or not, each decodes to 16 KiB) under a 40 KiB bound: two per batch.
+    let bound = 40 * 1024;
+    let faulter =
+        floe_wal::remote::Faulter::with_batch_bytes(reader.clone(), handle2.local().clone(), bound);
+    let n = floe_git::ObjectFaulter::fault(&faulter, &blobs)
+        .await
+        .unwrap();
+    assert_eq!(n, 8);
+    for oid in &blobs {
+        assert!(
+            handle2.local().has_object(oid),
+            "{oid} written to the loose store"
+        );
+    }
+    let peak = faulter.peak_batch_bytes();
+    assert!(peak > 0 && peak <= bound, "peak {peak} within {bound}");
+
+    // A bound below one object still makes progress, one object per batch.
+    let faulter = floe_wal::remote::Faulter::with_batch_bytes(reader, handle2.local().clone(), 1);
+    assert_eq!(
+        floe_git::ObjectFaulter::fault(&faulter, &blobs)
+            .await
+            .unwrap(),
+        8
+    );
+    assert_eq!(faulter.peak_batch_bytes(), 16 * 1024);
+}
+
 /// A long-lived read guard (a clone streaming for minutes) plus a pack
 /// removal that wants the write lock must not block new refs-level syncs:
 /// a queued writer on a tokio `RwLock` stalls every new reader (prod: info/refs
