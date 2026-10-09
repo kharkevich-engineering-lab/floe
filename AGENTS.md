@@ -28,7 +28,8 @@ machines whose "disk" is 20 GiB of tmpfs, next to a long tail of small repositor
 | `docs/ROUNDTRIPS.md` | **Anyone touching a protocol that talks to the bucket** (publish, sync, checkpoints, compaction/leases, bundles, remote reader, store backends). Round trips are the cost model; correct is not sufficient. |
 | `docs/POLICY.md` | Anyone touching receive-pack authorization or writing a repo policy. Normative rule language. |
 | `docs/LFS.md` | Anyone touching LFS (`lfs.rs`, `lfs_upstream.rs`) or importing a repository whose LFS history lives elsewhere. |
-| `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. |
+| `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck`/`repair` units, or seeing `connectivity: missing object` on a push. §6: what the bucket keeps and what fails loudly. |
+| `docs/MIGRATION.md` | Anyone moving existing repositories (an archive, LFS included) into floe, or touching `floe import`/`floe verify`/`scripts/migrate-archive.sh`. What "verified" means, the rehearsal, recovery. |
 | `docs/EVENTS.md` | Anyone changing WAL-derived ref events, the webhook bridge, consumer semantics or event cursors. |
 | `docs/GITHUB.md` | Anyone touching `crates/floe-server/src/github/*`, or pointing a GitHub-integrated app at floe for local development. The facade's trust boundary (it has none), URL conventions, the write primitive, known limits. |
 | `docs/design/github-mirror.md` | Anyone touching upstream follow patterns/archive (D48), `floe-mirror` (D49), `floe-catalog` (D50, SigV4 D63) or the push-to-upstream seam (D51). Design of record; dated "as landed" notes where the code won. |
@@ -228,7 +229,8 @@ runtime** and never takes the refs phase's lock (D19). `check_fits` refuses to p
 - **A fold never touches the base or a history pack** (`--keep-pack`), **a base is rebuilt only by the weekly
   unit / `compact --base`**, and **a rebuild supersedes every other live pack** by the manifest, not by what git
   happened to delete.
-- Superseded packs are retained `compaction.retention_superseded` (provenance window) then GC'd.
+- Superseded packs stay in the bucket: nothing deletes a pack's bytes (no GC; `compaction.retention_superseded`
+  is reserved and unread), so `floe wal materialize --at-seq` reaches every state the log records (D67).
 
 ### 2.5b Self-healing by construction (D22)
 Everything the maintainer produces — checkpoints, bundles per slot, compactions, retention — is a **pure function
@@ -708,6 +710,19 @@ that resolves is never moved by a push; follow (D48 has `upstream.head`), import
 repositories with a dangling HEAD, and any change of the default branch, go through `PUT /{o}/{r}/api/head`
 (`{"branch": …}`, admin, a HEAD-only PUSH entry; `repo.setHead` in the SDK, "Default branch" in the Settings tab).
 Not a D24 setting: HEAD is a ref, and a setting naming a branch would be a second source for it.
+
+**D67 — Recoverable by construction; a migration is proven, not trusted (2026-10-08).** (1) No pack's bytes are
+ever deleted from the bucket (superseding is manifest bookkeeping; `compaction.retention_superseded` is reserved
+and unread), so with D47's log and checkpoints `floe wal materialize --at-seq` reaches every recorded state.
+(2) `RepackMode::Full` keeps unreachable objects (`repack -a -d --keep-unreachable`): a full repack supersedes
+every pack it read and must hold every object they held — a ref published mid-rebuild, force-pushed history.
+(3) A manifest-CAS 412 is checked (`after_lost_cas`, +1 GET on the contention path) before our log segment is
+deleted: an SDK retry of a landed CAS answers 412 on its own write, and deleting then destroyed a committed
+entry. (4) Cold sync fails loudly on a missing checkpoint `refs.pb` or a log segment shorter than the manifest
+says. (5) `floe import` refuses shallow sources, checks the closure of every ref before it publishes, and copies
+`.git/lfs/objects` (sha256-checked, create-if-absent); `floe verify` proves a repository from the bucket alone
+(fresh cache, independent rewind, `fsck --full`, source refs, LFS) — refs equal + a complete, hashed closure is
+identity. `scripts/migrate-archive.sh` runs both per repository. `docs/MIGRATION.md`, `docs/INTEGRITY.md` §6.
 
 ## 5. Working rules
 

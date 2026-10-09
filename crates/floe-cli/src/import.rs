@@ -76,19 +76,32 @@ pub async fn run(
     refs: Vec<String>,
     cfg: &Arc<Config>,
 ) -> Result<()> {
+    let store = open_store(cfg).await?;
+    run_on(store, from, repo, reuse_packs, refs, cfg).await
+}
+
+/// [`run`] against an already open store.
+pub async fn run_on(
+    store: floe_store::DynStore,
+    from: PathBuf,
+    repo: String,
+    reuse_packs: bool,
+    refs: Vec<String>,
+    cfg: &Arc<Config>,
+) -> Result<()> {
     let (owner, name) = parse_repo_id(&repo)?;
     let id = floe_git::RepoId::new(owner, name)?;
 
     // Resolve the git dir (support both working trees and bare repos).
     let git_dir = resolve_git_dir(&from)?;
+    refuse_shallow(&git_dir)?;
     info!(git_dir = %git_dir.display(), "importing from");
 
     // Detect object format.
     let format = detect_object_format(&git_dir)?;
     info!(format = ?format, "object format");
 
-    // Open the store and create the repo.
-    let store = open_store(cfg).await?;
+    // Create the repo.
     std::fs::create_dir_all(&cfg.cache.dir).ok();
     let registry = Registry::new(store, cfg.clone());
 
@@ -226,6 +239,10 @@ pub async fn run(
     let pack_elapsed_ms = pack_started.elapsed().as_secs_f64() * 1_000.0;
 
     if let Some(pack) = ingested {
+        // Nothing is published whose history is not all here: the bucket would hold refs no
+        // instance can serve (a source with missing objects, a graft). receive-pack checks the
+        // same before every push; an import walks the whole closure.
+        verify_closure(local, &updates).await?;
         info!(
             checksum = %pack.checksum,
             objects = pack.object_count,
@@ -317,6 +334,90 @@ pub async fn run(
         report_publish(&id, &result)?;
     }
 
+    Ok(())
+}
+
+/// The LFS half of an import: the source's `.git/lfs/objects` into the repository's
+/// `lfs/objects/` (sha256-checked, create-if-absent). A source without LFS objects is a no-op;
+/// a local object whose content is not its name fails the import after the good ones are copied.
+pub async fn import_lfs(from: &std::path::Path, repo: &str, cfg: &Arc<Config>) -> Result<()> {
+    let store = open_store(cfg).await?;
+    import_lfs_on(store, from, repo, cfg).await
+}
+
+/// [`import_lfs`] against an already open store.
+pub async fn import_lfs_on(
+    store: floe_store::DynStore,
+    from: &std::path::Path,
+    repo: &str,
+    cfg: &Arc<Config>,
+) -> Result<()> {
+    let git_dir = resolve_git_dir(from)?;
+    if !git_dir.join("lfs").join("objects").is_dir() {
+        return Ok(());
+    }
+    let (owner, name) = parse_repo_id(repo)?;
+    let id = floe_git::RepoId::new(owner, name)?;
+    let registry = Registry::new(store, cfg.clone());
+    let handle = registry.open(&id).await?;
+    let started = Instant::now();
+    let report = crate::lfs_import::import_lfs_objects(handle.store(), &git_dir, 8).await?;
+    println!(
+        "lfs: {} object(s) uploaded ({} bytes), {} already in the bucket, {} refused, {:.1}s",
+        report.uploaded,
+        report.uploaded_bytes,
+        report.already_present,
+        report.bad.len(),
+        started.elapsed().as_secs_f64()
+    );
+    if !report.bad.is_empty() {
+        for (path, why) in report.bad.iter().take(20) {
+            eprintln!("  refused {}: {why}", path.display());
+        }
+        bail!(
+            "{} local LFS object(s) are corrupt and were not uploaded (`git lfs fsck` in the source; \
+             re-fetch them from wherever they came from, then re-run the import)",
+            report.bad.len()
+        );
+    }
+    Ok(())
+}
+
+/// A shallow clone's history ends at its graft points: imported as is, its refs would name
+/// commits whose parents no pack holds.
+pub(crate) fn refuse_shallow(git_dir: &std::path::Path) -> Result<()> {
+    if git_dir.join("shallow").is_file() {
+        bail!(
+            "{} is a shallow clone: its history is incomplete. Fetch the rest first \
+             (`git -C {} fetch --unshallow`) or import the repository it was cloned from",
+            git_dir.display(),
+            git_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Every object reachable from the refs about to be published is in the local copy.
+async fn verify_closure(
+    local: &floe_git::LocalRepo,
+    updates: &[floe_proto::v1::RefUpdate],
+) -> Result<()> {
+    let tips: Vec<floe_git::gix_hash::ObjectId> = updates
+        .iter()
+        .filter(|u| u.new_symbolic_target.is_empty() && !u.new_oid.is_empty())
+        .map(|u| floe_git::gix_hash::ObjectId::from_hex(u.new_oid.as_bytes()))
+        .collect::<Result<_, _>>()
+        .context("ref with a malformed object id")?;
+    let started = Instant::now();
+    local
+        .check_connectivity_async(&tips, false)
+        .await
+        .context("the source's history is incomplete: nothing was published (`git fsck --full` in the source shows what is missing)")?;
+    info!(
+        tips = tips.len(),
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "closure of every published ref verified"
+    );
     Ok(())
 }
 
@@ -477,6 +578,9 @@ async fn import_reusing_packs(
             idx_size,
             object_count,
         };
+        if i + 1 == n {
+            verify_closure(local, &updates).await?;
+        }
         let txn = floe_proto::v1::RefTransaction {
             updates: if i + 1 == n {
                 updates.clone()

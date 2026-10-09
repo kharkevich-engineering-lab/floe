@@ -300,10 +300,37 @@ pub(crate) async fn sweep_burned(store: &Prefixed, slot: &LogSlot) {
     }
 }
 
-/// After a manifest CAS `PreconditionFailed`: CAS-delete *our* segment (only
-/// the version we wrote; never anything a later writer put there).
-pub(crate) async fn drop_own_slot(store: &Prefixed, slot: &LogSlot) {
+/// After a manifest CAS `PreconditionFailed`: did *our own* write land anyway?
+///
+/// A 412 is not proof of a lost race. The S3 SDK retries a conditional PUT whose response
+/// was lost; the retry then fails its precondition against the manifest the first attempt
+/// wrote. Deleting the segment then would leave a committed manifest pointing at a log
+/// object that is gone: the entry's ref transaction lost, and every cold sync of the
+/// repository failing. So look first (one GET, on the failure path only):
+/// - the fresh manifest lists our segment → `Ok(Some(manifest))`: committed;
+/// - it does not, but its head is at or past our seq → `Ok(None)`, segment kept: the seq
+///   was burned by a writer that judged us an orphan, or a checkpoint folded our committed
+///   segment out of the list (D47 keeps those objects). A kept orphan costs one object;
+///   a deleted committed segment costs the repository;
+/// - otherwise → `Ok(None)` after CAS-deleting exactly the version we wrote.
+pub(crate) async fn after_lost_cas(
+    store: &Prefixed,
+    slot: &LogSlot,
+) -> Result<Option<Manifest>, WalError> {
+    let fresh = read_manifest_fresh(store).await?;
+    if let Some(m) = &fresh {
+        if m.log_segments
+            .iter()
+            .any(|s| s.key == slot.key && s.first_seq == slot.first_seq)
+        {
+            return Ok(fresh);
+        }
+        if m.head_seq >= slot.first_seq {
+            return Ok(None);
+        }
+    }
     let _ = store.delete(&slot.key, Some(slot.version.clone())).await;
+    Ok(None)
 }
 
 /// After a manifest CAS failed with a non-412 error: did the write land?
@@ -744,7 +771,19 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
         // lost the response. Look before deciding.
         let committed: Option<(Manifest, Option<floe_store::Version>)> = match cas {
             Ok(meta) => Some((updated, Some(meta.version))),
-            Err(StoreError::PreconditionFailed { .. }) => None,
+            Err(StoreError::PreconditionFailed { .. }) => {
+                match after_lost_cas(&handle.store, &slot)
+                    .instrument(span.clone())
+                    .await
+                {
+                    Ok(Some(fresh)) => {
+                        tracing::warn!(repo = %handle.id, seq = last_seq, "manifest CAS answered 412 but our write landed (a retried request)");
+                        Some((fresh, None))
+                    }
+                    Ok(None) => None,
+                    Err(e) => return finish_with_error(batch, &valid_indices, e),
+                }
+            }
             Err(e) => match cas_landed(&handle.store, &slot)
                 .instrument(span.clone())
                 .await
@@ -768,10 +807,7 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
         };
 
         let Some((committed, version)) = committed else {
-            // Lost the CAS: drop exactly the segment we wrote, re-sync, retry.
-            drop_own_slot(&handle.store, &slot)
-                .instrument(span.clone())
-                .await;
+            // Lost the CAS (`after_lost_cas` dropped our segment when that was safe): re-sync, retry.
             attempts += 1;
             if attempts >= max_retries {
                 span.record("cas_retries", attempts);
@@ -1136,7 +1172,23 @@ pub(crate) async fn publish_compact_impl(
             .await;
         let committed = match cas {
             Ok(meta) => Some((updated, meta.version)),
-            Err(StoreError::PreconditionFailed { .. }) => None,
+            Err(StoreError::PreconditionFailed { .. }) => {
+                match after_lost_cas(&handle.store, &slot).await? {
+                    Some(fresh) => {
+                        tracing::warn!(repo = %handle.id, seq, "compact manifest CAS answered 412 but our write landed (a retried request)");
+                        let v = handle
+                            .store
+                            .head(keys::MANIFEST)
+                            .await?
+                            .map(|m| m.version)
+                            .ok_or_else(|| {
+                                WalError::Corrupt("manifest vanished after commit".into())
+                            })?;
+                        Some((fresh, v))
+                    }
+                    None => None,
+                }
+            }
             Err(e) => match cas_landed(&handle.store, &slot).await {
                 Ok(Some(fresh)) => {
                     tracing::warn!(repo = %handle.id, seq, "compact manifest CAS errored but landed: {e}");
@@ -1154,7 +1206,6 @@ pub(crate) async fn publish_compact_impl(
             },
         };
         let Some((committed, version)) = committed else {
-            drop_own_slot(&handle.store, &slot).await;
             attempts += 1;
             if attempts >= max_retries {
                 return Err(WalError::Retry { attempts });
@@ -1456,7 +1507,14 @@ pub(crate) async fn publish_settings_impl(
                 return Ok(revision);
             }
             Err(StoreError::PreconditionFailed { .. }) => {
-                drop_own_slot(&handle.store, &slot).await;
+                if after_lost_cas(&handle.store, &slot).await?.is_some() {
+                    // Our own retried write landed: published. The next sync applies the
+                    // manifest it wrote (and whatever followed it).
+                    tracing::warn!(repo = %handle.id, seq, "settings manifest CAS answered 412 but our write landed (a retried request)");
+                    *handle.effective.lock() = None;
+                    sweep_burned(&handle.store, &slot).await;
+                    return Ok(revision);
+                }
                 attempts += 1;
                 if attempts >= max_retries {
                     return Err(WalError::Retry { attempts });

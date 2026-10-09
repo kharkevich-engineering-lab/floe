@@ -309,6 +309,7 @@ pub async fn run_with_store(
     let id = floe_git::RepoId::new(owner, name)?;
     let repo_key = id.to_string();
     let git_dir = crate::import::resolve_git_dir(&opts.from)?;
+    crate::import::refuse_shallow(&git_dir)?;
     let format = crate::import::detect_object_format(&git_dir)?;
     info!(git_dir = %git_dir.display(), format = ?format, "direct import");
 

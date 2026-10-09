@@ -578,7 +578,9 @@ pub struct CompactionConfig {
     pub trigger_bytes: ByteSize,
     #[serde(with = "humantime_serde")]
     pub lease_ttl: Duration,
-    /// Keep superseded packs and old index generations for this long (provenance/rewind).
+    /// Reserved for a superseded-pack GC that does not exist: no code reads it, and floe never
+    /// deletes a pack's bytes from the bucket (docs/INTEGRITY.md §6). Kept because per-repo
+    /// `[compaction]` settings stored in the WAL may name it.
     #[serde(with = "humantime_serde")]
     pub retention_superseded: Duration,
     /// Use upstream git for delta compression (`git repack`); gix does not delta-compress.

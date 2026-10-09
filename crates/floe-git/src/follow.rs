@@ -398,7 +398,10 @@ mod tests {
         )
         .unwrap();
         let mut c = git_cmd(None, "https://example.invalid/r.git", Some("tok"));
+        // The system scope is the platform's (Apple's git lists `osxkeychain` there): leave it out
+        // so the count is about the global helper, the reset and ours.
         c.env("GIT_CONFIG_GLOBAL", &global)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .args(["config", "--get-all", "credential.helper"]);
         let out = c.as_std_mut().output().unwrap();
         let helpers = String::from_utf8_lossy(&out.stdout);

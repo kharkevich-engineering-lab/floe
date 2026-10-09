@@ -1971,6 +1971,14 @@ impl LocalRepo {
             RepackMode::Full => {
                 args.push("-a".into());
                 args.push("-d".into());
+                // A full repack is published as a COMPACT that supersedes every pack it read, so
+                // it must hold every object they held, not only what the local refs reach: a ref
+                // published while a base rebuild ran (16–30 min) may point at an object that was
+                // unreachable when it started, and history a force-push or a ref delete left
+                // behind is what `floe wal materialize --at-seq` recovers. Unreachable objects are
+                // appended to the new pack instead of dropped (bitmaps still cover the reachable
+                // part). floe never deletes a pack's bytes from the bucket either (docs/INTEGRITY.md).
+                args.push("--keep-unreachable".into());
                 // Every core for the delta phase; the write + bitmap phases are
                 // single-threaded in git (a large repository's base: 16 min for 32 GB on 44
                 // cores, 2026-08-21 dry run — mostly that).
