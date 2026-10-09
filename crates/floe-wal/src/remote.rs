@@ -755,17 +755,37 @@ pub fn human_bytes(n: u64) -> String {
 pub struct Faulter {
     packs: Arc<RemotePacks>,
     local: floe_git::LocalRepo,
+    batch_bytes: u64,
     faulted: AtomicU64,
     rounds: AtomicU64,
+    peak_batch_bytes: AtomicU64,
 }
+
+/// Decoded bytes one fault batch may hold at once. Objects are decoded whole, so a batch of
+/// 32 large blobs (a 5 GiB repository of 100 MB binaries) held 3.2 GB and OOM-killed a 2 GiB
+/// server mid-clone; the block cache and the decoded-object LRU are bounded separately.
+pub const FAULT_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+/// Objects per batch (and concurrent header probes) when they are small.
+const FAULT_PAR: usize = 32;
 
 impl Faulter {
     pub fn new(packs: Arc<RemotePacks>, local: floe_git::LocalRepo) -> Self {
+        Self::with_batch_bytes(packs, local, FAULT_BATCH_BYTES)
+    }
+
+    /// `new` with another per-batch byte bound (tests).
+    pub fn with_batch_bytes(
+        packs: Arc<RemotePacks>,
+        local: floe_git::LocalRepo,
+        batch_bytes: u64,
+    ) -> Self {
         Faulter {
             packs,
             local,
+            batch_bytes,
             faulted: AtomicU64::new(0),
             rounds: AtomicU64::new(0),
+            peak_batch_bytes: AtomicU64::new(0),
         }
     }
 
@@ -775,6 +795,46 @@ impl Faulter {
             self.faulted.load(Ordering::Relaxed),
             self.rounds.load(Ordering::Relaxed),
         )
+    }
+
+    /// The most decoded bytes one batch admitted: at most the batch bound, or one object
+    /// alone when it is larger than that.
+    pub fn peak_batch_bytes(&self) -> u64 {
+        self.peak_batch_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Decode `batch` concurrently and write each object to the loose store off the runtime.
+    async fn fault_batch(
+        &self,
+        batch: &[gix_hash::ObjectId],
+        bytes: u64,
+    ) -> Result<usize, floe_git::GitError> {
+        self.peak_batch_bytes.fetch_max(bytes, Ordering::Relaxed);
+        let results = futures::future::join_all(batch.iter().map(|oid| self.packs.find(oid))).await;
+        let mut found = Vec::with_capacity(batch.len());
+        for (oid, r) in batch.iter().zip(results) {
+            match r {
+                Ok(Some(obj)) => found.push((*oid, obj)),
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(floe_git::GitError::Protocol(format!(
+                        "remote read of {oid}: {e}"
+                    )));
+                }
+            }
+        }
+        let n = found.len();
+        // Deflating a large blob is CPU-bound work; it never runs on a runtime worker.
+        let local = self.local.clone();
+        tokio::task::spawn_blocking(move || {
+            for (oid, obj) in &found {
+                local.write_loose_object(obj.kind, oid, &obj.data)?;
+            }
+            Ok::<(), floe_git::GitError>(())
+        })
+        .await
+        .map_err(|e| floe_git::GitError::Protocol(format!("loose object writer: {e}")))??;
+        Ok(n)
     }
 }
 
@@ -794,26 +854,36 @@ impl floe_git::ObjectFaulter for Faulter {
         );
         Box::pin(
             async move {
-                const PAR: usize = 32;
                 self.rounds.fetch_add(1, Ordering::Relaxed);
                 let mut n = 0usize;
-                for chunk in oids.chunks(PAR) {
-                    let results =
-                        futures::future::join_all(chunk.iter().map(|oid| self.packs.find(oid)))
+                for chunk in oids.chunks(FAULT_PAR) {
+                    // Sizes first (a header read; its block is the one `find` reads next), so a
+                    // batch admits objects up to `batch_bytes` of decoded data.
+                    let sizes =
+                        futures::future::join_all(chunk.iter().map(|oid| self.packs.header(oid)))
                             .await;
-                    for (oid, r) in chunk.iter().zip(results) {
-                        match r {
-                            Ok(Some(obj)) => {
-                                self.local.write_loose_object(obj.kind, oid, &obj.data)?;
-                                n += 1;
-                            }
-                            Ok(None) => {}
+                    let mut batch = Vec::with_capacity(chunk.len());
+                    let mut bytes = 0u64;
+                    for (oid, h) in chunk.iter().zip(sizes) {
+                        let size = match h {
+                            Ok(Some((_, size))) => size,
+                            Ok(None) => continue,
                             Err(e) => {
                                 return Err(floe_git::GitError::Protocol(format!(
                                     "remote read of {oid}: {e}"
                                 )));
                             }
+                        };
+                        if !batch.is_empty() && bytes + size > self.batch_bytes {
+                            n += self.fault_batch(&batch, bytes).await?;
+                            batch.clear();
+                            bytes = 0;
                         }
+                        batch.push(*oid);
+                        bytes += size;
+                    }
+                    if !batch.is_empty() {
+                        n += self.fault_batch(&batch, bytes).await?;
                     }
                 }
                 self.faulted.fetch_add(n as u64, Ordering::Relaxed);
