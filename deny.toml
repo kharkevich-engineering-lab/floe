@@ -11,17 +11,17 @@ all-features = true
 # we depend on directly. An exception goes in `ignore` with the advisory id and the reason.
 unmaintained = "workspace"
 yanked = "deny"
-# What the first run found, each tracked in #10 with its fix. Delete an entry when it is fixed;
-# never add one without a reason and an issue.
+# Each entry carries the reason it cannot be fixed yet and the issue tracking it. Delete an
+# entry when it is fixed; never add one without a reason and an issue.
+#
+# quick-xml 0.39 (two DoS advisories, both fixed in 0.41): only in the `catalog` build, through
+# opendal-core 0.57, which iceberg-storage-opendal =0.10.1 (the newest release) requires;
+# opendal 0.58 moves to quick-xml 0.41. It parses the S3 responses of the Iceberg warehouse the
+# operator configured (`catalog.s3_endpoint`), never a client's input. Drop both entries with the
+# iceberg bump that takes opendal >= 0.58 (#10).
 ignore = [
-    { id = "RUSTSEC-2026-0258", reason = "h2 0.3.27 via the aws-smithy legacy hyper 0.14 stack (0.4.x is fixed), #10" },
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101 via the aws-smithy legacy rustls stack, #10" },
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39 needs a dependent bump to >= 0.41, #10" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39 needs a dependent bump to >= 0.41, #10" },
-    { id = "RUSTSEC-2023-0071", reason = "rsa: no fixed release exists, #10" },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained, direct dependency of floe-server, #10" },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39 via opendal-core 0.57 (iceberg-storage-opendal 0.10.1), catalog build only, parses the configured warehouse's S3 responses; #10" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39 via opendal-core 0.57 (iceberg-storage-opendal 0.10.1), catalog build only, parses the configured warehouse's S3 responses; #10" },
 ]
 
 [licenses]

@@ -39,6 +39,8 @@ use floe_tls::dns::{DnsProvider, TxtRecord};
 use floe_tls::resolver::{CertResolver, cert_info, provider, server_config};
 use floe_tls::seal::SealKey;
 use futures::StreamExt;
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
@@ -145,7 +147,7 @@ async fn handshake(resolver: Arc<CertResolver>, root_pem: &str, name: &str) -> S
         tls.shutdown().await.unwrap();
     });
     let mut roots = rustls::RootCertStore::empty();
-    for c in rustls_pemfile::certs(&mut root_pem.as_bytes()) {
+    for c in CertificateDer::pem_slice_iter(root_pem.as_bytes()) {
         roots.add(c.unwrap()).unwrap();
     }
     let cfg = rustls::ClientConfig::builder_with_provider(provider())

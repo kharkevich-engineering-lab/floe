@@ -125,7 +125,10 @@ google-cloud-storage = "1"
 google-cloud-gax = "1"
 google-cloud-auth = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1"
+# No default features: the default `rustls` feature is aws-smithy's legacy hyper 0.14 /
+# rustls 0.21 connector (h2 0.3, rustls-webpki 0.101, both with advisories, #10). The hyper 1 /
+# rustls 0.23 client is `default-https-client`; the other three are the rest of the defaults.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
 aws-smithy-types = "1"
 # SigV4 for the Iceberg REST catalog (floe-catalog `iceberg` feature, D63); both
 # already in the graph through aws-sdk-s3.
@@ -153,7 +156,9 @@ async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 pin-project-lite = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 base64 = "0.23"
-jsonwebtoken = { version = "11.0.0", features = ["rust_crypto"] }
+# aws-lc-rs backend (already in the graph through google-cloud-auth and the aws-smithy client): the
+# rust_crypto backend pulls `rsa`, RUSTSEC-2023-0071 (Marvin), which has no fixed release (#10).
+jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 # The GitHub facade parses a GraphQL operation only to name it in the
 # not-implemented error (docs/GITHUB.md); no execution, no schema.
 graphql-parser = "0.4"
@@ -175,7 +180,6 @@ reqsign-core = "3"
 rmcp = { version = "=3.5.0", default-features = false, features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
 # TLS (in-process termination)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "logging", "ring"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 # ACME (RFC 8555) client for `server.tls.mode = "acme"` (D59). ring for JWS signing (the
