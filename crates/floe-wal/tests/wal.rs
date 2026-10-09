@@ -2835,3 +2835,97 @@ async fn publish_settings_if_is_a_cas_on_the_revision() {
         Err(floe_wal::WalError::Invalid(_))
     ));
 }
+
+/// #15: `Registry::delete` raced a writer that still held the old handle (a
+/// background pack prefetch, a refs sync writing `packed-refs`, ...) and
+/// answered 500 "Directory not empty" from `remove_dir_all`. A writer keeps
+/// writing into the local copy while the repository is deleted: the delete
+/// must succeed every time, the live path must stay gone, and a re-created
+/// repository with the same name must start from a clean local copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_delete_races_a_writer_holding_the_handle() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let cfg = make_config(cache.path(), 0);
+    let registry = Registry::new(store.clone(), Arc::new(cfg));
+    let id = repo_id("race", "deleted");
+    let work = WorkRepo::new();
+    let c1 = work.commit("first", "hello");
+
+    for round in 0..8 {
+        let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+        assert!(
+            !handle.local().path().join("race-0").exists(),
+            "round {round}: a re-created repository sees the deleted one's local files"
+        );
+        assert!(handle.local().refs().unwrap().refs.is_empty());
+        let ingested = ingest_pack_data(&handle, work.create_pack()).await.unwrap();
+        handle
+            .publish_push(
+                Some(ingested),
+                make_txn(vec![("refs/heads/main", "", &c1)]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let live = handle.local().path().to_path_buf();
+
+        // The writer: like a straggling sync, it writes into directories that
+        // exist (never `create_dir_all` of the repository itself).
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let stop = stop.clone();
+            let live = live.clone();
+            std::thread::spawn(move || {
+                let mut i = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let name = format!("race-{}", i % 512);
+                    let _ = std::fs::write(live.join(&name), b"x");
+                    let _ = std::fs::write(live.join("objects").join(&name), b"x");
+                    i += 1;
+                }
+            })
+        };
+        // Let the writer populate the directory before the delete walks it.
+        while !live.join("race-0").exists() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let res = registry.delete(&id).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+        res.unwrap_or_else(|e| panic!("round {round}: delete failed under a racing writer: {e}"));
+        assert!(
+            !live.exists(),
+            "round {round}: the live local path was repopulated after delete"
+        );
+        assert!(handle.is_deleted());
+        // The old handle refuses work, so nothing it does writes into the path again.
+        assert!(matches!(
+            handle.sync_refs().await.map(|_| ()),
+            Err(floe_wal::WalError::NotFound)
+        ));
+        assert!(!live.exists());
+        assert!(matches!(
+            registry.open(&id).await.map(|_| ()),
+            Err(floe_wal::WalError::NotFound)
+        ));
+    }
+}
+
+/// A local copy left at the live path (a straggler that recreated it, or a
+/// previous incarnation deleted on another host) never leaks into a new repository.
+#[tokio::test]
+async fn test_create_discards_a_stale_local_copy() {
+    let cache = tempfile::tempdir().unwrap();
+    let store = MemoryStore::shared();
+    let cfg = make_config(cache.path(), 0);
+    let registry = Registry::new(store.clone(), Arc::new(cfg));
+    let id = repo_id("race", "stale");
+    let live = id.local_dir(cache.path());
+    std::fs::create_dir_all(live.join("objects")).unwrap();
+    std::fs::write(live.join("stale-marker"), b"old").unwrap();
+    let handle = registry.create(&id, ObjectFormat::Sha1).await.unwrap();
+    assert_eq!(handle.local().path(), live.as_path());
+    assert!(!live.join("stale-marker").exists());
+    assert!(handle.local().refs().unwrap().refs.is_empty());
+}
