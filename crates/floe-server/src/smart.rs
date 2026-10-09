@@ -504,7 +504,11 @@ async fn run_fetch<W: tokio::io::AsyncWrite + Unpin + Send>(
             .remote_reader()
             .await
             .map_err(|e| floe_git::GitError::Protocol(format!("remote reader: {e}")))?;
-        let faulter = floe_wal::remote::Faulter::new(reader, local.clone());
+        // A quarter of the cache budget per fetch: remainders and bounded fetches fit, a
+        // zero-have clone of a repository bigger than the cache is refused with the fix.
+        let budget = handle.config().cache_budget_bytes();
+        let faulter = floe_wal::remote::Faulter::new(reader, local.clone())
+            .with_limit((budget > 0).then_some(budget / 4));
         let t0 = std::time::Instant::now();
         let stats = local
             .upload_pack_gix_with(req, writer, Some(&faulter))
