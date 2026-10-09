@@ -101,12 +101,9 @@ impl Registry {
         };
 
         // Open or init local repo (LocalRepo joins owner/name.git onto the root).
-        let local = if let Some(l) = LocalRepo::open(&self.cache_root, id)? {
-            l
-        } else {
-            let format = parse_object_format(&manifest.object_format);
-            LocalRepo::init(&self.cache_root, id, format)?
-        };
+        let local = self
+            .local_repo(id, parse_object_format(&manifest.object_format), false)
+            .await?;
 
         // Load state
         let state = load_state(local.path());
@@ -228,7 +225,7 @@ impl Registry {
         {
             Ok(meta) => {
                 // Init local repo
-                let local = LocalRepo::init(&self.cache_root, id, format)?;
+                let local = self.local_repo(id, format, true).await?;
 
                 let state = RepoState::default();
                 save_state(local.path(), &state)?;
@@ -343,6 +340,27 @@ impl Registry {
                 .then_with(|| a.name().cmp(b.name()))
         });
         Ok(repos)
+    }
+
+    /// The serving copy of `id` under the cache root: opened, or created (`git init`, a
+    /// subprocess) when absent or when `fresh`. Filesystem and process work, so it runs off the
+    /// async runtime: a cold open on the request path must not stall a worker (#12: a cold
+    /// refs read took 1.1 s, all of it here, on a loaded runner).
+    async fn local_repo(
+        &self,
+        id: &RepoId,
+        format: ObjectFormat,
+        fresh: bool,
+    ) -> Result<LocalRepo, WalError> {
+        let (root, id) = (self.cache_root.clone(), id.clone());
+        tokio::task::spawn_blocking(move || -> Result<LocalRepo, WalError> {
+            if !fresh && let Some(l) = LocalRepo::open(&root, &id)? {
+                return Ok(l);
+            }
+            Ok(LocalRepo::init(&root, &id, format)?)
+        })
+        .await
+        .map_err(|e| WalError::Corrupt(format!("local repository task: {e}")))?
     }
 
     /// Disk cache maintenance: evict idle repos beyond `cache.max_bytes` / `evict_idle_after`.

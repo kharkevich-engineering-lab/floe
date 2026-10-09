@@ -49,10 +49,11 @@ pub struct RepoHandle {
     pub(crate) rw: TokioRwLock<()>,
     // Single in-flight sync.
     pub(crate) sync_mutex: TokioMutex<()>,
-    /// Serializes pack reconciliation (downloads/links/removals). Held
-    /// *without* `sync_mutex`/`rw.write`, so a refs-level request is never
-    /// stuck behind a multi-GB materialization (only removals take the write
-    /// lock, briefly).
+    /// Serializes every change to the serving copy's object store — pack
+    /// reconciliation (downloads/links/removals) and the commit-graph chain —
+    /// and a base rebuild's scratch copy of it (`lock_packs`). Held *without*
+    /// `sync_mutex`/`rw.write`, so a refs-level request is never stuck behind
+    /// a multi-GB materialization (only removals take the write lock, briefly).
     pub(crate) pack_mutex: TokioMutex<()>,
 
     // Current manifest (last known). Short critical sections, no await.
@@ -455,6 +456,22 @@ impl RepoHandle {
             return false;
         }
         true
+    }
+
+    /// Hold the serving copy's pack set and commit-graph chain still: nothing
+    /// under `objects/` is added, removed or rewritten while the guard lives
+    /// (materialization and the post-publish commit-graph update wait on it).
+    /// Reads go on; refs-level syncs do not take it. A base rebuild copies the
+    /// serving copy under it (`floe_server::rebuild`).
+    pub async fn lock_packs(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        crate::lockwait::timed(
+            "pack_mutex",
+            &self.id,
+            self.cfg.telemetry.lock_wait_warn,
+            || self.pack_mutex.try_lock().ok(),
+            self.pack_mutex.lock(),
+        )
+        .await
     }
 
     /// True when the local pack set matches the last applied manifest.

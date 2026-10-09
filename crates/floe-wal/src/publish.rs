@@ -875,12 +875,15 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
             }
         }
         // Fold the pushed packs' commits into the local commit-graph
-        // chain (cheap, incremental; off the client's critical path).
+        // chain (cheap, incremental; off the client's critical path). The
+        // chain is the serving copy's object store: rewritten under
+        // `pack_mutex`, like every other change to it.
         if !new_packs.is_empty()
             && let Some(arc) = handle.self_arc.get().cloned()
         {
             let packs = new_packs.clone();
             tokio::spawn(async move {
+                let _packs = arc.lock_packs().await;
                 let manifest = arc.manifest();
                 crate::sync::maintain_commit_graph(&arc, &manifest, &packs).await;
             });

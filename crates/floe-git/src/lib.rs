@@ -631,17 +631,20 @@ impl LocalRepo {
         // off, and without one `pack-objects` builds the reverse index of the
         // base in memory on EVERY fetch: 60 M entries, 962 MB, 2.85 s flat on
         // the SSD host (2026-08-21, a large repository's serving copy had no .rev at all).
-        for (k, v) in [
-            ("uploadpack.allowFilter", "true"),
-            ("uploadpack.allowAnySHA1InWant", "true"),
-            ("uploadpack.allowSidebandAll", "true"),
-            ("pack.writeReverseIndex", "true"),
-        ] {
-            let _ = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&path)
-                .args(["config", k, v])
-                .output();
+        // Appended to the file `git init` just wrote rather than set by four
+        // `git config` subprocesses: a cold open runs this, and on a loaded
+        // machine the five spawns took over a second (#12).
+        {
+            use std::io::Write as _;
+            let mut config = std::fs::OpenOptions::new()
+                .append(true)
+                .open(path.join("config"))
+                .map_err(GitError::Io)?;
+            config
+                .write_all(
+                    b"[uploadpack]\n\tallowFilter = true\n\tallowAnySHA1InWant = true\n\tallowSidebandAll = true\n[pack]\n\twriteReverseIndex = true\n",
+                )
+                .map_err(GitError::Io)?;
         }
         let tsr = gix::ThreadSafeRepository::open(&path).map_err(ge)?;
         Ok(LocalRepo {
