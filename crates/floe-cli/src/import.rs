@@ -405,7 +405,10 @@ async fn verify_closure(
     let tips: Vec<floe_git::gix_hash::ObjectId> = updates
         .iter()
         .filter(|u| u.new_symbolic_target.is_empty() && !u.new_oid.is_empty())
-        .map(|u| floe_git::gix_hash::ObjectId::from_hex(u.new_oid.as_bytes()))
+        .map(|u| {
+            floe_git::gix_hash::ObjectId::from_hex(u.new_oid.as_bytes())
+                .map_err(floe_git::Exn::into_error)
+        })
         .collect::<Result<_, _>>()
         .context("ref with a malformed object id")?;
     let started = Instant::now();
