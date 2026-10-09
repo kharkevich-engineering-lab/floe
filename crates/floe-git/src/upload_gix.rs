@@ -183,10 +183,19 @@ impl LocalRepo {
             sb: pkt::Sideband::new(out),
             sb_all,
             progress,
+            begun: false,
         };
-        let stats = self
+        let stats = match self
             .produce_pack(&req, &common_haves, faulter, &mut sink)
-            .await?;
+            .await
+        {
+            Ok(stats) => stats,
+            Err(e) => {
+                // Tell git why, rather than ending the stream ("early EOF").
+                sink.fail(&e.to_string()).await;
+                return Err(e);
+            }
+        };
         sink.finish().await?;
         Ok(stats)
     }
@@ -429,6 +438,8 @@ enum PackOut<W: AsyncWrite + Unpin + Send> {
         sb: pkt::Sideband<W>,
         sb_all: bool,
         progress: bool,
+        /// The `packfile` section line was written.
+        begun: bool,
     },
     Raw(W),
 }
@@ -448,12 +459,33 @@ impl<W: AsyncWrite + Unpin + Send> PackOut<W> {
         }
     }
     async fn begin_pack(&mut self) -> Result<(), GitError> {
-        if let PackOut::Sideband { sb, sb_all, .. } = self {
+        if let PackOut::Sideband {
+            sb, sb_all, begun, ..
+        } = self
+        {
             let mut pf = Vec::with_capacity(16);
             line(&mut pf, b"packfile\n", *sb_all);
             sb.inner_mut().write_all(&pf).await.map_err(GitError::Io)?;
+            *begun = true;
         }
         Ok(())
+    }
+    /// Report a failure to the client, best effort: band 3 once lines are sideband framed
+    /// (sideband-all, or inside the packfile section), else an `ERR` pkt-line, which git prints
+    /// as `remote error: …`.
+    async fn fail(&mut self, msg: &str) {
+        if let PackOut::Sideband {
+            sb, sb_all, begun, ..
+        } = self
+        {
+            let msg = format!("floe: {msg}\n");
+            if *sb_all || *begun {
+                let _ = sb.write_error(msg.as_bytes()).await;
+            } else {
+                let _ = pkt::write_pkt_line(sb.inner_mut(), format!("ERR {msg}").as_bytes()).await;
+            }
+            let _ = sb.inner_mut().flush().await;
+        }
     }
     async fn data(&mut self, chunk: &[u8]) -> Result<(), GitError> {
         match self {

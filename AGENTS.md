@@ -307,7 +307,10 @@ decision in §4 — or the PR is; never "fix later".
   UI assets precompressed at build; store objects never compressed at request time).
 - **D11** Too-large repos are served, not refused: remote reader for the web API; clones via bundle-uri; refs from
   the WAL. Object work returns 503 when remote objects are disabled or the repository is excluded from this host's
-  serving placement (D30).
+  serving placement (D30). *(2026-10-09)* A fetch over a remote-served base faults at most a quarter of the
+  cache budget into the local copy (`Faulter::with_limit`) and in batches of ≤ 64 MiB of decoded objects;
+  beyond it the client gets `ERR` with the bundle-uri fix. A zero-have clone of a repository bigger than
+  the cache once filled a 6 GiB cache volume and OOM-killed a 2 GiB pod.
 - **D12** Auth is `none` | `token` | `oidc` (§1.3). `oidc` is generic OpenID Connect through discovery; the
   floe-issued access token (`wgt_…`, HMAC, stateless, `/_auth/tokens`) is the credential git uses, so no client
   needs a vendor CLI to mint tokens. An edge that wants to do auth itself uses `auth_request /_auth/check`

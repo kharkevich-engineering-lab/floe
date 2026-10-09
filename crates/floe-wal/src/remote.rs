@@ -756,7 +756,9 @@ pub struct Faulter {
     packs: Arc<RemotePacks>,
     local: floe_git::LocalRepo,
     batch_bytes: u64,
+    limit: Option<u64>,
     faulted: AtomicU64,
+    faulted_bytes: AtomicU64,
     rounds: AtomicU64,
     peak_batch_bytes: AtomicU64,
 }
@@ -783,10 +785,22 @@ impl Faulter {
             packs,
             local,
             batch_bytes,
+            limit: None,
             faulted: AtomicU64::new(0),
+            faulted_bytes: AtomicU64::new(0),
             rounds: AtomicU64::new(0),
             peak_batch_bytes: AtomicU64::new(0),
         }
+    }
+
+    /// Refuse to fault more than `limit` decoded bytes in total (`None` = unbounded). Faulted
+    /// objects land in the local loose store, so a zero-have clone of a repository that does not
+    /// fit the cache would otherwise write the whole repository to this instance's disk (a 6 GiB
+    /// cache volume filled by one clone of a 5.4 GiB repository, AGENTS.md §1.1).
+    #[must_use]
+    pub fn with_limit(mut self, limit: Option<u64>) -> Self {
+        self.limit = limit;
+        self
     }
 
     /// `(objects faulted, fault rounds)` so far.
@@ -809,6 +823,16 @@ impl Faulter {
         batch: &[gix_hash::ObjectId],
         bytes: u64,
     ) -> Result<usize, floe_git::GitError> {
+        let total = self.faulted_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        if let Some(limit) = self.limit.filter(|l| total > *l) {
+            return Err(floe_git::GitError::Protocol(format!(
+                "this fetch needs more than {} of objects this instance does not hold (the \
+                 repository's packs do not fit its cache). Clone with bundle-uri \
+                 (`git -c transfer.bundleURI=true clone …`, the recipe in the Clone menu), or fetch \
+                 bounded (`--depth`, `--filter=blob:none`)",
+                human_bytes(limit)
+            )));
+        }
         self.peak_batch_bytes.fetch_max(bytes, Ordering::Relaxed);
         let results = futures::future::join_all(batch.iter().map(|oid| self.packs.find(oid))).await;
         let mut found = Vec::with_capacity(batch.len());

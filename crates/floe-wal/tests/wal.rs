@@ -2221,7 +2221,8 @@ async fn faulting_large_objects_holds_one_bounded_batch_at_a_time() {
     assert!(peak > 0 && peak <= bound, "peak {peak} within {bound}");
 
     // A bound below one object still makes progress, one object per batch.
-    let faulter = floe_wal::remote::Faulter::with_batch_bytes(reader, handle2.local().clone(), 1);
+    let faulter =
+        floe_wal::remote::Faulter::with_batch_bytes(reader.clone(), handle2.local().clone(), 1);
     assert_eq!(
         floe_git::ObjectFaulter::fault(&faulter, &blobs)
             .await
@@ -2229,6 +2230,16 @@ async fn faulting_large_objects_holds_one_bounded_batch_at_a_time() {
         8
     );
     assert_eq!(faulter.peak_batch_bytes(), 16 * 1024);
+
+    // A per-fetch limit refuses a fetch that would fault more than it, with the fix.
+    let faulter =
+        floe_wal::remote::Faulter::with_batch_bytes(reader, handle2.local().clone(), bound)
+            .with_limit(Some(3 * 16 * 1024));
+    let err = floe_git::ObjectFaulter::fault(&faulter, &blobs)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("bundle-uri"), "{err}");
 }
 
 /// A long-lived read guard (a clone streaming for minutes) plus a pack
