@@ -664,17 +664,13 @@ fn enumerate(
     // Wants: commits walk, tags peel, trees/blobs direct.
     let mut commit_wants = Vec::new();
     for w in &req.wants {
-        match repo.objects.try_header(w).map_err(GitError::Gix)? {
+        match repo.objects.try_header(w).map_err(ge)? {
             Some(h) if h.kind == ObjKind::Commit => commit_wants.push(*w),
             Some(h) if h.kind == ObjKind::Tag => {
                 set.insert(*w);
                 let mut cur = *w;
                 loop {
-                    let Some(obj) = repo
-                        .objects
-                        .try_find(&cur, &mut buf)
-                        .map_err(GitError::Gix)?
-                    else {
+                    let Some(obj) = repo.objects.try_find(&cur, &mut buf).map_err(ge)? else {
                         missing.push(cur);
                         break;
                     };
@@ -746,11 +742,7 @@ fn enumerate(
             // Tree of the commit and of each parent (parents that are hidden
             // or already sent both count as "the client has it").
             let (tree_id, parent_ids) = {
-                let Some(obj) = repo
-                    .objects
-                    .try_find(&cid, &mut buf)
-                    .map_err(GitError::Gix)?
-                else {
+                let Some(obj) = repo.objects.try_find(&cid, &mut buf).map_err(ge)? else {
                     missing.push(cid);
                     continue;
                 };
@@ -792,7 +784,7 @@ fn enumerate(
             let mut parent_trees: Vec<Old> = Vec::with_capacity(parent_ids.len());
             let mut deferred = false;
             for p in &parent_ids {
-                if let Some(obj) = repo.objects.try_find(p, &mut buf).map_err(GitError::Gix)? {
+                if let Some(obj) = repo.objects.try_find(p, &mut buf).map_err(ge)? {
                     match gix_object::CommitRefIter::from_bytes(obj.data, kind).tree_id() {
                         Ok(t) => parent_trees.push(Old::Tree(t)),
                         Err(e) => return Err(ge(e)),
@@ -874,7 +866,7 @@ fn tree_entries(
     buf: &mut Vec<u8>,
 ) -> Result<Option<Vec<Entry>>, GitError> {
     let kind = repo.object_hash();
-    let Some(obj) = repo.objects.try_find(oid, buf).map_err(GitError::Gix)? else {
+    let Some(obj) = repo.objects.try_find(oid, buf).map_err(ge)? else {
         return Ok(None);
     };
     if obj.kind != ObjKind::Tree {
@@ -1062,6 +1054,7 @@ mod frozen_source_tests {
         let store = std::sync::Arc::new(
             gix_odb::Store::at_opts(
                 dir.join("objects"),
+                gix_hash::Kind::Sha1,
                 &mut std::iter::empty(),
                 gix_odb::store::init::Options::default(),
             )

@@ -1310,7 +1310,9 @@ async fn maintainer_builds_and_publishes_missing_rev_indexes() -> anyhow::Result
     step!("sync other", h2.sync())?;
     let rev2 = h2
         .local()
-        .pack_path(&gix_hash::ObjectId::from_hex(sha.as_bytes())?)
+        .pack_path(
+            &gix_hash::ObjectId::from_hex(sha.as_bytes()).map_err(floe_git::Exn::into_error)?,
+        )
         .with_extension("rev");
     assert!(!rev2.exists());
 
@@ -1329,7 +1331,9 @@ async fn maintainer_builds_and_publishes_missing_rev_indexes() -> anyhow::Result
     );
     assert!(
         h.local()
-            .pack_path(&gix_hash::ObjectId::from_hex(sha.as_bytes())?)
+            .pack_path(
+                &gix_hash::ObjectId::from_hex(sha.as_bytes()).map_err(floe_git::Exn::into_error)?
+            )
             .with_extension("rev")
             .exists()
     );
@@ -1361,7 +1365,10 @@ async fn maintainer_builds_and_publishes_missing_rev_indexes() -> anyhow::Result
         std::fs::read(&rev2)?,
         std::fs::read(
             h.local()
-                .pack_path(&gix_hash::ObjectId::from_hex(sha.as_bytes())?)
+                .pack_path(
+                    &gix_hash::ObjectId::from_hex(sha.as_bytes())
+                        .map_err(floe_git::Exn::into_error)?
+                )
                 .with_extension("rev")
         )?
     );

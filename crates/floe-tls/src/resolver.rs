@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use rustls::crypto::CryptoProvider;
+use rustls::pki_types::pem::{self, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -49,16 +50,17 @@ pub fn provider() -> Arc<CryptoProvider> {
 /// Parse a PEM chain (leaf first) and its private key; refuse a key that does not belong to
 /// the leaf, an empty chain, or a leaf that does not parse as X.509.
 pub fn load_pem(cert_pem: &str, key_pem: &str) -> Result<Loaded> {
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<Result<_, _>>()
         .context("parsing TLS certificate PEM")?;
     let leaf = certs
         .first()
         .context("TLS certificate PEM holds no certificate")?
         .clone();
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-        .context("parsing TLS private key PEM")?
-        .context("TLS key PEM holds no private key")?;
+    let key: PrivateKeyDer<'static> = match PrivateKeyDer::from_pem_slice(key_pem.as_bytes()) {
+        Err(pem::Error::NoItemsFound) => anyhow::bail!("TLS key PEM holds no private key"),
+        r => r.context("parsing TLS private key PEM")?,
+    };
     let signing = provider()
         .key_provider
         .load_private_key(key)
@@ -224,7 +226,7 @@ pub(crate) mod tests {
     /// Client trusting exactly the certificate it expects, then the next one.
     async fn fingerprint_seen(addr: std::net::SocketAddr, trust_pem: &str) -> Option<String> {
         let mut roots = rustls::RootCertStore::empty();
-        for c in rustls_pemfile::certs(&mut trust_pem.as_bytes()) {
+        for c in CertificateDer::pem_slice_iter(trust_pem.as_bytes()) {
             roots.add(c.unwrap()).unwrap();
         }
         let cfg = rustls::ClientConfig::builder_with_provider(provider())
