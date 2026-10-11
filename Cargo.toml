@@ -112,15 +112,15 @@ tower-http = { version = "0.7", features = ["trace", "compression-gzip", "compre
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
-gix = { version = "0.88", default-features = false, features = ["sha1", "sha256", "max-performance-safe", "blocking-network-client", "parallel", "revision", "interrupt", "worktree-mutation", "index"] }
-gix-pack = { version = "0.75", features = ["streaming-input", "object-cache-dynamic", "generate"] }
-gix-hash = { version = "0.27", features = ["sha1", "sha256"] }
-gix-object = "0.65"
+gix = { version = "0.89", default-features = false, features = ["sha1", "sha256", "max-performance-safe", "blocking-network-client", "parallel", "revision", "interrupt", "worktree-mutation", "index"] }
+gix-pack = { version = "0.76", features = ["streaming-input", "object-cache-dynamic", "generate"] }
+gix-hash = { version = "0.28", features = ["sha1", "sha256"] }
+gix-object = "0.66"
 gix-features = { version = "0.50", features = ["parallel", "walkdir", "progress"] }
-gix-odb = "0.85"
-gix-traverse = "0.62"
-gix-date = "0.17"
-gix-actor = "0.43"
+gix-odb = "0.86"
+gix-traverse = "0.63"
+gix-date = "0.18"
+gix-actor = "0.44"
 google-cloud-storage = "1"
 google-cloud-gax = "1"
 google-cloud-auth = "1"
@@ -177,7 +177,7 @@ reqsign-core = "3"
 # MCP server (D55; floe-server's `mcp` feature only, never in the default build). Pinned exactly:
 # rmcp moves fast (3.0 → 3.5 in two months) and its stateless 2026-07-28 transport is what the
 # per-repo endpoint relies on (docs/design/spikes/rmcp-request-parts.md).
-rmcp = { version = "=3.5.0", default-features = false, features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
 # TLS (in-process termination)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "logging", "ring"] }
