@@ -45,12 +45,12 @@ jobs:
         with:
           fetch-depth: 0
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - name: Dry-run semantic-release
         id: next
-        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
+        uses: cycjimmy/semantic-release-action@9e1f8a3ef91f1097285028e799a5fb8bb90e8899 # v8.1.0
         with:
           dry_run: true
           # Exactly the versions of the real run below (keep the two blocks identical):
@@ -167,7 +167,7 @@ jobs:
           (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
           cat "dist/${name}.tar.gz.sha256"
       - name: Upload the tarball
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tarball-${{ matrix.target }}
           path: |
@@ -182,7 +182,7 @@ jobs:
           mkdir -p "${{ runner.temp }}/digests"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
       - name: Upload the image digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digest-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
@@ -206,12 +206,12 @@ jobs:
         with:
           fetch-depth: 0
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       # Into dist/, where release.sh checks them and .releaserc's assets pick them up.
       - name: Collect the tarballs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: tarball-*
           merge-multiple: true
@@ -220,7 +220,7 @@ jobs:
         run: ls -l dist/
       - name: Run semantic-release
         id: release
-        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
+        uses: cycjimmy/semantic-release-action@9e1f8a3ef91f1097285028e799a5fb8bb90e8899 # v8.1.0
         with:
           # Pinned identically to the dry run in the `version` job.
           semantic_version: 25.0.9
@@ -258,7 +258,7 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - name: Collect the digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: digest-*
           merge-multiple: true
