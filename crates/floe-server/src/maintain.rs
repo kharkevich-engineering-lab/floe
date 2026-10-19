@@ -16,11 +16,12 @@
 //! `unavailable` (not an error); a unit this host cannot hold is `wrong-host`
 //! and left to the host that can (`[maintenance] max_pack_bytes`, `disk`).
 //! Each pass writes a heartbeat (`maintain/<host>.pb`) so the plan shows who
-//! maintains a repository and whether that host is alive.
+//! maintains a repository and whether that host is alive. A unit that fails is
+//! deferred on this instance ([`Backoff`]) and the units below it run meanwhile.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use floe_bundle::slots::{PlanContext, SlotStatus};
 use floe_git::RepoId;
@@ -141,6 +142,60 @@ pub enum Unit {
     NotAssigned,
 }
 
+/// Units that failed on this instance, by repository and [`unit_key`]: each is skipped by
+/// [`next_unit`] until its retry time, so the next unit in the priority order runs meanwhile. A
+/// weekly that could not be composed once took every pass of nine repositories for a week, and
+/// nothing below it (dailies, compaction, rev-index, the fsck audit) ran. In memory: a restart
+/// retries at once, and a success clears the entry.
+#[derive(Default)]
+pub struct Backoff(parking_lot::Mutex<HashMap<(RepoId, String), (Instant, u32)>>);
+
+/// First retry delay of a failed unit; doubles per consecutive failure up to [`BACKOFF_MAX`].
+const BACKOFF_BASE: Duration = Duration::from_mins(2);
+const BACKOFF_MAX: Duration = Duration::from_hours(1);
+
+impl Backoff {
+    /// Whether `unit` is deferred for `id` right now.
+    pub fn deferred(&self, id: &RepoId, unit: &Unit) -> bool {
+        self.0
+            .lock()
+            .get(&(id.clone(), unit_key(unit)))
+            .is_some_and(|(until, _)| Instant::now() < *until)
+    }
+
+    /// Record the outcome of `unit`: a success clears it, a failure defers it (returned).
+    pub fn record(&self, id: &RepoId, unit: &Unit, ok: bool) -> Option<Duration> {
+        let key = (id.clone(), unit_key(unit));
+        let mut map = self.0.lock();
+        if ok {
+            map.remove(&key);
+            return None;
+        }
+        let failures = map.get(&key).map_or(0, |(_, n)| *n) + 1;
+        let delay = BACKOFF_BASE
+            .saturating_mul(1 << (failures - 1).min(16))
+            .min(BACKOFF_MAX);
+        map.insert(key, (Instant::now() + delay, failures));
+        Some(delay)
+    }
+}
+
+/// What identifies a unit across passes: its kind, and the strategy and slot of a bundle unit
+/// (a checkpoint's trigger or an audit's reason changes from pass to pass).
+fn unit_key(unit: &Unit) -> String {
+    match unit {
+        Unit::BundleSlot(s, slot) => format!("bundle:{s}:{slot}"),
+        Unit::BaseRebuild(s, slot) => format!("base-rebuild:{s}:{slot}"),
+        Unit::RevIndex(pack) => format!("rev-index:{pack}"),
+        Unit::Checkpoint(_) => "checkpoint".into(),
+        Unit::Compact => "compact".into(),
+        Unit::Repair(_) => "repair".into(),
+        Unit::Fsck(_) => "fsck".into(),
+        Unit::Idle => "idle".into(),
+        Unit::NotAssigned => "not-assigned".into(),
+    }
+}
+
 /// Packs with at least this many objects get a `.rev` side-file (≈ 50 ns per
 /// object per `pack-objects` without one: 60 M → 2.85 s, 250 k → 12 ms).
 pub const REV_INDEX_MIN_OBJECTS: u64 = 250_000;
@@ -250,6 +305,7 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
     }
     let handle = state.registry.open(id).await?;
     handle.sync_refs().await?;
+    let ready = |unit: &Unit| !state.maintain_backoff.deferred(id, unit);
     // D24: the repository's effective config (host ⊕ settings) decides what is
     // due; host-level facts (roles, assignment, capacity) stay the host's.
     let cfg = handle.effective_config();
@@ -279,6 +335,7 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
     }
     if cfg.maintenance.checkpoints
         && let Some(trigger) = handle.checkpoint_due()
+        && ready(&Unit::Checkpoint(String::new()))
     {
         return Ok(Unit::Checkpoint(trigger.to_string()));
     }
@@ -295,7 +352,11 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
             f.missing_total as f64
         };
         metrics::gauge!("floe_repo_missing_objects", "repo" => id.to_string()).set(missing);
-        if !f.missing.is_empty() && f.repaired_seq == 0 && cfg.upstream.git.is_some() {
+        if !f.missing.is_empty()
+            && f.repaired_seq == 0
+            && cfg.upstream.git.is_some()
+            && ready(&Unit::Repair(0))
+        {
             return Ok(Unit::Repair(f.missing_total));
         }
     }
@@ -372,11 +433,16 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
                                 || base_predates_window(&handle, strat, r.slot, base.seq).await
                         }
                     };
-                    if holds && due {
-                        return Ok(Unit::BaseRebuild(strat.name.clone(), r.slot));
+                    let unit = Unit::BaseRebuild(strat.name.clone(), r.slot);
+                    if holds && due && ready(&unit) {
+                        return Ok(unit);
                     }
                 }
-                return Ok(Unit::BundleSlot(strat.name.clone(), r.slot));
+                // A deferred slot passes the turn to the next strategy, then to the units below.
+                let unit = Unit::BundleSlot(strat.name.clone(), r.slot);
+                if ready(&unit) {
+                    return Ok(unit);
+                }
             }
         }
     }
@@ -384,6 +450,7 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
         && state.cfg.has_role(floe_config::Role::Compact)
         && handle.packs_fit()
         && crate::ops::compaction_triggered(&handle, &cfg)
+        && ready(&Unit::Compact)
     {
         return Ok(Unit::Compact);
     }
@@ -398,6 +465,7 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
             .packs
             .iter()
             .filter(|p| !p.has_rev && p.object_count >= REV_INDEX_MIN_OBJECTS)
+            .filter(|p| ready(&Unit::RevIndex(p.checksum.clone())))
             .min_by_key(|p| p.seq)
             && let Ok(oid) = gix_hash::ObjectId::from_hex(p.checksum.as_bytes())
             && handle.local().pack_path(&oid).exists()
@@ -422,7 +490,9 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
                 (age >= interval).then(|| format!("last audit {}h ago", age.as_secs() / 3600))
             }
         };
-        if let Some(why) = due {
+        if let Some(why) = due
+            && ready(&Unit::Fsck(String::new()))
+        {
             return Ok(Unit::Fsck(why));
         }
     }
@@ -689,6 +759,9 @@ pub async fn run_pass(state: &Arc<AppState>) -> anyhow::Result<PassReport> {
                 report.last_unit = Some(format!("{id} {unit:?}"));
             } else {
                 report.skipped += 1;
+            }
+            if let Some(retry_in) = state.maintain_backoff.record(&id, &unit, done) {
+                warn!(repo = %id, unit = %unit_key(&unit), retry_in = ?retry_in, "maintenance: unit failed; deferred, the units below it run meanwhile");
             }
             let was_bundle = matches!(unit, Unit::BundleSlot(..));
             if done

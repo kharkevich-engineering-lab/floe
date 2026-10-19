@@ -238,7 +238,10 @@ of (config, WAL state)**. The maintainer does not run schedules; it computes the
 performs **one bounded unit of the most important missing work** (checkpoint → repair → missing weekly → missing
 dailies oldest-first → missing hourlies → compaction → rev-index → fsck audit), as a task, under a lease. An outage
 of any length leaves no permanent hole; a deleted or corrupt artefact is "missing" and rebuilt identically; config
-changes take effect by re-planning; there are no one-off backfill scripts.
+changes take effect by re-planning; there are no one-off backfill scripts. *(2026-10-18)* A unit that fails is
+deferred on that instance (2 min, doubling to 1 h; in memory, cleared by a success) and the next unit in the order
+runs meanwhile: one weekly that could not be composed held every pass of nine imported repositories for a week, and
+nothing below it ran. The weekly's refs at an imported base's seq now come from the checkpoint history (D47).
 
 ### 2.6 Bundles (bundle-uri): move clone bytes to static files — **the north star** (`docs/BUNDLE_URI_DESIGN.md`)
 - Strategies (config, D21/D22): **weekly full** (for a big repo = base pack ∘ header via store-side compose — GCS

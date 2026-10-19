@@ -141,26 +141,26 @@ pub async fn refs_as_of(
     handle: &super::handle::RepoHandle,
     at: std::time::SystemTime,
 ) -> Result<(floe_proto::v1::RefSnapshot, u64), WalError> {
-    replay_refs(handle, Cut::Time(at)).await
+    let start = handle.manifest().checkpoint.clone();
+    replay_refs(handle, Cut::Time(at), start).await
 }
 
 /// Ref state **at** WAL `seq` exactly (the newest checkpoint at or before it + every ref
-/// transaction through `seq`, in memory). `Err(Corrupt)` when the log before the only checkpoint
-/// is folded away (`min_seq > seq`): that state is no longer replayable. Used by the weekly
-/// compose, whose header must carry the refs at the base pack's seq whatever moved since.
+/// transaction through `seq`, in memory). Used by the weekly compose, whose header must carry the
+/// refs at the base pack's seq whatever moved since. A `seq` the current checkpoint already
+/// folded is replayed from the checkpoint history (D47: each checkpoint names its predecessor and
+/// the log segments it folded) — an imported base sits below the first checkpoint, and refusing
+/// it once left every imported repository on its first weekly bundle (2026-10-18). `Err(Corrupt)`
+/// only when that history is gone.
 pub async fn refs_at_seq(
     handle: &super::handle::RepoHandle,
     seq: u64,
 ) -> Result<floe_proto::v1::RefSnapshot, WalError> {
-    let manifest = handle.manifest();
-    let cp_ok = manifest.checkpoint.as_ref().is_some_and(|cp| cp.seq <= seq);
-    if !cp_ok && manifest.min_seq > 1 && manifest.min_seq > seq {
-        return Err(WalError::Corrupt(format!(
-            "refs at seq {seq} are not replayable: log folded up to {} and no checkpoint at or before",
-            manifest.min_seq
-        )));
+    let mut start = handle.manifest().checkpoint.clone();
+    while let Some(cp) = start.as_ref().filter(|cp| cp.seq > seq) {
+        start = read_checkpoint(handle, cp).await?.previous;
     }
-    Ok(replay_refs(handle, Cut::Seq(seq)).await?.0)
+    Ok(replay_refs(handle, Cut::Seq(seq), start).await?.0)
 }
 
 enum Cut {
@@ -171,6 +171,7 @@ enum Cut {
 async fn replay_refs(
     handle: &super::handle::RepoHandle,
     cut: Cut,
+    start: Option<floe_proto::v1::CheckpointRef>,
 ) -> Result<(floe_proto::v1::RefSnapshot, u64), WalError> {
     use floe_store::ObjectStoreExt;
     use prost::Message;
@@ -179,7 +180,7 @@ async fn replay_refs(
     // the ref has no timestamp, fall back to replaying from seq 0).
     let mut snap = floe_proto::v1::RefSnapshot::default();
     let mut from_seq = 0u64;
-    if let Some(cp) = manifest.checkpoint.as_ref() {
+    if let Some(cp) = start.as_ref() {
         // A checkpoint holds the state as of its newest folded entry (`as_of`),
         // not its write time: usable for any cut at or after that instant. The
         // times come from the manifest ref, else from the checkpoint object
@@ -214,7 +215,12 @@ async fn replay_refs(
         Cut::Seq(seq) => Some(seq),
         Cut::Time(_) => None,
     };
-    let entries = handle.read_log(from_seq + 1, to_seq).await?;
+    // An exact seq may lie below the manifest's log (`refs_at_seq` started from an older
+    // checkpoint): read through the checkpoint history; it fails loudly where that is gone.
+    let entries = match cut {
+        Cut::Seq(_) => handle.read_log_retained(from_seq + 1, to_seq).await?,
+        Cut::Time(_) => handle.read_log(from_seq + 1, to_seq).await?,
+    };
     let mut map: std::collections::BTreeMap<String, floe_proto::v1::Ref> =
         snap.refs.into_iter().map(|r| (r.name.clone(), r)).collect();
     let mut head_target = snap.head_target;

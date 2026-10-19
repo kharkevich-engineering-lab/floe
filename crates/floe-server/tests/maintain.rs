@@ -2021,7 +2021,9 @@ async fn maintainer_pass_brings_an_overgrown_bundle_list_to_retention() -> anyho
 }
 
 /// A base older than the current checkpoint used to select a failing weekly
-/// bundle forever, leaving thousands of fresh packs uncompacted.
+/// bundle forever, leaving thousands of fresh packs uncompacted. The refs at the
+/// base's seq now come from the checkpoint history (D47), so the weekly composes;
+/// with that history gone the weekly fails and is deferred, and compaction runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn facade_config_compacts_when_base_refs_are_outside_checkpoint_window() -> anyhow::Result<()>
 {
@@ -2068,6 +2070,7 @@ async fn facade_config_compacts_when_base_refs_are_outside_checkpoint_window() -
     let base = floe_wal::base_pack(&handle.manifest())
         .expect("base pack")
         .clone();
+    let base_head = git_in(src.path(), &["rev-parse", "HEAD"])?;
     for i in 0..3 {
         std::fs::write(
             src.path().join(format!("page{i}.mdx")),
@@ -2082,8 +2085,11 @@ async fn facade_config_compacts_when_base_refs_are_outside_checkpoint_window() -
     }
     step!("checkpoint", handle.write_checkpoint())?;
     assert!(handle.manifest().min_seq > base.seq);
-    assert!(step!("old base refs", handle.refs_at_seq(base.seq)).is_err());
-    // The old configuration repeatedly chooses the unbuildable weekly bundle.
+    let at_base = step!("old base refs", handle.refs_at_seq(base.seq))?;
+    let main = at_base.refs.iter().find(|r| r.name == "refs/heads/main");
+    assert_eq!(main.map(|r| r.oid.as_str()), Some(base_head.trim()));
+
+    // The weekly composes the base under the refs at its seq.
     let enabled = step!(
         "bundles enabled",
         server.start_sibling_with(|c| {
@@ -2091,17 +2097,55 @@ async fn facade_config_compacts_when_base_refs_are_outside_checkpoint_window() -
             c.bundles.enabled = true;
         })
     )?;
-    assert!(matches!(
-        step!("blocked unit", next_unit(&enabled.state, &id))?,
-        Unit::BundleSlot(..)
-    ));
-    let blocked = step!("blocked pass", run_pass(&enabled.state))?;
-    assert_eq!(blocked.compactions, 0, "{blocked:?}");
-    assert_eq!(blocked.skipped, 1, "{blocked:?}");
-    assert!(matches!(
-        step!("still blocked", next_unit(&enabled.state, &id))?,
-        Unit::BundleSlot(..)
-    ));
+    let weekly = step!("weekly unit", next_unit(&enabled.state, &id))?;
+    assert!(matches!(weekly, Unit::BundleSlot(..)), "{weekly:?}");
+    let built = step!("weekly pass", run_pass(&enabled.state))?;
+    assert_eq!(built.bundles, 1, "{built:?}");
+    assert_ne!(
+        step!("after weekly", next_unit(&enabled.state, &id))?,
+        weekly
+    );
+
+    // With the folded history gone the weekly cannot be composed: it fails loudly once, is
+    // deferred, and the units below it run instead of the same failure every pass.
+    let store = floe_store::Prefixed::new(server.state.registry.store().clone(), id.store_prefix());
+    let logs: Vec<_> = {
+        use floe_store::ObjectStore;
+        use futures::StreamExt;
+        store.list("log/", None).collect().await
+    };
+    for meta in logs {
+        step!(
+            "delete log",
+            floe_store::ObjectStore::delete(&store, &meta?.key, None)
+        )?;
+    }
+    let lost = step!(
+        "history lost",
+        server.start_sibling_with(|c| {
+            configure(c);
+            c.bundles.enabled = true;
+            c.bundles
+                .strategy
+                .retain(|s| s.kind == floe_config::BundleKind::Full);
+        })
+    )?;
+    let lost_handle = step!("open lost", lost.state.registry.open(&id))?;
+    assert!(step!("refs gone", lost_handle.refs_at_seq(base.seq)).is_err());
+    step!(
+        "drop weekly",
+        floe_bundle::ops::cas_update_list(&store, 5, |_| Ok(Some(
+            floe_proto::v1::BundleList::default()
+        )))
+    )?;
+    let weekly = step!("weekly again", next_unit(&lost.state, &id))?;
+    assert!(matches!(weekly, Unit::BundleSlot(..)), "{weekly:?}");
+    let failed = step!("failed pass", run_pass(&lost.state))?;
+    assert_eq!(failed.skipped, 1, "{failed:?}");
+    assert_eq!(
+        step!("deferred", next_unit(&lost.state, &id))?,
+        Unit::Compact
+    );
 
     let packs_before = handle.manifest().packs.len();
     assert_eq!(
