@@ -1,5 +1,5 @@
 file src/router.rs lang=rust flags= size=784 lines=47
-extractor ts-tags/1;cast/2;rust=0.24.2@fb314420
+extractor ts-tags/2;cast/2;rust=0.24.2@fb314420
 def #0 const MAX_ROUTES @4:11-4:21 body=4-4 parent=- in="" flags=1 sig="pub const MAX_ROUTES: usize = 64;" doc=""
 def #1 struct Router @7:12-7:18 body=7-9 parent=- in="" flags=1 sig="pub struct Router {" doc=""
 def #2 enum Method @11:10-11:16 body=11-14 parent=- in="" flags=1 sig="pub enum Method {" doc=""

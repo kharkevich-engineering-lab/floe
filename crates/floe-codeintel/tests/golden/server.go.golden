@@ -1,5 +1,5 @@
 file server/server.go lang=go flags= size=532 lines=32
-extractor ts-tags/1;cast/2;go=0.25.0@c84950c8
+extractor ts-tags/2;cast/2;go=0.25.0@c84950c8
 def #0 const DefaultPort @6:7-6:18 body=6-6 parent=- in="" flags=1 sig="const DefaultPort = 8080" doc=""
 def #1 struct Server @10:6-10:12 body=10-12 parent=- in="" flags=1 sig="type Server struct {" doc=""
 def #2 interface Handler @14:6-14:13 body=14-16 parent=- in="" flags=1 sig="type Handler interface {" doc=""

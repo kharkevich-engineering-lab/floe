@@ -1,5 +1,5 @@
 file lib/util.js lang=javascript flags= size=328 lines=23
-extractor ts-tags/1;cast/2;javascript=0.25.0@b4ab3574
+extractor ts-tags/2;cast/2;javascript=0.25.0@b4ab3574
 def #0 function joinAll @7:10-7:17 body=7-9 parent=- in="" flags=0 sig="function joinAll(a, b) {" doc="Joins two segments."
 def #1 class Cache @11:7-11:12 body=11-19 parent=- in="" flags=0 sig="class Cache {" doc=""
 def #2 method get @16:3-16:6 body=16-18 parent=1 in="Cache" flags=0 sig="get(key) {" doc=""

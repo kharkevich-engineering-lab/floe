@@ -629,7 +629,8 @@ fn generate_pack_streaming(
             chunk_size,
             compression: gix::zlib::Compression::DEFAULT,
         },
-    );
+    )
+    .map_err(ge)?;
     let entries_in_order = gix_features::parallel::InOrderIter::from(entries);
     let pack_iter = FromEntriesIter::new(
         entries_in_order,
@@ -1102,7 +1103,10 @@ mod frozen_source_tests {
         let before: Vec<_> = blobs
             .iter()
             .map(|(oid, _)| {
-                let loc = frozen.location_by_oid(oid, &mut buf).expect("in a pack");
+                let loc = frozen
+                    .location_by_oid(oid, &mut buf)
+                    .expect("lookup")
+                    .expect("in a pack");
                 let data = frozen.entry_by_location(&loc).expect("entry").data;
                 (*oid, loc, data)
             })
@@ -1110,7 +1114,10 @@ mod frozen_source_tests {
         let plain_before: Vec<_> = blobs
             .iter()
             .map(|(oid, _)| {
-                let loc = plain.location_by_oid(oid, &mut buf).expect("in a pack");
+                let loc = plain
+                    .location_by_oid(oid, &mut buf)
+                    .expect("lookup")
+                    .expect("in a pack");
                 let data = plain.entry_by_location(&loc).expect("entry").data;
                 (*oid, loc, data)
             })
