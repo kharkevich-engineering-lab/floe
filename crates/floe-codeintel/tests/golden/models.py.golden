@@ -1,5 +1,5 @@
 file app/models.py lang=python flags= size=442 lines=29
-extractor ts-tags/1;cast/2;python=0.25.0@10c4c4ac
+extractor ts-tags/2;cast/2;python=0.25.0@10c4c4ac
 def #0 const VERSION @4:1-4:8 body=4-4 parent=- in="" flags=1 sig="VERSION = \"1.0\"" doc=""
 def #1 class User @7:7-7:11 body=7-20 parent=- in="" flags=1 sig="class User:" doc=""
 def #2 method __init__ @10:9-10:17 body=10-11 parent=1 in="User" flags=0 sig="def __init__(self, name):" doc=""

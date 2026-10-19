@@ -17,10 +17,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
-/// gix's error tree (gix 0.88+): fallible gix calls such as `ObjectId::from_hex` return an
-/// `Exn<_>`, which is not a `std::error::Error`; `.map_err(Exn::into_error)` makes it one
-/// without each dependent crate pinning its own gix-error.
-pub use gix::error::Exn;
 pub use gix_hash::{self, ObjectId};
 use gix_object::{FindExt, FindHeader, Kind as ObjKind};
 use gix_traverse::tree::Visit as TreeVisit;
@@ -63,8 +59,8 @@ pub enum GitError {
     Protocol(String),
 }
 
-/// Wrap a gix failure: a plain `std::error::Error`, or since gix 0.88 an `Exn<E>` (which is not
-/// an `Error` itself but converts into the boxed one, keeping its cause tree).
+/// Wrap a gix failure: a plain `std::error::Error`, or an `Exn<E>` (which is not an `Error`
+/// itself but converts into the boxed one, keeping its cause tree).
 fn ge(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> GitError {
     GitError::Gix(e.into())
 }

@@ -464,7 +464,7 @@ fn java_classes_methods_and_interfaces() {
 fn text_files_are_windowed_without_definitions() {
     let (_, f) = extract("notes.md");
     assert_eq!(f.lang, Lang::Text);
-    assert_eq!(f.extractor, "ts-tags/1;cast/2;text");
+    assert_eq!(f.extractor, "ts-tags/2;cast/2;text");
     assert!(f.defs.is_empty() && f.refs.is_empty());
     assert_eq!(f.chunks.len(), 1);
     assert_eq!(

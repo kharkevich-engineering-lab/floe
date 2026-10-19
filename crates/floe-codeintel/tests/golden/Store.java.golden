@@ -1,5 +1,5 @@
 file src/main/java/com/acme/Store.java lang=java flags= size=539 lines=31
-extractor ts-tags/1;cast/2;java=0.23.5@25c8b1f6
+extractor ts-tags/2;cast/2;java=0.23.5@25c8b1f6
 def #0 class Store @7:14-7:19 body=7-27 parent=- in="" flags=1 sig="public class Store implements Closeable {" doc=""
 def #1 method Store @10:12-10:17 body=10-11 parent=0 in="Store" flags=1 sig="public Store() {" doc=""
 def #2 method get @13:19-13:22 body=13-15 parent=0 in="Store" flags=1 sig="public String get(String key) {" doc=""
