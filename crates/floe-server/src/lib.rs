@@ -76,6 +76,8 @@ pub struct AppState {
     pub bridge: Option<Arc<bridge::Bridge>>,
     /// Last upstream-follow round per repository on this instance (`[upstream] follow`).
     pub follow: follow::FollowStatuses,
+    /// Maintainer units that failed on this instance, deferred so the units below them still run.
+    pub maintain_backoff: maintain::Backoff,
     /// In-process TLS (D39, D59: `files` or `acme`); `None` behind an edge (h2c).
     pub tls: Option<Arc<tls::Tls>>,
     /// Lossy catalog telemetry (`sync_runs`/`repo_inventory`, D50): the writer
@@ -182,6 +184,7 @@ impl AppState {
             readiness: prewarm::Readiness::new(),
             bridge,
             follow: follow::FollowStatuses::default(),
+            maintain_backoff: maintain::Backoff::default(),
             tls,
             recorder,
             catalog,
