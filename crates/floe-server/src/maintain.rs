@@ -430,7 +430,8 @@ pub async fn next_unit(state: &Arc<AppState>, id: &RepoId) -> anyhow::Result<Uni
                         Some(base) => {
                             bases.len() > 1
                                 || !base.has_bitmap
-                                || base_predates_window(&handle, strat, r.slot, base.seq).await
+                                || (objects_beside_base(&m, &base)
+                                    && base_predates_window(&handle, strat, r.slot, base.seq).await)
                         }
                     };
                     let unit = Unit::BaseRebuild(strat.name.clone(), r.slot);
@@ -507,6 +508,18 @@ const SKIP_THROUGH_MAX: u32 = 48;
 /// repository's first state); the WAL seq as of that instant is the bar.
 /// `base_seq ≤ bar` ⇒ rebuild. Pushes that land *during* a rebuild do not
 /// re-trigger one (the new base's seq is above the bar); next week's slot does.
+/// Whether a live pack other than `base` and its history pack (D18) exists: only such objects can
+/// make a rebuilt base differ. Without them (an imported repository nobody pushed to since) the
+/// rebuild writes the same pack, publishes nothing and leaves the base as old, so it was due again
+/// on every pass and the weekly slot never composed (2026-10-19).
+fn objects_beside_base(m: &floe_proto::v1::Manifest, base: &floe_proto::v1::PackRef) -> bool {
+    m.packs.iter().any(|p| {
+        p.checksum != base.checksum
+            && !(p.kind == floe_proto::v1::PackKind::History as i32
+                && p.derived_from == base.checksum)
+    })
+}
+
 async fn base_predates_window(
     handle: &floe_wal::RepoHandle,
     strat: &floe_config::BundleStrategy,
@@ -897,5 +910,39 @@ async fn run_op_value(
             None
         }
         None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use floe_proto::v1::{Manifest, PackKind, PackRef};
+
+    fn pack(checksum: &str, tier: u32, kind: PackKind, derived_from: &str) -> PackRef {
+        PackRef {
+            checksum: checksum.into(),
+            tier,
+            kind: kind as i32,
+            derived_from: derived_from.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_packs_beside_the_base_and_its_history_make_a_rebuild_useful() {
+        let base = pack("b", 2, PackKind::Objects, "");
+        let history = pack("h", 2, PackKind::History, "b");
+        // An imported repository: base + its history pack, nothing pushed since.
+        let mut m = Manifest {
+            packs: vec![base.clone(), history],
+            ..Default::default()
+        };
+        assert!(!super::objects_beside_base(&m, &base));
+        // A push since the import.
+        m.packs.push(pack("p", 0, PackKind::Objects, ""));
+        assert!(super::objects_beside_base(&m, &base));
+        // A history pack of another (older) base is not this base's.
+        m.packs.pop();
+        m.packs.push(pack("h0", 2, PackKind::History, "old"));
+        assert!(super::objects_beside_base(&m, &base));
     }
 }
