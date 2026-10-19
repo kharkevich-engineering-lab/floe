@@ -674,6 +674,20 @@ impl RepoHandle {
         if self.level_satisfied(level) {
             return Ok(());
         }
+        // The materialization is detached from its caller: the bulk-runtime work does not stop
+        // when the caller is cancelled (a client hangs up), so neither may `pack_mutex` or the
+        // task. Released with the caller, they let the next caller start a second download into
+        // the same local copy while the first was still installing (nightly sim, 2026-10-09).
+        let Some(arc) = self.self_arc.get().cloned() else {
+            return self.materialize(level).await;
+        };
+        tokio::spawn(async move { arc.materialize(level).await }.in_current_span())
+            .await
+            .map_err(|e| WalError::Corrupt(format!("materialize task: {e}")))?
+    }
+
+    /// [`Self::sync_packs_phase`] under `pack_mutex`, as the `materialize` task.
+    async fn materialize(&self, level: SyncLevel) -> Result<(), WalError> {
         // A second caller of a running materialize waits here: the task join, measured.
         let _pack_guard = crate::lockwait::timed(
             "pack_mutex",

@@ -2609,8 +2609,9 @@ fn push_blobby(p: &mut Pusher, kb: usize, rng: &mut Lcg) -> String {
 /// RAII drop; cross-instance exclusivity is the GCS lease, not this registry), so "two
 /// instances" reduces to many concurrent callers on one instance plus a crash of whoever
 /// owns the materialize task. Asserted under randomized link faults: never more than one
-/// `materialize` running for the repo; an aborted owner releases the lock at once (the next
-/// caller starts its own task — nothing blocks forever); a late joiner's `attach()` replays
+/// `materialize` running for the repo; an aborted caller does not abort the materialization it
+/// started, which keeps the lock and its task until it ends (the next caller joins or starts
+/// after it — never a second download beside it, nothing blocks forever); a late joiner's `attach()` replays
 /// the story so far and sees the outcome; downloads are not multiplied by the callers.
 #[allow(
     clippy::many_single_char_names,
